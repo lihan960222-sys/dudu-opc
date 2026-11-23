@@ -19,7 +19,7 @@ def error(status, message):
     return HTTPException(status_code=status, detail=message)
 
 
-async def default_board(db, owner):
+async def default_board(db, owner, *, commit=True):
     await begin_write(db)
     query = select(WorkBoard).where(WorkBoard.owner_id == owner, WorkBoard.key == "default")
     board = await db.scalar(query)
@@ -37,7 +37,8 @@ async def default_board(db, owner):
             board = await db.scalar(query)
             if board is None:
                 raise
-    await db.commit()
+    if commit:
+        await db.commit()
     return board
 
 
@@ -107,6 +108,10 @@ async def update_item(db, owner, item_id, revision, changes):
     # Forms may submit all visible fields. An unchanged, now-deleted link is
     # retained; only choosing a different target requires it to exist today.
     changed_fields = {key for key, value in changes.items() if value != getattr(item, key)}
+    if changed_fields.intersection({'agent_id', 'thread_id', 'team_id'}):
+        from app.db.models.feature import FeatureScope
+        if await db.get(FeatureScope, item.id):
+            raise error(409, 'Feature assignment and session links are managed by the steward.')
     await validate_fields(db, owner, fields, changed_fields)
     if "title" in changes:
         changes["title"] = fields["title"].strip()

@@ -60,6 +60,7 @@ class Agent(Base):
     claude_account: Mapped[str | None] = mapped_column(String, nullable=True)
     # Null means the default workspace root, resolved when a thread is created.
     workspace_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    role_path: Mapped[str | None] = mapped_column(String, nullable=True)
     approval_mode: Mapped[str] = mapped_column(
         String, nullable=False, default="ask", server_default="ask"
     )

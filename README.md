@@ -1,5 +1,7 @@
 # Suparagent
 
+[Windows 单机飞书管家开发版 · 启动与配置](docs/STEWARD_WINDOWS_ZH.md)
+
 **A workspace for AI coworkers.**
 
 Create named agents, give each a job and workspace, and bring them together to

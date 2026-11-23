@@ -415,6 +415,80 @@ async def list_agents(include_archived: bool = False, rt: ThreadRuntime = Depend
     return await _with_computers(rt, agents)
 
 
+class RoleFolderRequest(BaseModel):
+    path: str | None = None
+
+
+@router.post("/{agent_id}/role-workspace", response_model=AgentResponse)
+async def configure_role(agent_id: int, payload: RoleFolderRequest, request: Request,
+                         rt: ThreadRuntime = Depends(get_runtime)):
+    from app.core import tenant_paths
+    from app.services import role_workspace
+    if _restricted(request) or tenant_paths.root() is not None:
+        raise _admin_only("role workspace")
+    async with rt.session() as db:
+        await begin_write(db)
+        agent = await store.get_agent(db, agent_id)
+        if agent is None or agent.owner_id != rt.owner_id:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if not agent.model:
+            raise _error(422, "role_model", "Choose and save a model before setting up the role folder.")
+        _check_engine(rt, agent.provider, agent.model)
+        folder = Path(payload.path or agent.workspace_path or agent_memory.agent_home(agent.id))
+        try:
+            if not payload.path and not agent.workspace_path:
+                folder.mkdir(parents=True, exist_ok=True)
+            role_workspace.checked_root(folder)
+            from sqlalchemy import select
+            paths = await db.scalars(select(store.Agent.role_path).where(
+                store.Agent.id != agent.id, store.Agent.role_path.is_not(None)))
+            paths = list(paths)
+            paths.extend(await db.scalars(select(store.Agent.workspace_path).where(
+                store.Agent.id != agent.id, store.Agent.workspace_path.is_not(None))))
+            if any(folder.is_relative_to(Path(p)) or Path(p).is_relative_to(folder) for p in paths):
+                raise ValueError("Choose a folder separate from every other role folder.")
+            role_workspace.initialize(folder, agent.model, agent.instructions)
+            config = role_workspace.load(folder)
+            await role_workspace.validate_model(rt, agent.provider, config.model)
+        except (ValueError, OSError, EngineModelInvalid) as exc:
+            raise _error(422, "role_folder", f"{agent.name}: {exc}") from None
+        agent.workspace_path = agent.role_path = str(folder.resolve())
+        await db.commit()
+        await db.refresh(agent)
+        return agent
+
+
+@router.get("/{agent_id}/role-workspace/files")
+async def role_files(agent_id: int, request: Request, task_id: str | None = None,
+                     rt: ThreadRuntime = Depends(get_runtime)):
+    from app.services.role_workspace import inventory
+    if _restricted(request):
+        raise _admin_only("role workspace")
+    agent = await _agent_or_404(rt, agent_id)
+    if not agent.role_path:
+        raise _error(409, "role_folder", "Set up a role folder first.")
+    try:
+        return await run_in_threadpool(inventory, Path(agent.role_path), task_id)
+    except (OSError, ValueError) as exc:
+        raise _error(422, "role_folder", str(exc)) from None
+
+
+@router.post("/{agent_id}/role-workspace/open")
+async def open_role_folder(agent_id: int, request: Request, rt: ThreadRuntime = Depends(get_runtime)):
+    from app.core import tenant_paths
+    from app.services.role_workspace import checked_root
+    if _restricted(request) or tenant_paths.root() is not None:
+        raise _admin_only("role workspace")
+    agent = await _agent_or_404(rt, agent_id)
+    if os.name != "nt" or not agent.role_path:
+        raise _error(409, "role_folder", "Select a local role folder on Windows first.")
+    try:
+        os.startfile(str(checked_root(Path(agent.role_path))), "explore")
+    except (ValueError, OSError) as exc:
+        raise _error(422, "role_folder", str(exc)) from None
+    return {"opened": True}
+
+
 @router.get("/{agent_id}", response_model=AgentResponse)
 async def get_agent(agent_id: int, rt: ThreadRuntime = Depends(get_runtime)):
     return (await _with_computers(rt, [await _agent_or_404(rt, agent_id)]))[0]

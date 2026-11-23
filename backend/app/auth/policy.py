@@ -66,6 +66,7 @@ CHAT_ROUTES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = tuple(
         ({"POST"}, "/threads"),
         ({"GET", "PATCH"}, f"/threads/{_ID}"),
         ({"POST"}, f"/threads/{_ID}/turns"),
+        ({"POST"}, f"/threads/{_ID}/feature-turns"),
         ({"POST"}, f"/threads/{_ID}/stop"),
         ({"GET"}, f"/threads/{_ID}/events"),
         ({"GET"}, f"/threads/{_ID}/events/stream"),

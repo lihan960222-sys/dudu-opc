@@ -51,6 +51,11 @@ class ThreadNotFound(Exception):
     pass
 
 
+class TurnAlreadyStarted(Exception):
+    def __init__(self, turn):
+        self.turn = turn
+
+
 class ThreadBusy(Exception):
     """A turn is already running in this thread."""
 
@@ -514,6 +519,7 @@ async def start_turn(
     prompt_text: str,
     *,
     owner_instance: str | None = None,
+    feature_event_key: str | None = None,
     attachments: list[dict] | None = None,
     origin: str | None = None,
     person_id: int | None = None,
@@ -531,6 +537,12 @@ async def start_turn(
     if thread is None:
         await db.rollback()
         raise ThreadNotFound(thread_id)
+    if feature_event_key is not None:
+        from app.services import feature_tasks
+        prior = await feature_tasks.submission(db, thread, feature_event_key, prompt_text,
+            [a["id"] for a in attachments or []], reserve=True)
+        if prior is not None:
+            raise TurnAlreadyStarted(prior)
     last = (
         await db.execute(select(func.coalesce(func.max(Turn.seq), 0)).where(Turn.thread_id == thread_id))
     ).scalar_one()
@@ -562,6 +574,8 @@ async def start_turn(
         started["attachments"] = attachments
     if person_label:
         started["person"] = {"id": person_id, "label": person_label}
+    if feature_event_key is not None:
+        await feature_tasks.bind_turn(db, thread.owner_id, feature_event_key, thread_id, turn.id)
     await _add_event(db, thread_id, "turn.started", started, turn.id)
     await db.commit()
     return turn
@@ -805,6 +819,7 @@ async def create_approval(
 async def decide_approval(
     db: AsyncSession, approval_id: str, decision: str, *, by: dict | None = None,
     person_id: int | None = None, person_label: str | None = None,
+    expected_turn_id: int | None = None, owner_token: str | None = None, fresh_after: datetime | None = None,
 ) -> bool:
     """The person's decision. One statement: it wins only if the approval is
     still pending AND its turn is still running. False means nothing changed
@@ -815,9 +830,16 @@ async def decide_approval(
     recorded on the approval and in the event (`person`), by the name they had then."""
     _check(decision, DECISIONS, "decision")
     await begin_write(db)
+    running = _turn_is_running()
+    if expected_turn_id is not None:
+        if not owner_token or fresh_after is None:
+            return False
+        running = exists().where(Turn.id == Approval.turn_id, Turn.id == expected_turn_id, Turn.status == "running",
+                                 Turn.owner_token == owner_token, Turn.heartbeat_at >= fresh_after,
+                                 Approval.tool == "feature_files.write_text")
     updated = await db.execute(
         update(Approval)
-        .where(Approval.id == approval_id, Approval.status == "pending", _turn_is_running())
+        .where(Approval.id == approval_id, Approval.status == "pending", running)
         .values(status=decision, decided_at=utcnow(),
                 decided_by_person_id=person_id, decided_by_label=person_label)
         .returning(Approval.thread_id, Approval.turn_id)

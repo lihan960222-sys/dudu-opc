@@ -181,13 +181,14 @@ def _recall_match(score: float, want: int) -> bool:
 
 
 async def conversation_passages(
-    db, owner_id: str, agent_id: int, thread_id: int, terms: list[str], bridge_terms: list[str] | None = None
+    db, owner_id: str, agent_id: int, thread_id: int, terms: list[str], bridge_terms: list[str] | None = None,
+    feature_id: int | None = None,
 ) -> list[dict]:
     if not terms:
         return []
     want = needed(terms)
     hits = await conversation_search.search_any(
-        db, owner_id, terms, agent_id=agent_id, exclude_thread_id=thread_id, bridge_terms=bridge_terms
+        db, owner_id, terms, agent_id=agent_id, exclude_thread_id=thread_id, bridge_terms=bridge_terms, feature_id=feature_id
     )
     ranked = sorted(
         (h for h in hits if _recall_match(h[1], want)),
@@ -246,6 +247,14 @@ async def build(db, *, owner_id: str, agent_id: int, thread_id: int, message: st
     terms = terms_of(message)
     if not terms:
         return None
+    from app.db.models import Thread
+    from app.db.models.feature import FeatureSession
+    thread = await db.get(Thread, thread_id)
+    if thread and thread.kind == 'feature':
+        binding = await db.get(FeatureSession, thread_id)
+        if binding is None or (thread.owner_id, thread.agent_id) != (owner_id, agent_id):
+            return None
+        return render([], await conversation_passages(db, owner_id, agent_id, thread_id, terms, feature_id=binding.task_id))
     note_matches = _note_matches(agent_id, terms)
     notes = [match[2] for match in note_matches[:MAX_NOTES]]
     bridges = _bridge_terms(note_matches)

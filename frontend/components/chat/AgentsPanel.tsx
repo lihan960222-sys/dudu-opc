@@ -835,6 +835,22 @@ export function AgentsPanel({
                         className={`${FIELD} mt-1 font-mono`}
                       />
                     </label>
+                    {admin && draft.id !== null && <div className="space-y-2">
+                      <p className="text-xs text-muted">Choose a model and save the agent first. The role folder stores AGENTS.md. After renaming a bot, check its app name in Feishu.</p>
+                      <Button type="button" variant="secondary" disabled={busy} onClick={async () => {
+                        if (draft.id === null) return;
+                        setBusy(true);
+                        try {
+                          const saved = await api.configureRoleFolder(draft.id, draft.workspace_path.trim() || null);
+                          setDraft({ ...draft, workspace_path: saved.workspace_path ?? "" });
+                          toast("Role folder ready.");
+                          onChanged();
+                        } catch (err) { setError(errorText(err)); } finally { setBusy(false); }
+                      }}>Set up role folder</Button>
+                      <Button type="button" variant="secondary" disabled={busy} onClick={() => {
+                        if (draft.id !== null) void api.openRoleFolder(draft.id).catch(err => setError(errorText(err)));
+                      }}>Open role folder</Button>
+                    </div>}
                     {draft.id === null && fromTemplate && fromTemplate.template.skills.length > 0 && (
                       <TemplateSkillChoices
                         skills={fromTemplate.template.skills}

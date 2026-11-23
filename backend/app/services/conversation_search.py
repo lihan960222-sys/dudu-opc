@@ -133,7 +133,7 @@ async def search_page(
     fetch = offset + limit + 1
 
     def scoped(statement, at_column):
-        statement = statement.where(Thread.owner_id == owner_id, Thread.kind != "room_member")
+        statement = statement.where(Thread.owner_id == owner_id, Thread.kind.not_in(("room_member", "feature", "steward_ledger")))
         if not include_delegated:
             statement = statement.where(Thread.kind != "job")
         if not include_archived:
@@ -239,6 +239,7 @@ async def search_any(
     agent_id: int,
     exclude_thread_id: int | None = None,
     candidates: int = 200,
+    feature_id: int | None = None,
     bridge_terms: list[str] | None = None,
 ) -> list[tuple[SearchHit, float]]:
     """Messages in one agent's conversations holding ANY of `terms`, newest
@@ -267,6 +268,11 @@ async def search_any(
         .order_by(Event.created_at.desc(), Event.id.desc())
         .limit(candidates)
     )
+    if feature_id is None:
+        statement = statement.where(Thread.kind.not_in(('feature', 'steward_ledger')))
+    else:
+        from app.db.models.feature import FeatureSession
+        statement = statement.where(Thread.id.in_(select(FeatureSession.thread_id).where(FeatureSession.task_id == feature_id)))
     if exclude_thread_id is not None:
         statement = statement.where(Thread.id != exclude_thread_id)
     out: list[tuple[SearchHit, float]] = []

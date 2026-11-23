@@ -1416,6 +1416,11 @@ export const api = {
   listAgents: (includeArchived = false) =>
     request<Agent[]>(`/agents${includeArchived ? "?include_archived=true" : ""}`),
 
+  configureRoleFolder: (id: number, path: string | null) =>
+    request<Agent>(`/agents/${id}/role-workspace`, { method: "POST", body: JSON.stringify({ path }) }),
+  openRoleFolder: (id: number) =>
+    request<{ opened: boolean }>(`/agents/${id}/role-workspace/open`, { method: "POST" }),
+
   createAgent: (input: AgentInput) =>
     request<Agent>("/agents", { method: "POST", body: JSON.stringify(input) }),
 

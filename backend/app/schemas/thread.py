@@ -127,6 +127,10 @@ class TurnCreateRequest(BaseModel):
         return value
 
 
+class FeatureTurnRequest(TurnCreateRequest):
+    feature_event_key: str = Field(min_length=1, max_length=240)
+
+
 class ThreadBranchRequest(BaseModel):
     """Branch from one past message: `turn_id` is the turn whose message is
     being edited, `prompt_text` the edited message to send in the new branch."""
@@ -204,6 +208,7 @@ class StopResponse(BaseModel):
 
 class ApprovalAnswerRequest(BaseModel):
     decision: Literal["allow", "deny"]
+    expected_turn_id: int | None = None
     # With an allow on a Bash call: also always allow this exact command from
     # now on (see /api/v1/approval-rules). Ignored for a deny or other tools.
     remember: bool = False

@@ -697,6 +697,8 @@ class ThreadRuntime:
         adapter = self.adapters.get(thread.provider)
         if adapter is None:
             raise UnknownProvider(thread.provider)
+        if thread.kind in ("feature", "steward_ledger"):
+            raise SessionNotResettable(thread.provider)
         session_id = adapter.new_session_id()
         if session_id is None:
             raise SessionNotResettable(thread.provider)
@@ -724,6 +726,7 @@ class ThreadRuntime:
         approval_mode: str | None = None,
         approval_timeout: float | None = None,
         attachment_ids: list[str] | None = None,
+        feature_event_key: str | None = None,
         skills: list[str] | None = None,
         team_origin: str = "person",
         routine_run_id: int | None = None,
@@ -753,10 +756,26 @@ class ThreadRuntime:
             raise ProviderUnavailable("The app is shutting down; send this again after it restarts.")
         async with self.session() as db:
             thread = await store.get_thread(db, thread_id)
-        if thread is None:
+        if thread is None or thread.owner_id != self.owner_id:
             raise store.ThreadNotFound(thread_id)
+        if thread.kind == "feature" or feature_event_key is not None:
+            from app.services import feature_tasks
+            if thread.kind != "feature" or not feature_event_key or skills:
+                raise feature_tasks.DispatchConflict("A scoped turn requires its original steward dispatch.")
+            async with self.session() as db:
+                previous = await feature_tasks.submission(db, thread, feature_event_key, prompt_text, attachment_ids or [])
+                if previous is not None:
+                    return previous
+        if thread.kind == "steward_ledger":
+            raise ProviderUnavailable("The dispatch ledger only accepts authenticated service records.")
         if thread.kind == "room" or (thread.kind == "room_member" and not internal):
             raise ProviderUnavailable("Talk to this agent in the room.")
+        if settings.STEWARD_STRICT_OWNER == self.owner_id and thread.agent_id is not None and thread.kind != "feature":
+            from app.team import service as team_service
+            async with self.session() as db:
+                team = await team_service.team_for(db, self.owner_id)
+            if team is None or team.lead_agent_id != thread.agent_id:
+                raise ProviderUnavailable("Start specialist work from its scoped steward task.")
         adapter = self.adapters.get(thread.provider)
         if adapter is None:
             raise UnknownProvider(thread.provider)
@@ -788,6 +807,30 @@ class ThreadRuntime:
             async with self.session() as db:
                 agent = await agent_store.get_agent(db, thread.agent_id)
 
+        role = None
+        if agent is not None and getattr(agent, "role_path", None):
+            from app.services.role_workspace import load, validate_model
+            try:
+                role = load(Path(agent.role_path))
+                await validate_model(self, thread.provider, role.model)
+            except (OSError, ValueError, EngineModelInvalid) as exc:
+                raise ProviderUnavailable(f"{agent.name} ({agent.role_path}/AGENTS.md): {exc}") from None
+
+        feature = thread.kind == "feature"
+        feature_context = ""
+        if feature:
+            import sys
+            from app.services.codex_adapter import CodexAdapter
+            from app.services import feature_tasks
+            if (sys.platform != "win32" or type(adapter) is not CodexAdapter or thread.provider != "codex"
+                    or not role or skills or routine_run_id is not None or role.model != thread.model):
+                raise ProviderUnavailable("This task needs a current scoped Windows Codex session.")
+            try:
+                async with self.session() as db:
+                    feature_context = await feature_tasks.context_for(db, self.owner_id, agent, thread)
+            except (ValueError, OSError) as exc:
+                raise ProviderUnavailable(str(exc)) from None
+
         draft_only = False
         if routine_run_id is not None:
             from app.db.models.routine import RoutineRun
@@ -802,7 +845,7 @@ class ThreadRuntime:
             if draft_only and (skills or attached or thread.session_state == "active"):
                 raise ProviderUnavailable("Draft-only routines require a fresh conversation without skills or attachments.")
         recall = None if draft_only else await self._recall(agent, thread_id, prompt_text)
-        brief = "" if draft_only else await self._recent_work(agent, thread)
+        brief = "" if draft_only or feature else await self._recent_work(agent, thread)
         handoff = ""
         if thread.provider_session_id is not None:
             # Native sessions have never seen turns that ran on a fallback.
@@ -812,16 +855,24 @@ class ThreadRuntime:
                 handoff = _fallback_handoff(await store.list_all_events(db, thread_id))
 
         async with self.session() as db:
-            turn = await store.start_turn(
-                db,
-                thread_id,
-                prompt_text,
-                owner_instance=self.instance_id,
-                attachments=[a.public() for a, _ in attached] or None,
-                origin=team_origin,
-                person_id=person_id,
-                person_label=person_label,
-            )
+            try:
+                turn = await store.start_turn(
+                    db,
+                    thread_id,
+                    prompt_text,
+                    owner_instance=self.instance_id,
+                    feature_event_key=feature_event_key,
+                    attachments=[a.public() for a, _ in attached] or None,
+                    origin=team_origin,
+                    person_id=person_id,
+                    person_label=person_label,
+                )
+            except store.TurnAlreadyStarted as prior:
+                return prior.turn
+        if role is not None:
+            async with self.session() as db:
+                await store.append_turn_event(db, turn.id, turn.owner_token, "role.config",
+                                              {"model": role.model, "sha256": role.digest})
         if chosen_skills:
             async with self.session() as db:
                 await store.append_turn_event(
@@ -851,7 +902,7 @@ class ThreadRuntime:
             run.ctx.on_abort(lambda: loop.call_soon_threadsafe(aborted.set))
             if run.ctx.aborted:
                 raise ReplayAborted()
-            if plan.record is not None and settings.COMPACTION_MODEL_SUMMARY and (agent is None or agent.compaction_summary):
+            if not feature and plan.record is not None and settings.COMPACTION_MODEL_SUMMARY and (agent is None or agent.compaction_summary):
                 # The engine writes the summary of what is folded when it has a
                 # quick call (everything redacted first, 20 seconds at most). A
                 # failure keeps the excerpts; a stop ends the whole turn.
@@ -876,17 +927,23 @@ class ThreadRuntime:
                 await run.recorder.emit("context.compacted", plan.record)
             return plan.items
 
-        explicit_memory = memory_explicit.prepare(agent, thread, turn, internal=internal)
+        explicit_memory = None if feature else memory_explicit.prepare(agent, thread, turn, internal=internal)
         # With several people in the workspace the engine is told whose message this is. The stored
         # prompt stays exactly what they typed.
         speaker_note = ""
         if person_label:
             async with self.session() as db:
                 speaker_note = speaker.note(person_label, await speaker.count_people(db))
+        if feature:
+            instructions = role.instructions
+        elif agent is not None:
+            instructions = agent_memory.turn_instructions(agent, role_instructions=role.instructions if role else None)
+        else:
+            instructions = None
         ctx = TurnContext(
             thread_id=thread_id,
             turn_id=turn.id,
-            prompt=handoff + agent_skills.prompt_block(chosen_skills) + memory_recall.with_recall(recall, attachments.prompt_with_text_files(speaker_note + prompt_text, attached)),
+            prompt=feature_context + handoff + agent_skills.prompt_block(chosen_skills) + memory_recall.with_recall(recall, attachments.prompt_with_text_files(speaker_note + prompt_text, attached)),
             images=[
                 {"path": str(path), "mime": a.mime, "name": a.name}
                 for a, path in attached
@@ -896,7 +953,7 @@ class ThreadRuntime:
             # A model chosen for this conversation wins over its agent's. An
             # agent's model is for the agent's engine: a conversation on another
             # engine (the agent changed engine since) uses that engine's default.
-            model=thread.model
+            model=role.model if role else thread.model
             or (agent.model if agent is not None and agent.provider == thread.provider else None),
             effort=(thread.provider_state or {}).get("effort") if isinstance(thread.provider_state, dict) else None,
             provider_session_id=thread.provider_session_id,
@@ -906,7 +963,7 @@ class ThreadRuntime:
             # The agent's instructions, then its notes (MEMORY.md) when on.
             instructions=_with_brief(
                 "\n\n".join(filter(None, (
-                    agent_memory.turn_instructions(agent) if agent is not None else None,
+                    instructions,
                     explicit_memory,
                 ))) or None, brief,
             ),
@@ -916,6 +973,7 @@ class ThreadRuntime:
             engine_config=config,
             claude_account=agent.claude_account if agent is not None else None,
         )
+        ctx.feature_workspace = thread.workspace_path if feature else None
         ctx.draft_only = draft_only
         ctx.media_review_only = any(a.kind == "audio" for a, _ in attached)
         if draft_only:
@@ -928,10 +986,10 @@ class ThreadRuntime:
             agent_id=agent.id if agent is not None else None,
             approval_timeout=approval_timeout,
             engine_id=thread.provider,
-            fallback=None if draft_only else _fallback_of(agent, thread.provider),
+            fallback=None if draft_only or feature else _fallback_of(agent, thread.provider),
             continues=turn.seq > 1,
             prompt_text=prompt_text,
-            log_memory=not draft_only and agent is not None and agent.memory_enabled,
+            log_memory=not draft_only and not feature and agent is not None and agent.memory_enabled,
             capturable=(
                 not draft_only
                 and agent is not None
@@ -945,7 +1003,7 @@ class ThreadRuntime:
                 and speaker.learns_from(person_id, person_is_owner)
             ),
         )
-        if not draft_only and agent is not None and agent.team_id is not None and app_settings.get("TEAM_ENABLED") and capabilities_of(adapter).mcp:
+        if not draft_only and not feature and agent is not None and agent.team_id is not None and app_settings.get("TEAM_ENABLED") and capabilities_of(adapter).mcp:
             from app.db.models import Team
             async with self.session() as db:
                 team = await db.get(Team, agent.team_id)
@@ -953,7 +1011,7 @@ class ThreadRuntime:
                 ctx.team = TurnTeam(team.id, agent.id, team.lead_agent_id == agent.id,
                                     app_settings.get("TEAM_LEAD_AUTO"), origin=team_origin,
                                     delegation_enabled=agent.delegation_enabled, configuration_allowed=configuration_allowed,
-                                    setup_allowed=setup_allowed)
+                                    setup_allowed=setup_allowed, strict_hierarchy=settings.STEWARD_STRICT_OWNER == self.owner_id)
                 from app.team import prompt as team_prompt
                 async with self.session() as db:
                     intro = await team_prompt.build(db, team=team, agent=agent, owner_id=self.owner_id)
@@ -1264,22 +1322,24 @@ class ThreadRuntime:
                 # a computer that cannot be used fails the turn, never falls
                 # back to the host. An engine that cannot use a computer never
                 # runs for an agent that has one.
-                if not computers and run.agent_id is not None:
+                limited = bool(run.ctx.feature_workspace or getattr(run.ctx, "draft_only", False))
+                if not limited and not computers and run.agent_id is not None:
                     from app.computers import native
                     if await native.selected(run.agent_id) or await self.computers.for_agent(run.agent_id):
                         raise _EngineWithoutComputers()
-                if not getattr(run.ctx, "draft_only", False) and run.ctx.workspace is not None:
+                if not limited and run.ctx.workspace is not None:
                     await self._snapshot_before_turn(run)
-                binding = None if getattr(run.ctx, "draft_only", False) else await self.computers.attach_for_turn(
+                binding = None if limited else await self.computers.attach_for_turn(
                     run.agent_id, run.turn_id, str(run.ctx.workspace) if run.ctx.workspace else None
                 )
                 run.ctx.computer = binding
                 from app.services import routine_uninterrupted
-                await routine_uninterrupted.load(self, run)
+                if not run.ctx.feature_workspace:
+                    await routine_uninterrupted.load(self, run)
                 if binding is not None and run.ctx.approval_mode != "plan":
                     authorized = await routine_uninterrupted.automatic(self, run, "mcp__computer__read_file", {})
                     binding.routine_uninterrupted = authorized == ("allowed", "routine_uninterrupted_grant")
-                if not getattr(run.ctx, "draft_only", False) and binding is None and run.agent_id is not None and capabilities_of(adapter).computers:
+                if not limited and binding is None and run.agent_id is not None and capabilities_of(adapter).computers:
                     binding = run.ctx.browser = await self.computers.attach_browser(run.agent_id, run.turn_id)
                 if run.ctx.team is not None:
                     team_bridge = TeamBridge(self, run)
@@ -1294,14 +1354,14 @@ class ThreadRuntime:
                     memory_bridge = MemoryBridge(self, run)
                     run.ctx.memory_launch = memory_bridge.launch
                     memory_bridge.start()
-                composio_apps = await self._composio_apps(run, adapter)
+                composio_apps = {} if run.ctx.feature_workspace else await self._composio_apps(run, adapter)
                 if composio_apps:
                     composio_bridge = ComposioBridge(self, run, composio_apps,
                                                       account_scopes=getattr(run.ctx, "composio_account_scopes", {}))
                     run.ctx.composio_launch, run.ctx.composio_apps = composio_bridge.launch, composio_apps
                     run.ctx.composio_exact_tools = list(run.routine_grants) if run.routine_grants is not None else None
                     composio_bridge.start()
-                community_snapshot = await CommunityMcpBridge.for_turn(self, run, adapter)
+                community_snapshot = None if run.ctx.feature_workspace else await CommunityMcpBridge.for_turn(self, run, adapter)
                 if community_snapshot:
                     community_bridge = CommunityMcpBridge(self, run, community_snapshot)
                     run.ctx.community_launch = community_bridge.launch
@@ -1647,7 +1707,7 @@ class ThreadRuntime:
     # -- approvals ----------------------------------------------------------------------
 
     async def answer_approval(
-        self, approval_id: str, decision: str, *, remember: bool = False,
+        self, approval_id: str, decision: str, *, remember: bool = False, expected_turn_id: int | None = None,
         person_id: int | None = None, person_label: str | None = None,
     ) -> bool:
         """The person's answer (`allow` or `deny`). True if it was recorded; False
@@ -1659,9 +1719,16 @@ class ThreadRuntime:
         if decision not in (ALLOW, DENY):
             raise ValueError("decision must be 'allow' or 'deny'")
         status = "allowed" if decision == ALLOW else "denied"
+        lease = {}
+        if expected_turn_id is not None:
+            run = self._runs.get(expected_turn_id)
+            if not run or run.stop_requested or run.ctx.aborted or not run.ctx.feature_workspace or run.ctx.approval_mode == "plan":
+                return False
+            lease = {"expected_turn_id": expected_turn_id, "owner_token":run.owner_token,
+                     "fresh_after": datetime.now(UTC) - timedelta(seconds=settings.THREAD_LEASE_SECONDS)}
         async with self.session() as db:
             won = await store.decide_approval(
-                db, approval_id, status, person_id=person_id, person_label=person_label)
+                db, approval_id, status, person_id=person_id, person_label=person_label, **lease)
             approval = await store.get_approval(db, approval_id)
         if won:
             future = self._waiters.get(approval_id)

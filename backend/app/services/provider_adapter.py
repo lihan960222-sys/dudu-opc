@@ -188,6 +188,7 @@ class TurnContext:
     claude_account: str | None = None
     # Confined turns cannot act through alternate tools.
     draft_only: bool = False
+    feature_workspace: str | None = None
     media_review_only: bool = False
     # Extra instructions from the thread's named agent, for the provider's
     # system prompt (appended, never replacing it), or None. Read fresh each turn.

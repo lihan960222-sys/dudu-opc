@@ -38,6 +38,15 @@ async def member(db, owner, agent_id, *, team_id=None):
     return agent
 
 
+def require_dispatcher(team, caller, turn, thread):
+    from app.core.config import settings
+    if settings.STEWARD_STRICT_OWNER != team.owner_id:
+        return
+    if (thread is None or turn.thread_id != thread.id or thread.owner_id != team.owner_id
+            or caller.id != thread.agent_id or caller.id != team.lead_agent_id):
+        raise TeamError('steward_only', 'Only the steward may dispatch work from its own turn.')
+
+
 async def set_lead(db, owner, agent_id, name='My team', *, commit=True):
     await begin_write(db)
     agent = await member(db, owner, agent_id)

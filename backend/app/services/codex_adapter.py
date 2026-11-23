@@ -229,7 +229,7 @@ class CodexAdapter:
     label = "Codex"
     kind = "cli"
     capabilities = Capabilities(
-        tools=True, approvals=True, mcp=True, images=False, resume=True, computers=True, memory_tools=True,
+        tools=True, approvals=True, mcp=True, images=True, resume=True, computers=True, memory_tools=True,
         connected_apps=True, steering=True,
     )
     models: list[ModelOption] = []
@@ -424,6 +424,7 @@ class _CodexTurn:
     breach: bool = False
 
     def __post_init__(self) -> None:
+        self.feature = getattr(self.ctx, "feature_workspace", None)
         self.computer = self.ctx.computer
         # A computer is the agent's sandbox: its turns always have tools, and they are the computer's.
         self.tools = bool(app_settings.get("LOCAL_TOOLS_ENABLED")) or self.computer is not None
@@ -440,6 +441,8 @@ class _CodexTurn:
             # Codex 0.164 refuses MCP elicitation with approvalPolicy=never. The
             # app still gates every attached MCP call; native tools stay read-only/denied.
             self.policy = CodexPolicy('untrusted', 'read-only', 'readOnly', 'user')
+        if self.feature:
+            self.policy = CodexPolicy("untrusted", "read-only", "readOnly", "user")
         self.max_text = app_settings.get("LOCAL_MAX_OUTPUT_BYTES")
         self.clock = TurnClock(app_settings.get("LOCAL_TASK_TIMEOUT_SECONDS"))
         self.workspace = self.ctx.workspace or local_claude_runner.workspace_dir()
@@ -520,7 +523,7 @@ class _CodexTurn:
     async def _start(self) -> TurnOutcome | None:
         try:
             info = {"clientInfo": {"name": "suparagent", "title": "Suparagent", "version": "0"}}
-            if self.computer is not None:
+            if self.computer is not None or self.feature:
                 # `environments` on turn/start is an experimental field; without this it is rejected.
                 info["capabilities"] = {"experimentalApi": True}
             await self._call("initialize", info)
@@ -539,6 +542,15 @@ class _CodexTurn:
         if self.ctx.routine_uninterrupted:
             from app.services.routine_uninterrupted import TOOL_NOTE
             instructions = f"{instructions}\n\n{TOOL_NOTE}" if instructions else TOOL_NOTE
+        if self.feature:
+            from app.services import feature_files
+            try:
+                current = await self._call("config/read", {"includeLayers": False, "cwd": str(self.workspace)})
+                common["config"] = feature_files.turn_config(current.get("config"), self.workspace,
+                                                           self.tools and self.mode != "plan")
+            except (AttributeError, TypeError, ValueError, RpcError, RpcClosed, asyncio.TimeoutError):
+                return self._failed("Could not confirm scoped task tools.", "codex_error")
+            common["environments"] = []
         launch = self.ctx.memory_launch
         if self.computer is not None:
             try:
@@ -649,7 +661,8 @@ class _CodexTurn:
             )
         turn_params = {
             "threadId": self.thread_id,
-            "input": [{"type": "text", "text": self.ctx.prompt}],
+            "input": [{"type": "text", "text": self.ctx.prompt},
+                      *({"type": "localImage", "path": str(image["path"])} for image in self.ctx.images)],
             "approvalPolicy": self.policy.approval,
             "approvalsReviewer": self.policy.reviewer,
             "sandboxPolicy": {"type": self.policy.sandbox_type},
@@ -658,7 +671,7 @@ class _CodexTurn:
             turn_params["model"] = self.ctx.model
         if self.ctx.effort:
             turn_params["effort"] = self.ctx.effort
-        if self.computer is not None:
+        if self.computer is not None or self.feature:
             turn_params["environments"] = []
         try:
             turn = await self._call("turn/start", turn_params)
@@ -842,6 +855,9 @@ class _CodexTurn:
         kind, item_id = item.get("type"), item.get("id")
         if kind not in TOOL_ITEMS or not isinstance(item_id, str):
             return
+        if self.feature and (kind != "mcpToolCall" or item.get("server") != "feature_files"):
+            self.breach = True
+            return
         if self.computer is not None and kind != "mcpToolCall":
             # Codex's own tools were switched off for this thread; one starting anyway
             # means they were not, and the turn does not go on.
@@ -947,7 +963,7 @@ class _CodexTurn:
             self.rpc.respond(rid, error={"code": -32601, "message": "Not supported by this app."})
             return
 
-        if self.computer is not None and kind != "mcp":
+        if (self.computer is not None or self.feature) and kind != "mcp":
             # A command or file approval during a computer turn: Codex's own tools are on.
             self.rpc.respond(rid, {"decision": "denied" if method in LEGACY_REQUESTS else "decline"})
             self.breach = True
@@ -975,6 +991,17 @@ class _CodexTurn:
         )
         browser_call = kind == "mcp" and params.get("serverName") == COMPUTER_SERVER and self.ctx.browser is not None
         # Attached MCP policy decides reads versus mutations with local tools off.
+        if self.feature:
+            found = self._computer_call("feature_files", str(params.get("message") or ""), meta)
+            if kind != "mcp" or params.get("serverName") != "feature_files" or not found:
+                self.rpc.respond(rid, payload(False))
+                return
+            if found[0] in ("list_files", "read_text"):
+                self.rpc.respond(rid, payload(True))
+                return
+            if found[0] != "write_text" or not self.tools or self.mode == "plan":
+                self.rpc.respond(rid, payload(False))
+                return
         if not (team_call or composio_call or community_call or browser_call) and (not self.tools or self.mode == "plan"):
             self.rpc.respond(rid, payload(False))
             return
@@ -1052,6 +1079,10 @@ class _CodexTurn:
                 approval_kind = "other"
                 bridge = getattr(self.ctx, "community_bridge", None)
                 summary = bridge.approval_summary(name, tool_input) if bridge is not None else tool
+            elif self.feature:
+                _, tool_input = found
+                tool, approval_kind = "feature_files.write_text", "other"
+                summary = "Save task file " + str(tool_input.get("path", ""))[:150]
             elif self.computer is not None:
                 # Only the computer's own tools can be asked about here.
                 found = self._computer_call(server, text, meta) if server == COMPUTER_SERVER else None

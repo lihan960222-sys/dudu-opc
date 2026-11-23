@@ -315,7 +315,7 @@ def memory_prompt(agent_id: int) -> str:
     )
 
 
-def turn_instructions(agent) -> str | None:
+def turn_instructions(agent, *, role_instructions: str | None = None) -> str | None:
     """Everything an agent adds to a turn's system prompt: its instructions,
     then what the person wrote about themselves (About me, read by every
     agent), then the business profile (also read by every agent), then its notes when they are switched on. None when there is
@@ -323,8 +323,9 @@ def turn_instructions(agent) -> str | None:
     from app.services import about_me
 
     parts = []
-    if agent.instructions and agent.instructions.strip():
-        parts.append(agent.instructions)
+    instructions = agent.instructions if role_instructions is None else role_instructions
+    if instructions and instructions.strip():
+        parts.append(instructions)
     about = about_me.prompt_block()
     if about:
         parts.append(about)

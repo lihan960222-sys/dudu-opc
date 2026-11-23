@@ -79,6 +79,7 @@ class Jobs:
             if not turn or turn.status != 'running' or turn.owner_token != run.owner_token:
                 raise service.TeamError('parent_gone', 'The requester turn is no longer running.')
             thread = await db.get(Thread, run.thread_id)
+            service.require_dispatcher(team, caller, turn, thread)
             if reply == 'wait':
                 parent = await db.get(AgentJob, thread.job_id) if thread.job_id else None
             else:
@@ -421,6 +422,18 @@ class Jobs:
         holder = await db.get(AgentJob, job.parent_id, with_for_update=True)
         if holder is None or holder.status not in ('running', 'needs_input', 'waiting'):
             return
+        if settings.STEWARD_STRICT_OWNER == job.owner_id:
+            team = await service.team_for(db, job.owner_id)
+            if (team is None or holder.owner_id != job.owner_id or holder.kind != 'root'
+                    or job.requester_agent_id != team.lead_agent_id or holder.assignee_agent_id != team.lead_agent_id
+                    or holder.assignee_thread_id != job.requester_thread_id):
+                raise service.TeamError('invalid_parent', 'Report destination differs from the dispatching steward.')
+            existing = select(AgentJobInbox.id).where(AgentJobInbox.job_id == job.id,
+                AgentJobInbox.holder_id == holder.id, AgentJobInbox.kind == kind)
+            if kind == 'question':
+                existing = existing.where(AgentJobInbox.delivered_at.is_(None))
+            if await db.scalar(existing.limit(1)):
+                return
         db.add(AgentJobInbox(owner_id=job.owner_id, holder_id=holder.id, job_id=job.id, kind=kind))
         root = await db.get(AgentJob, holder.root_id or holder.id)
         if root is not None:

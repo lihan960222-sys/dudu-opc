@@ -160,6 +160,7 @@ class AgentResponse(BaseModel):
     # Null: a thread started from this agent gets its own folder, named by the
     # agent's id, under the default workspace root.
     workspace_path: str | None
+    role_path: str | None = None
     approval_mode: ApprovalMode
     pinned: bool
     memory_enabled: bool

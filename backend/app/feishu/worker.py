@@ -1,0 +1,311 @@
+"""Process accepted DM events and reconcile upstream conversation turns."""
+import asyncio
+import hashlib
+import json
+import mimetypes
+import os
+import re
+from pathlib import Path
+from urllib.parse import urlsplit
+
+import httpx
+
+from . import approvals
+from . import submissions
+from .routing import enqueue, parts, task_requirements
+from .artifacts import REPORT_REQUEST, parse_report, snapshot
+
+
+def command(text):
+    """An explicit first line makes selection deterministic across devices."""
+    first, _, detail = text.strip().partition('\n')
+    match = re.fullmatch(r'(新建|续接|查询)\s+(\S+)\s+(.+)', first)
+    if not match:
+        return None, None, '', text
+    verb, role, title = match.groups()
+    return {'新建':'independent','续接':'append','查询':'query'}[verb], role, title.strip(), detail or title
+
+
+class Worker:
+    def __init__(self, config, publisher):
+        self.cfg, self.pub, self.db = config, publisher, publisher.db
+        self.db.executescript("""
+        create table if not exists retry(id text primary key, attempts integer, after integer);
+        create table if not exists decisions(event text primary key, choice text, model text, digest text);
+        create table if not exists submissions(event text primary key,thread integer,body text,role text,title text);
+        create table if not exists questions(outgoing text primary key, app text, event text, resolved_by text);
+        create table if not exists bindings(task integer primary key, role text, title text);
+        create table if not exists executions(event text primary key, thread integer, turn integer);
+        create table if not exists prepared(event text, position integer, attachment text, primary key(event,position));
+        """)
+        approvals.initialize(self.db)
+        url = config.get('backend','http://127.0.0.1:8000')
+        if urlsplit(url).hostname not in ('127.0.0.1','localhost','::1'):
+            raise ValueError('仅支持本机后端')
+        headers = {}
+        if config.get('backend_token_env'):
+            headers['Authorization'] = 'Bearer ' + os.environ[config['backend_token_env']]
+        self.api = httpx.Client(base_url=url.rstrip('/')+'/api/v1/',headers=headers,timeout=180,trust_env=False)
+
+    def respond(self, row, state, text, task=None):
+        with self.db:
+            outgoing = enqueue(self.db,task,'steward',{'text':text})
+            if state == 'clarify':
+                self.db.execute('insert into questions(outgoing,app,event) values(?,?,?)',(outgoing,row['app'],row['event']))
+            self.db.execute('update inbox set state=?,task=? where app=? and event=?',
+                            (state,task,row['app'],row['event']))
+
+    def reference(self, message):
+        for field in ('parent_id','root_id'):
+            key = message.get(field)
+            if key:
+                hit = self.db.execute("""select task from inbox where message=? and task is not null
+                    union select task from outbox where remote=? and task is not null""",(key,key)).fetchone()
+                if hit:
+                    return hit[0]
+        return None
+
+    async def process(self,row):
+        from app.db.session import AsyncSessionLocal
+        from app.services import feature_tasks
+
+        msg = json.loads(row['payload'])
+        items = parts(msg['message_type'],json.loads(msg['content']))
+        text = '\n'.join(p['text'] for p in items if p['kind']=='text')
+        if approvals.answer(self, row, msg, text):
+            return
+        intent, role, title, prompt = command(text)
+        ref = self.reference(msg)
+        parent = msg.get('parent_id') or msg.get('root_id')
+        pending = self.db.execute("""select i.* from questions q join outbox o on o.id=q.outgoing
+            join inbox i on i.app=q.app and i.event=q.event where o.remote=? and (i.state='clarify' or q.resolved_by=?)""",
+            (parent,row['event'])).fetchone()
+        source = row['message']
+        if pending:
+            original = json.loads(pending['payload'])
+            original_items = parts(original['message_type'],json.loads(original['content']))
+            selected = re.fullmatch(r'#(\d+)',text.strip())
+            if selected:
+                ref = int(selected[1])
+                original_text = '\n'.join(p['text'] for p in original_items if p['kind']=='text')
+                original_intent = command(original_text)[0]
+                if original_intent in ('query','append'):
+                    intent = original_intent
+                else:
+                    choice = self.db.execute("select choice from decisions where event=?",(pending['app']+'|'+pending['event'],)).fetchone()
+                    if choice and (cached := json.loads(choice[0])):
+                        intent = 'query' if cached[0]=='query' else 'append'
+            if selected or intent:
+                source = pending['message']
+                items = original_items
+                prompt = '\n'.join(p['text'] for p in items if 'text' in p) or '补充附件'
+        if ref and intent != 'independent':
+            binding = self.db.execute('select * from bindings where task=?',(ref,)).fetchone()
+            if binding:
+                title, role, intent = binding['title'], binding['role'], intent or 'append'
+        if not intent and not ref and not pending and text.strip() and self.cfg.get('isolated_runner_enabled'):
+            from .steward import classify
+            try:
+                choice = await classify(self.cfg,self.db,row['app']+'|'+row['event'],text)
+            except (ValueError,OSError,RuntimeError,asyncio.TimeoutError):
+                choice = None
+            if choice:
+                intent,role,title,ref = choice
+        if intent == 'independent' and ref:
+            previous = self.db.execute('select role from bindings where task=?',(ref,)).fetchone()
+            if not previous or previous['role']!=role:
+                ref = None
+        if role not in self.cfg['roles'] or not title:
+            self.respond(row,'clarify','请回复本条并填写「#任务编号」或「新建 角色名 任务名」。原消息和附件会随任务保存。')
+            return
+        cfg = self.cfg['roles'][role]
+        event_key = hashlib.sha256((row['app']+'|'+row['event']).encode()).hexdigest()
+        async with AsyncSessionLocal() as session:
+            result = await feature_tasks.route(session,owner_id=self.cfg['owner_id'],agent_id=cfg['agent_id'],
+                project=self.cfg['project'],event_key=event_key,title=title,text=prompt or '补充附件',
+                reference_id=ref,intent=intent,**task_requirements(prompt))
+            await session.commit()
+        task = result.get('task_id')
+        if not task:
+            self.respond(row,'clarify',f"请回复本条并填写「#任务编号」。候选任务：{result.get('candidates',[])}")
+            return
+        if intent == 'query':
+            if pending:
+                with self.db:
+                    self.db.execute('update questions set resolved_by=? where app=? and event=?',(row['event'],pending['app'],pending['event']))
+                    self.db.execute("update inbox set state='resolved',task=? where app=? and event=?",(task,pending['app'],pending['event']))
+            self.respond(row,'done',f"〈{title}〉 #{task}：{result.get('status') or result.get('action')}",task)
+            return
+        with self.db:
+            new = self.db.execute('insert or ignore into bindings values(?,?,?)',(task,role,title)).rowcount
+            if new:
+                enqueue(self.db,task,role,{'text':f'任务 #{task} · {title}'},root=True)
+            if pending:
+                self.db.execute('update questions set resolved_by=? where app=? and event=?',(row['event'],pending['app'],pending['event']))
+                self.db.execute("update inbox set state='resolved',task=? where app=? and event=?",(task,pending['app'],pending['event']))
+            if row['state']=='received':
+                enqueue(self.db,task,'steward',{'text':f'已登记〈{title}〉 #{task}。引用本条可继续补充。'})
+            self.db.execute("update inbox set task=?,state='bound' where app=? and event=?",(task,row['app'],row['event']))
+        ahead = self.db.execute("""select 1 from inbox where task=? and state in ('submitting','running')
+            and rowid < (select rowid from inbox where app=? and event=?) limit 1""",(task,row['app'],row['event'])).fetchone()
+        if ahead:
+            return
+        files = [(i,p,self.pub.download(task,source,p)) for i,p in enumerate(items) if 'key' in p]
+        if not self.cfg.get('isolated_runner_enabled'):
+            self.respond(row,'held',f'任务 #{task} 已保存，收到 {len(files)} 个附件。执行环境尚未启用。',task)
+            return
+        async with AsyncSessionLocal() as session:
+            model, workspace = await resolve_workspace(session,self.cfg,task,cfg)
+            thread,busy = await feature_tasks.session_for(session,self.cfg['owner_id'],task,model=model,workspace_path=workspace)
+            thread_id = thread.id
+            if not busy:
+                await feature_tasks.dispatch(session, owner_id=self.cfg['owner_id'],
+                    steward_id=self.cfg['steward'].get('agent_id'), task_id=task,
+                    event_key=event_key, thread_id=thread_id)
+            await session.commit()
+        if busy:
+            return
+        ids = []
+        for i,part,path in files:
+            prior = self.db.execute('select attachment from prepared where event=? and position=?',(event_key,i)).fetchone()
+            if prior:
+                ids.append(prior[0])
+                continue
+            mime = {'audio':'audio/ogg','media':'video/mp4'}.get(part['kind']) or mimetypes.guess_type(part['name'])[0] or 'application/octet-stream'
+            name = part['name'] if '.' in part['name'] else part['name'] + {'audio':'.ogg','media':'.mp4'}.get(part['kind'],'')
+            with path.open('rb') as stream:
+                resp = self.api.post(f'threads/{thread_id}/attachments',files={'file':(name,stream,mime)})
+            resp.raise_for_status()
+            ids.append(resp.json()['id'])
+            with self.db:
+                self.db.execute('insert into prepared values(?,?,?)',(event_key,i,ids[-1]))
+        if files:
+            layout = []
+            attachment_number = 0
+            for part in items:
+                if part['kind'] == 'text':
+                    layout.append(part['text'])
+                else:
+                    attachment_number += 1
+                    layout.append(f"[附件 {attachment_number} · {part['name']}]")
+            prompt += '\n原消息顺序：\n' + '\n'.join(layout)
+        if any(p['kind']=='audio' for _,p,_ in files):
+            prompt += '\n如转写中的数值、单位或否定词不清楚，请列出需要用户确认的原句。'
+        submissions.prepare(self.db,row,thread_id,role,title,(prompt or '请检查所附材料。') + REPORT_REQUEST,ids)
+        await submissions.send(self,self.db.execute('select * from inbox where app=? and event=?',
+            (row['app'],row['event'])).fetchone())
+
+    async def reconcile(self,row):
+        from app.db.session import AsyncSessionLocal
+        from app.services import feature_tasks
+        key = hashlib.sha256((row['app']+'|'+row['event']).encode()).hexdigest()
+        execution = self.db.execute('select * from executions where event=?',(key,)).fetchone()
+        resp = self.api.get(f"threads/{execution['thread']}")
+        resp.raise_for_status()
+        turn = next(t for t in resp.json()['turns'] if t['id']==execution['turn'])
+        if not turn.get('finished_at'):
+            approvals.notify(self,execution,row['task'])
+            return
+        async with AsyncSessionLocal() as session:
+            await feature_tasks.report(session, self.cfg['owner_id'], key, execution['thread'], execution['turn'])
+            await session.commit()
+        task = row['task']
+        role = self.db.execute('select role from bindings where task=?',(task,)).fetchone()[0]
+        summary, public, named = parse_report(turn.get('result') or turn['status'])
+        artifacts = []
+        issues = []
+        if named and turn['status']=='succeeded':
+            from app.services import agent_store
+            async with AsyncSessionLocal() as session:
+                agent = await agent_store.get_agent(session,self.cfg['roles'][role]['agent_id'])
+                if not agent or agent.owner_id != self.cfg['owner_id'] or not agent.role_path:
+                    raise ValueError('无法确认产物归属')
+                from app.db.models import Thread
+                bound = await session.get(Thread,execution['thread'])
+                folder = Path(agent.role_path)
+                if not bound or bound.agent_id != agent.id or bound.owner_id != self.cfg['owner_id'] or (
+                        Path(bound.workspace_path) != folder/'任务'/str(int(task))):
+                    raise ValueError('角色目录与执行记录不一致')
+            for name in named:
+                try:
+                    artifacts.append(snapshot(folder,task,name,self.pub.directory))
+                except (OSError,ValueError):
+                    issues.append('有一项产物未通过路径、大小或文件状态核对。')
+        with self.db:
+            enqueue(self.db,task,role,{'text':f"任务 #{task} 本轮状态：{turn['status']}。已登记 {len(artifacts)} 个公开产物。{public}"})
+            enqueue(self.db,task,'steward',{'text':f"任务 #{task}：{summary[:8000]}{''.join(issues)}"})
+            for artifact in artifacts:
+                for audience in (role,'steward'):
+                    enqueue(self.db,task,audience,artifact)
+            self.db.execute("update inbox set state='done' where app=? and event=?",(row['app'],row['event']))
+
+    def flush(self):
+        for row in self.db.execute("""select o.* from outbox o left join retry r on r.id=o.id
+            where o.state='pending' and coalesce(r.after,0)<=unixepoch() and
+            (o.role='steward' or o.is_root=1 or exists
+            (select 1 from outbox root where root.is_root=1 and root.role=o.role and root.task=o.task and root.state='sent'))
+            order by o.rowid""").fetchall():
+            with self.db:
+                self.db.execute("update outbox set state='verify' where id=?",(row['id'],))
+            try:
+                remote = self.pub.deliver(row)
+            except Exception as exc:
+                with self.db:
+                    if isinstance(exc,(httpx.ConnectError,httpx.ConnectTimeout)) or (
+                            isinstance(exc,httpx.HTTPStatusError) and exc.response.status_code==429):
+                        self.db.execute("""insert into retry values(?,1,unixepoch()+10) on conflict(id)
+                            do update set attempts=attempts+1,after=unixepoch()+min(600,10*(attempts+1))""",(row['id'],))
+                        self.db.execute("update outbox set state='pending' where id=?",(row['id'],))
+                    self.db.execute('update outbox set error=? where id=?',(type(exc).__name__,row['id']))
+                continue
+            with self.db:
+                self.db.execute("update outbox set state='sent',remote=? where id=?",(remote,row['id']))
+
+    async def tick(self):
+        for row in self.db.execute("select * from inbox where state in ('received','bound','submitting','running') and not exists (select 1 from retry where retry.id=inbox.app||'|'||inbox.event and retry.after>unixepoch()) order by rowid").fetchall():
+            try:
+                if row['state']=='submitting':
+                    await submissions.send(self,row)
+                elif row['state']=='running':
+                    await self.reconcile(row)
+                else:
+                    await self.process(row)
+            except Exception as exc:
+                latest = self.db.execute('select * from inbox where app=? and event=?',(row['app'],row['event'])).fetchone()
+                reason = type(exc).__name__
+                if isinstance(exc,httpx.HTTPStatusError):
+                    reason += f' HTTP {exc.response.status_code}'
+                if latest['state'] in ('running','submitting'):
+                    # Neither phase may ever fall back to creating another dispatch.
+                    with self.db:
+                        retry_key = row['app']+'|'+row['event']
+                        self.db.execute("""insert into retry values(?,1,unixepoch()+5) on conflict(id)
+                            do update set attempts=attempts+1,after=unixepoch()+min(300,5*(attempts+1))""",(retry_key,))
+                        self.db.execute('update inbox set error=? where app=? and event=?',(reason,row['app'],row['event']))
+                        if not latest['error']:
+                            enqueue(self.db,latest['task'],'steward',{'text':f'任务 #{latest["task"]} 正在核对已登记的执行请求（{reason}）。'})
+                    continue
+                state = 'verify' if latest['state']=='verify' else 'held'
+                self.respond(latest,state,f'当前步骤需要核对（{reason}）。原消息已保存。',latest['task'])
+                with self.db:
+                    self.db.execute('update inbox set error=? where app=? and event=?',(reason,row['app'],row['event']))
+        self.flush()
+
+    async def run(self):
+        while True:
+            await self.tick()
+            await asyncio.sleep(2)
+
+async def resolve_workspace(session, config, task, cfg):
+    from app.services import agent_store, role_workspace
+    agent = await agent_store.get_agent(session,cfg['agent_id'])
+    if not agent or agent.owner_id != config['owner_id'] or not agent.role_path:
+        raise ValueError('请先配置本用户的角色目录')
+    role_dir = role_workspace.checked_root(Path(agent.role_path))
+    model = role_workspace.load(role_dir).model
+    folder = role_dir / '任务' / str(int(task))
+    if folder.resolve() != folder:
+        raise ValueError('任务目录不能经过链接')
+    folder.mkdir(parents=True,exist_ok=True)
+    await session.rollback()
+    return model, str(folder)

@@ -24,6 +24,7 @@ class TurnTeam:
     delegation_enabled: bool = True
     configuration_allowed: bool = True
     setup_allowed: bool = False
+    strict_hierarchy: bool = False
 
 
 def automatic(tool, mode, team, arguments):
@@ -32,6 +33,8 @@ def automatic(tool, mode, team, arguments):
     if team is None:
         return 'denied', 'no_team'
     name = tool.removeprefix('mcp__team__')
+    if team.strict_hierarchy and not team.is_lead and name in ('ask_agent', 'delegate', 'say_in_room'):
+        return 'denied', 'steward_only'
     if name == 'refresh_today':
         if not team.is_lead:
             return 'denied', 'lead_only'

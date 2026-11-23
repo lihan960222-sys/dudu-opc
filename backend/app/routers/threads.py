@@ -20,6 +20,7 @@ from app.schemas.thread import (
     ApprovalAnswerResponse,
     ApprovalResponse,
     EventsPageResponse,
+    FeatureTurnRequest,
     StopResponse,
     ThreadBranchRequest,
     ThreadCreateRequest,
@@ -31,7 +32,7 @@ from app.schemas.thread import (
     TurnSteerResponse,
     TurnResponse,
 )
-from app.services import approval_allowlist, attachments
+from app.services import approval_allowlist, attachments, feature_tasks
 from app.services.agent_skills import SkillError
 from app.services.attachments import AttachmentError
 from app.services import thread_store as store
@@ -216,6 +217,12 @@ async def delete_thread(thread_id: int, rt: ThreadRuntime = Depends(get_runtime)
 # --- turns --------------------------------------------------------------------------------
 
 
+@router.post("/{thread_id}/feature-turns", response_model=TurnResponse, status_code=202)
+async def send_feature_turn(thread_id: int, payload: FeatureTurnRequest, request: Request,
+                            rt: ThreadRuntime = Depends(get_runtime)):
+    return await send_turn(thread_id, payload, request, rt)
+
+
 @router.post("/{thread_id}/turns", response_model=TurnResponse, status_code=202)
 async def send_turn(
     thread_id: int, payload: TurnCreateRequest, request: Request, rt: ThreadRuntime = Depends(get_runtime)
@@ -230,12 +237,15 @@ async def send_turn(
         principal = principal_of(request.scope)
         return await rt.send_turn(
             thread_id, payload.prompt_text, attachment_ids=payload.attachment_ids, skills=payload.skills,
+            **({"feature_event_key":payload.feature_event_key} if isinstance(payload, FeatureTurnRequest) else {}),
             configuration_allowed=principal is None or principal.is_admin,
             setup_allowed=_setup_allowed(principal),
             person_id=principal.person_id if principal else None,
             person_label=principal.label if principal and principal.person_id is not None else None,
             person_is_owner=principal is None or principal.person_id is None or principal.role == "owner",
         )
+    except feature_tasks.DispatchConflict as error:
+        raise _error(409, "dispatch_conflict", str(error))
     except SkillError as error:
         raise _error(error.status, error.code, error.message)
     except AttachmentError as error:
@@ -465,6 +475,7 @@ async def answer_approval(
     if not await rt.answer_approval(
         approval_id, payload.decision, remember=payload.remember and may_remember,
         person_id=principal.person_id if named else None, person_label=principal.label if named else None,
+        **({'expected_turn_id': payload.expected_turn_id} if payload.expected_turn_id is not None else {}),
     ):
         raise _error(
             409, "approval_not_waiting", "That request is no longer waiting for an answer."

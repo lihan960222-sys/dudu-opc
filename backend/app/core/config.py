@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     TEAM_ESCALATIONS: bool = False
     TEAM_MAX_CREATED_PER_TURN: int = 4
     TEAM_MAX_AGENTS: int = 50
+    STEWARD_STRICT_OWNER: str = ''
     TEAM_MAX_DEPTH: int = 3
     TEAM_MAX_CHILDREN_PER_TURN: int = 8
     TEAM_MAX_JOBS_PER_ROOT: int = 24

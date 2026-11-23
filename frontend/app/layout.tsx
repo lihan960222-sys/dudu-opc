@@ -1,19 +1,21 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import { ToastProvider } from "@/components/ui/Toast";
 import { LANGUAGE_INIT_SCRIPT } from "@/lib/i18n";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
 import { SettingsShortcutMount } from "@/lib/use-settings-shortcut";
 import "./globals.css";
 
-const geistSans = Geist({
+const geistSans = localFont({
+  src: "../node_modules/next/dist/next-devtools/server/font/geist-latin.woff2",
+  weight: "100 900",
   variable: "--font-geist-sans",
-  subsets: ["latin"],
 });
 
-const geistMono = Geist_Mono({
+const geistMono = localFont({
+  src: "../node_modules/next/dist/next-devtools/server/font/geist-mono-latin.woff2",
+  weight: "100 900",
   variable: "--font-geist-mono",
-  subsets: ["latin"],
 });
 
 export const metadata: Metadata = {

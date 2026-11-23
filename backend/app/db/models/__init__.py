@@ -74,3 +74,4 @@ __all__ = [
     "Workflow",
     "WorkflowRun",
 ]
+from app.db.models.feature import FeatureScope, FeatureMessage, FeatureSession

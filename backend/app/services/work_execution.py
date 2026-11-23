@@ -74,6 +74,9 @@ async def with_status(db, owner, items):
 async def start(db, owner, item_id, payload):
     await begin_write(db)
     item = await owned_item(db, owner, item_id, lock=True)
+    from app.db.models.feature import FeatureScope
+    if await db.get(FeatureScope, item_id):
+        raise error(409, "Continue this task in its scoped steward conversation.")
     previous = await db.scalar(select(WorkItemRun).where(
         WorkItemRun.owner_id == owner, WorkItemRun.work_item_id == item_id,
         WorkItemRun.idempotency_key == payload.idempotency_key))

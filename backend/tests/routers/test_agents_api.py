@@ -429,3 +429,17 @@ async def test_unsupported_lead_creation_leaves_no_agent(api, sessions, owner):
     assert response.status_code == 409
     async with sessions() as db:
         assert not await db.scalar(select(Agent.id).where(Agent.owner_id == owner, Agent.name == 'Bad coordinator'))
+
+async def test_local_role_loads_edits_for_each_turn(api, rt, sessions, launches, tmp_path):
+    tmp_path = tmp_path / 'dedicated-role'
+    tmp_path.mkdir()
+    agent = await make(api, instructions="First.", model="sonnet")
+    result = await api.post(f"/api/v1/agents/{agent['id']}/role-workspace", json={"path": str(tmp_path)})
+    assert result.status_code == 200, result.text
+    thread = (await thread_from(api, agent)).json()
+    await send(api, rt, sessions, thread["id"], 1)
+    assert launches[-1]["model"] == "sonnet"
+    (tmp_path / "AGENTS.md").write_text("---\ndefault_model: opus\n---\nSecond.", encoding="utf-8")
+    await send(api, rt, sessions, thread["id"], 2)
+    assert launches[-1]["model"] == "opus"
+    assert launches[-1]["system_prompt"].startswith("Second.")
