@@ -20,12 +20,12 @@ Tailscale Serve 只给已获准访问的私网设备提供入口。[Tailscale Se
 
 ## 从飞书转到 Codex 继续工作
 
-对于用 GPT 的 Codex 员工，在后台打开对应任务的聊天，点「在 Codex 续接」。页面会给出工作目录和会话 ID。结束正在执行的那一轮后，在该目录打开终端，运行页面上的 `codex resume` 命令。切回飞书前，先退出占用该会话的 Codex 客户端。后台可以列出桌面新增的原生轮次，飞书保留它自己收到的消息和交付。使用 DeepSeek 的管家有独立的原生会话目录，点击「续接会话」会回到原后台对话，继续使用团队工具和审批。
+对于用 GPT 的 Codex 员工，在后台打开对应任务的对话，点顶部的终端图标「续接会话」。页面会给出工作目录和会话 ID。结束正在执行的那一轮后，在该目录打开终端，运行页面上的 `codex resume` 命令。切回飞书前，先退出占用该会话的 Codex 客户端。后台可以列出桌面新增的原生轮次，飞书保留它自己收到的消息和交付。使用 DeepSeek 的管家有独立的原生会话目录，可回到原后台对话继续使用团队工具和审批。
 
 ## 管家用 DeepSeek，员工用 GPT
 
 1. 用老板账号打开「员工」，选中管家，在「基本资料」里保留 Codex 执行引擎。默认模型可以选 `deepseek-flash` 或 `deepseek-v4-pro`。需要在飞书里看图时选 Flash。[DeepSeek 模型说明](https://api-docs.deepseek.com/quick_start/pricing/)
-2. 在同一页的密码框内输入 DeepSeek API Key，点「验证并保存密钥」，再保存员工资料。后台向 DeepSeek 官方核对模型列表，Windows 用当前登录账户加密保存密钥。员工继续使用各自岗位设置里的模型。管家和员工使用同一套派工、验收和汇报工具。[DeepSeek 的 Codex 接入说明](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/)
+2. 展开「管理 DeepSeek 密钥」，输入 DeepSeek API Key，点「验证并保存密钥」，再保存员工资料。已配置的密钥可直接使用。后台向 DeepSeek 官方核对模型列表，Windows 用当前登录账户加密保存密钥。员工继续使用各自岗位设置里的模型。管家和员工使用同一套派工、验收和汇报工具。[DeepSeek 的 Codex 接入说明](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/)
 3. 在原来的飞书私聊继续找管家。第一次切换供应商会建立一个对应模型的管理会话，以后复用。项目和工单归属保留，旧对话仍可在后台查看。指定联系人私聊摘录遵循单独的个人授权，已勾选的 OpenAI 摘要仍交给 GPT 处理。
 
 ## Windows 上的 Codex 响应速度

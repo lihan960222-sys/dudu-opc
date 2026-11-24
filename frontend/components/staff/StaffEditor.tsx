@@ -24,6 +24,7 @@ type Rules = {
 };
 type Props = {
   agent: Agent | null;
+  chatHref: string;
   lead: Agent | null;
   member: boolean;
   engines: Engine[];
@@ -31,7 +32,7 @@ type Props = {
   openFeishu: boolean;
   onSaved: (id: number) => void;
 };
-export function StaffEditor({ agent, lead, member, engines, members, openFeishu, onSaved }: Props) {
+export function StaffEditor({ agent, chatHref, lead, member, engines, members, openFeishu, onSaved }: Props) {
   const { session } = useSession();
   const ownsHost = session?.kind === "browser" && !!session.session_id && session.scopes.includes("admin")
     && (session.role === "owner" || (!session.role && !session.person_id));
@@ -209,7 +210,7 @@ export function StaffEditor({ agent, lead, member, engines, members, openFeishu,
           </div>
           <p>{title || role}</p>
         </div>
-        {agent && <Link className="dp-button dp-chat-link" aria-label={`与 ${agent.name} 对话`} href={`/chat?agent=${agent.id}`}><MessageSquare />对话</Link>}
+        {agent && <Link className="dp-button dp-chat-link" aria-label={`与 ${agent.name} 对话`} href={chatHref}><MessageSquare />对话</Link>}
       </div>
       {picking && <AvatarPicker onChange={setAvatar} />}
       <div className="dp-tabs dp-profiletabs" aria-label="档案栏目">

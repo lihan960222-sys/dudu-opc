@@ -1083,9 +1083,13 @@ export function ChatApp() {
       setUndoBusy(false);
     }
   };
+  const employee = threadId === null ? startingAgentId : thread?.agent_id;
+  const workbenchHref = roomId === null && employee != null
+    ? `/?employee=${employee}${threadId === null ? "" : `&thread=${threadId}`}`
+    : "/";
   const header = (
     <ChatHeader
-      showWorkbench={canOpenWorkbench(session)}
+      workbenchHref={canOpenWorkbench(session) ? workbenchHref : null}
       title={roomId !== null
         ? (roomTitle?.id === roomId ? roomTitle.name : t(roomId === "new" ? "room.new" : "room.title"))
         : thread?.title || (threadId === null ? t("shell.newChat") : threadAgent?.name || t("chat.conversation"))}

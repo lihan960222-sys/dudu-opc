@@ -1,6 +1,6 @@
 // Rules for the sidebar's lists, with no runtime imports so node tests can load them.
 
-type ThreadLike = { id: number; agent_id?: number | null; archived_at: string | null; updated_at: string };
+type ThreadLike = { id: number; kind?: string; agent_id?: number | null; archived_at: string | null; updated_at: string };
 type AgentLike = { id: number; name: string; pinned?: boolean; archived_at: string | null };
 
 // Where an agent's row in the sidebar leads: its most recently active conversation that is not
@@ -12,6 +12,15 @@ export function agentTarget(threads: readonly ThreadLike[] | null, agentId: numb
     if (best === null || Date.parse(thread.updated_at) > Date.parse(best.updated_at)) best = thread;
   }
   return best ? { kind: "thread", id: best.id } : { kind: "new" };
+}
+
+export function employeeChatHref(threads: readonly ThreadLike[] | null, agentId: number, returnThread: number | null) {
+  if (!threads) return "/chat/";
+  const previous = threads.find(item => item.id === returnThread && item.agent_id === agentId && item.archived_at === null);
+  if (previous) return `/chat?thread=${previous.id}`;
+  // Only enter a project-specific conversation when the person explicitly came from it.
+  const recent = agentTarget(threads.filter(item => !item.kind || item.kind === "chat"), agentId);
+  return recent.kind === "thread" ? `/chat?thread=${recent.id}` : `/chat?agent=${agentId}`;
 }
 
 // The agents to list: archived ones left out, pinned first, then by name (case-insensitive).

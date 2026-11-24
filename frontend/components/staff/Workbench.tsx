@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "../AuthGate";
 import { canOpenWorkbench } from "@/lib/session";
+import { employeeChatHref } from "@/lib/sidebar";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
@@ -16,7 +17,7 @@ import {
   Settings2,
   UsersRound,
 } from "lucide-react";
-import { api, request, type Agent, type Engine } from "@/lib/api";
+import { api, request, type Agent, type Engine, type Thread } from "@/lib/api";
 import {
   collaboration,
   type TeamState,
@@ -572,6 +573,7 @@ function loadPortal() {
     api.getEngines(),
     request<Pending[]>("/staff/pending"),
     collaboration.activity(),
+    api.listThreads(),
   ]);
 }
 
@@ -586,6 +588,7 @@ function ManagementPortal() {
   });
   const [page, setPage] = useState<string>(() => !entry.requested && params.get("section") === "host" ? "host" : "people"),
     [agents, setAgents] = useState<Agent[]>([]),
+    [threads, setThreads] = useState<Thread[] | null>(null),
     [engines, setEngines] = useState<Engine[]>([]),
     [team, setTeam] = useState<TeamState | null>(null);
   const [pending, setPending] = useState<Pending[]>([]),
@@ -596,17 +599,18 @@ function ManagementPortal() {
     [rev, setRev] = useState(0),
     [loaded, setLoaded] = useState(false),
     [errors, setErrors] = useState<string[]>([]);
-  const applyPortal = useCallback(([a, t, e, p, log]: Awaited<ReturnType<typeof loadPortal>>) => {
+  const applyPortal = useCallback(([a, t, e, p, log, chats]: Awaited<ReturnType<typeof loadPortal>>) => {
     if (a.status === "fulfilled") setAgents(a.value);
     if (t.status === "fulfilled") setTeam(t.value);
     if (e.status === "fulfilled") setEngines(e.value);
     if (p.status === "fulfilled") setPending(p.value);
     if (log.status === "fulfilled") setActivity(log.value);
+    if (chats.status === "fulfilled") setThreads(chats.value);
     setErrors(
-      [a, t, e, p, log].flatMap((r, i) =>
+      [a, t, e, p, log, chats].flatMap((r, i) =>
         r.status === "rejected"
           ? [
-              ["员工", "团队", "引擎", "待审批档案", "运行记录"][i] +
+              ["员工", "团队", "引擎", "待审批档案", "运行记录", "最近对话"][i] +
                 " · " +
                 String(r.reason),
             ]
@@ -633,9 +637,11 @@ function ManagementPortal() {
     : agents;
   const members = team?.agents.filter(a => a.state !== "outside").map(a => a.id) ?? [];
   const initialEmployee = members.includes(Number(entry.employee)) ? entry.employee : lead ? String(lead.id) : "";
+  const returningEmployee = agents.find(a => String(a.id) === params.get("employee"));
   const key =
     active ||
     (entry.requested && initialEmployee) ||
+    (returningEmployee && String(returningEmployee.id)) ||
     (ordered[0] ? String(ordered[0].id) : (pending[0]?.requestId ?? "new"));
   const chosen = agents.find((a) => String(a.id) === key) ?? null,
     proposal = pending.find((p) => p.requestId === key);
@@ -759,6 +765,7 @@ function ManagementPortal() {
                 <StaffEditor
                   key={key + "-" + rev}
                   agent={chosen}
+                  chatHref={chosen ? employeeChatHref(threads, chosen.id, Number(params.get("thread")) || null) : "/chat/"}
                   lead={lead}
                   member={
                     !!team?.agents.some(

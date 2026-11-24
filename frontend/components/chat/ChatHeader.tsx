@@ -16,7 +16,7 @@ import { Select } from "@/components/ui/Select";
 // approval mode, computer), and a few quiet icon buttons. Everything else lives in the sidebar
 // or opens in a panel. On a phone the secondary buttons fold into one menu.
 export function ChatHeader({
-  showWorkbench,
+  workbenchHref,
   title,
   agent,
   onOpenSidebar,
@@ -34,7 +34,7 @@ export function ChatHeader({
   trailing,
   status,
 }: {
-  showWorkbench: boolean;
+  workbenchHref: string | null;
   title: string;
   // The conversation's agent, for the avatar; null for a plain chat.
   agent: Pick<Agent, "id" | "name"> | null;
@@ -74,8 +74,8 @@ export function ChatHeader({
   return (
     <header className="opc-chat-header">
       <div className="opc-chat-navigation">
-        {showWorkbench && (
-          <Link href="/" className="opc-workbench-link">
+        {workbenchHref && (
+          <Link href={workbenchHref} className="opc-workbench-link">
             <ArrowLeft size={16} aria-hidden="true" />{t("portal.workbench")}
           </Link>
         )}

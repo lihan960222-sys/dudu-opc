@@ -63,7 +63,7 @@ export function RoomList({
 
   const roomCount = rooms?.length ?? 0;
   const showBoth = teamReady && rooms !== null;
-  const sectionTitle = showBoth ? `${t("team.title")} & ${t("room.plural")}` : teamReady ? t("team.title") : t("room.plural");
+  const sectionTitle = showBoth ? t("portal.teamAndRooms", { team: t("team.title"), rooms: t("room.plural") }) : teamReady ? t("team.title") : t("room.plural");
 
   return (
     <section aria-label={sectionTitle} className="pt-2">
