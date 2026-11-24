@@ -14,6 +14,7 @@ import { zh } from "./locales/zh.ts";
 import { agentTeamMessages } from "./locales/agent-team-extra.ts";
 import { knowledgeRoutinesMessages } from "./locales/knowledge-routines-extra.ts";
 import { appSettingsMessages } from "./locales/app-settings-extra.ts";
+import { workspaceMessages } from "./locales/workspace.ts";
 
 export const en = {
   "theme.label": "Theme",
@@ -1076,7 +1077,7 @@ const catalogs: Record<Locale, Partial<Record<EnglishKey, string>>> = {
 };
 
 type SupplementalCatalog = Record<Locale, Record<string, string>>;
-const supplementalCatalogs = [agentTeamMessages, knowledgeRoutinesMessages, appSettingsMessages] as unknown as SupplementalCatalog[];
+const supplementalCatalogs = [agentTeamMessages, knowledgeRoutinesMessages, appSettingsMessages, workspaceMessages] as unknown as SupplementalCatalog[];
 const writableCatalogs = catalogs as unknown as Record<Locale, Record<string, string>>;
 for (const locale of LOCALES) {
   for (const supplemental of supplementalCatalogs) {

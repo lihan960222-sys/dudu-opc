@@ -106,6 +106,9 @@ class TurnResponse(BaseModel):
 
 
 class ThreadDetailResponse(ThreadResponse):
+    model_policy: Literal["conversation", "role", "feishu", "task"] = "conversation"
+    policy_model: str | None = None
+    policy_model_unavailable: bool = False
     turns: list[TurnResponse]
     # The turn that is running now, if any.
     active_turn_id: int | None = None

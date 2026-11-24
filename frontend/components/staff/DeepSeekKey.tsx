@@ -60,7 +60,7 @@ export function DeepSeekKey() {
           {busy ? "正在验证…" : "验证并保存密钥"}
         </button>
       </div>
-      <small>保存员工资料后，管家发起的新模型请求会使用 DeepSeek。</small>
+      <small>此密钥供管家调用 DeepSeek。「保存更改」会更新岗位默认模型。</small>
       </div>}
       {error && <p role="alert" className="dp-error">{error}</p>}
     </div>

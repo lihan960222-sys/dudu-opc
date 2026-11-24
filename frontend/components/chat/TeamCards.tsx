@@ -12,11 +12,13 @@ import type { TeamJobItem, TeamSetupOperation, TeamSetupPlan, TranscriptItem } f
 import { JobCard } from "./TeamPanel";
 import { useSession } from "@/components/AuthGate";
 import { useT } from "@/lib/use-i18n";
+import { AgentPortrait } from "./AgentImage";
 
 export function DelegationCard({ item }: { item: TeamJobItem }) {
   return <JobCard job={{ id: item.jobId, root_id: null, parent_id: null, depth: 0, requester_agent_id: 0, requester_thread_id: null, assignee_agent_id: item.agentId, assignee_thread_id: item.threadId, mode: item.mode, brief: item.brief, status: item.status, created_at: new Date().toISOString(), started_at: null, finished_at: null, result: item.result, outcome: item.outcome }} agents={[]} onChanged={() => {}} />;
 }
 export function AgentCreatedCard({ item }: { item: Extract<TranscriptItem, { kind: "agent_created" }> }) {
+  const t = useT();
   const [state, setState] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [available, setAvailable] = useState(false);
@@ -31,7 +33,7 @@ export function AgentCreatedCard({ item }: { item: Extract<TranscriptItem, { kin
     try { const result = await collaboration.undoCreate(item.agentId); setState(result.removed); }
     catch (err) { setState(""); setError(err instanceof ApiError ? err.message : "Could not undo this specialist."); }
   };
-  return <article className="space-y-2 rounded-field border border-line p-3 text-sm"><p><strong>Specialist created: {item.name || `Agent ${item.agentId}`}</strong>{item.title ? ` · ${item.title}` : ""}</p><p className="text-xs text-muted">Instructions were written by the lead. Review them in Agents.</p>{session?.scopes.includes("admin") && available && !state && <button type="button" className="text-xs underline" onClick={() => void undo()}>Undo creation</button>}{state && <p role="status" className="text-xs text-muted">{state === "busy" ? "Undoing…" : `Specialist ${state}.`}</p>}{error && <p role="alert" className="text-xs text-danger">{error}</p>}</article>;
+  return <article className="space-y-2 rounded-field border border-line p-3 text-sm"><p><strong>{t("receipt.newEmployee", { name: item.name || t("receipt.unknownEmployee", {id:item.agentId}) })}</strong>{item.title ? ` · ${item.title}` : ""}</p>{session?.scopes.includes("admin") && available && !state && <button type="button" className="text-xs underline" onClick={() => void undo()}>{t("common.undo")}</button>}{state && <p role="status" className="text-xs text-muted">{state === "busy" ? t("receipt.undoing") : t("receipt.undone")}</p>}{error && <p role="alert" className="text-xs text-danger">{error}</p>}</article>;
 }
 
 const STALE: Record<string, string> = {
@@ -39,7 +41,7 @@ const STALE: Record<string, string> = {
   agent_used: "A specialist this added has already been used, so it was kept.",
   agent_busy: "A teammate is working right now. Try again when it is idle.",
 };
-const VERB: Record<string, string> = { created: "Added", updated: "Updated", deleted: "Deleted" };
+const receiptFields = new Set(["name", "title", "description", "instructions", "model", "provider", "first_task", "workspace_path"]);
 
 function ProposalField({ label, value, onChange, multiline = false, disabled = false, current }: { label: string; value: string; onChange: (value: string) => void; multiline?: boolean; disabled?: boolean; current?: string | null }) {
   return <label className="block text-xs font-medium">{label}{current !== undefined && <span className="ml-2 font-normal text-muted">Current: {current ?? "Default / empty"}</span>}{multiline
@@ -125,7 +127,7 @@ function TeamSetupProposal({ item, onDecided }: { item: Extract<TranscriptItem, 
           <StaffModelFields engines={engines} provider={operation.provider ?? "codex"} model={operation.model ?? null}
             disabled={!canReview || busy}
             onChange={(provider, model) => changeOperation(index, current => current.op === "create" ? {...current, provider, model} : current)} />
-          {isAdmin&&<div><span className="text-xs text-muted">员工头像 · 确认入职时保存</span>{pictures[index]&&<img className="size-10 rounded-lg" alt="待保存头像" src={pictures[index]}/>}<AvatarPicker onChange={data=>setPictures(prev=>({...prev,[index]:data}))}/></div>}
+          {isAdmin&&<div><span className="text-xs text-muted">员工头像 · 确认入职时保存</span>{pictures[index]&&<AgentPortrait src={pictures[index]} agentId={null} size="lg"/>}<AvatarPicker onChange={data=>setPictures(prev=>({...prev,[index]:data}))}/></div>}
           <FolderField value={operation.workspace_path??""} disabled={!isAdmin||busy||operation.share_workspace}
             onChange={value=>changeOperation(index,current=>current.op==="create"?{...current,workspace_path:value||undefined}:current)}/>
           <label className="flex items-center gap-2 text-xs"><input type="checkbox" disabled={!canReview || busy || !!operation.workspace_path || (!isAdmin && !operation.share_workspace)}
@@ -171,16 +173,16 @@ function AppliedTeamSetupCard({ item }: { item: Extract<TranscriptItem, { kind: 
   const canUndo = availability?.available === true && !state && session?.scopes.includes("admin");
   return (
     <article className="space-y-2 rounded-field border border-line p-3 text-sm">
-      <p><strong>Team changes applied</strong></p>
+      <p><strong>{t("receipt.applied")}</strong></p>
       <ul className="space-y-2 text-xs text-muted">{item.rows.map((row) => <li key={`${row.action}-${row.agentId}`}>
-        {VERB[row.action] ?? row.action}: {row.name || `Agent ${row.agentId}`}
-        {row.changes && <details className="mt-1"><summary className="cursor-pointer underline">Details</summary><dl className="mt-2 space-y-2">{row.changes.map(change => <div key={change.field}><dt className="font-medium">{change.field.replaceAll("_", " ")}</dt><dd className="whitespace-pre-wrap break-words"><del>{change.before == null ? "Default / empty" : String(change.before)}</del>{" → "}{change.after == null ? "Default / empty" : String(change.after)}</dd></div>)}</dl><p className="mt-2">{t("agentTeam.teamSavedDefaults")}</p></details>}
-        {row.action !== "deleted" && <div className="mt-1 flex flex-wrap gap-3"><button type="button" className="underline" onClick={() => window.dispatchEvent(new CustomEvent("suparagent:open-agent", { detail: { id: row.agentId, edit: false } }))}>Start chat</button>{row.firstTask && <button type="button" className="underline" onClick={() => window.dispatchEvent(new CustomEvent("suparagent:open-agent", { detail: { id: row.agentId, edit: false, firstTask: row.firstTask } }))}>Start with this task</button>}{session?.scopes.includes("admin") && <button type="button" className="underline" onClick={() => window.dispatchEvent(new CustomEvent("suparagent:open-agent", { detail: { id: row.agentId, edit: true } }))}>Edit agent</button>}</div>}
+        {t(`receipt.${row.action}`)} · {row.name || t("receipt.unknownEmployee", {id:row.agentId})}
+        {row.changes && <details className="mt-1"><summary className="cursor-pointer underline">{t("receipt.details")}</summary><dl className="mt-2 space-y-2">{row.changes.map(change => <div key={change.field}><dt className="font-medium">{receiptFields.has(change.field) ? t(`receipt.${change.field}`) : change.field.replaceAll("_", " ")}</dt><dd className="whitespace-pre-wrap break-words"><del>{change.before == null ? t("receipt.empty") : String(change.before)}</del>{" → "}{change.after == null ? t("receipt.empty") : String(change.after)}</dd></div>)}</dl><p className="mt-2">{t("agentTeam.teamSavedDefaults")}</p></details>}
+        {row.action !== "deleted" && <div className="mt-1 flex flex-wrap gap-3"><button type="button" className="underline" onClick={() => window.dispatchEvent(new CustomEvent("suparagent:open-agent", { detail: { id: row.agentId, edit: false } }))}>{t("receipt.start")}</button>{row.firstTask && <button type="button" className="underline" onClick={() => window.dispatchEvent(new CustomEvent("suparagent:open-agent", { detail: { id: row.agentId, edit: false, firstTask: row.firstTask } }))}>{t("receipt.first")}</button>}{session?.scopes.includes("admin") && <button type="button" className="underline" onClick={() => window.dispatchEvent(new CustomEvent("suparagent:open-agent", { detail: { id: row.agentId, edit: true } }))}>{t("employee.profile")}</button>}</div>}
       </li>)}</ul>
       {item.undoAvailable && <p className="text-xs text-muted">{t("agentTeam.undoCaveat")}</p>}
       {availability && !availability.available && !state && <p className="text-xs text-muted">{availability.reason}</p>}
-      {canUndo && <button type="button" className="text-xs underline" onClick={() => void undo()}>Undo</button>}
-      {state && <p role="status" className="text-xs text-muted">{state === "busy" ? "Undoing…" : "Undone."}</p>}
+      {canUndo && <button type="button" className="text-xs underline" onClick={() => void undo()}>{t("common.undo")}</button>}
+      {state && <p role="status" className="text-xs text-muted">{state === "busy" ? t("receipt.undoing") : t("receipt.undone")}</p>}
       {error && <p role="alert" className="text-xs text-danger">{error}</p>}
     </article>
   );

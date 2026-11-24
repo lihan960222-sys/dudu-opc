@@ -211,17 +211,16 @@ export function SkillsPanel({
   return (
     <section aria-label="Skills" className="space-y-3 border-t border-line pt-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold">Skills</h3>
+        <h3 className="text-sm font-semibold">{t("employee.skills")}</h3>
         <div className="flex gap-2">
-          <button className={SMALL} onClick={startNew} disabled={busy}>New skill</button>
+          <button className={SMALL} onClick={startNew} disabled={busy}>{t("emp.newSkill")}</button>
           <button className={SMALL} onClick={() => { setDraft(null); setImporting({ text: "", error: null }); }} disabled={busy}>
-            Import SKILL.md
+            {t("emp.importSkill")}
           </button>
         </div>
       </div>
       <p className="text-xs text-muted">
-        Saved instructions for {agent.name}. A skill is used only when you pick it for a message; it never starts on its own,
-        and importing one does not switch it on.
+        {t("emp.skillsHelp", {name:agent.name})}
       </p>
       {receipt && (
         <div role="status" className="flex flex-wrap items-center gap-2 text-xs text-muted">
@@ -314,7 +313,7 @@ export function SkillsPanel({
             Available to pick in conversations
           </label>
           <div className="flex flex-wrap gap-2">
-            <button className={PRIMARY} onClick={save} disabled={!canSave}>{busy ? "Saving…" : "Save skill"}</button>
+            <button className={PRIMARY} onClick={save} disabled={!canSave}>{busy ? t("emp.saving") : t("employee.save")}</button>
             <button className={BUTTON} onClick={() => setDraft(null)} disabled={busy}>Close</button>
           </div>
         </div>

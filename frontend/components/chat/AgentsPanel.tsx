@@ -51,6 +51,7 @@ import { AgentEditorFooter } from "./agents/AgentEditorFooter";
 import { ConnectedAppsSection } from "./agents/ConnectedAppsSection";
 import { filterAgents, shouldShowAgentSearch, unavailableEnginesInUse } from "./agents/agent-list";
 import { draftSignature } from "./agents/draft-state";
+import { employeeToolChanges } from "@/lib/employee-tools";
 
 type Draft = {
   id: number | null;
@@ -210,6 +211,8 @@ function SetupEntryDisclosure({ agents, engines, onStart, onCreateLead }: {
 // next message; new instructions and notes reach conversations started after them.
 export function AgentsPanel({
   agents,
+  toolsFor,
+  creationSources = false,
   onClose,
   onChanged,
   startCreating = false,
@@ -219,6 +222,8 @@ export function AgentsPanel({
   initialEditAgent = null,
 }: {
   agents: Agent[];
+  toolsFor?: Agent;
+  creationSources?: boolean;
   onSetupChat?: (id: number) => void;
   initialEditAgent?: Agent | null;
   onClose: () => void;
@@ -330,6 +335,12 @@ export function AgentsPanel({
   const save = () => {
     if (!draft || draft.name.trim() === "") return;
     const input = toInput(draft, admin);
+    if (toolsFor) {
+      if (!originalDraft || draft.id !== toolsFor.id) return;
+      const changes = employeeToolChanges(toInput(originalDraft, admin), input);
+      void run(() => api.updateAgent(toolsFor.id, changes), () => { setDraft(null); setOriginalDraft(null); });
+      return;
+    }
     if (draft.id === null && fromTemplate) return createFromTemplate(input, fromTemplate);
     run(
       async () => {
@@ -362,13 +373,17 @@ export function AgentsPanel({
   const createFromTemplate = async (input: AgentInput, source: { template: AgentTemplate; skills: string[] }) => {
     setBusy(true);
     setError(null);
+    let created: Agent | null = null;
     try {
       const agent = await api.createAgent({ ...input, make_lead: isLead });
-      const savedDraft = toDraft(agent);
-      setDraft(savedDraft);
-      setOriginalDraft(savedDraft);
-      setFromTemplate(null);
-      setRoleChoice({ id: agent.id, value: isLead });
+      created = agent;
+      if (!creationSources) {
+        const savedDraft = toDraft(agent);
+        setDraft(savedDraft);
+        setOriginalDraft(savedDraft);
+        setFromTemplate(null);
+        setRoleChoice({ id: agent.id, value: isLead });
+      }
       if (isLead) for (const [id, included] of Object.entries(memberChoices)) {
         if (included) await collaboration.addMember(Number(id));
         else if (team?.agents.some(member => member.id === Number(id))) await collaboration.removeMember(Number(id));
@@ -384,7 +399,13 @@ export function AgentsPanel({
       if (notice) setError(notice);
       else onClose();
     } catch (err) {
-      setError(errorText(err));
+      if (created && creationSources) {
+        setDraft(null);
+        setOriginalDraft(null);
+        setFromTemplate(null);
+        onChanged();
+        setError(t("emp.partial", {name:created.name, reason:errorText(err)}));
+      } else setError(errorText(err));
     } finally {
       setBusy(false);
     }
@@ -678,7 +699,7 @@ export function AgentsPanel({
   const openDraft = (nextDraft: Draft) => {
     setDraft(nextDraft);
     setOriginalDraft(nextDraft);
-    setEditorSection("basics");
+    setEditorSection(toolsFor ? "model" : "basics");
     setRoleChoice(null);
     setMemberChoices({});
     setDiscardConfirm(false);
@@ -731,7 +752,7 @@ export function AgentsPanel({
     <Dialog
       open
       onOpenChange={(open) => { if (!open) requestClose(true); }}
-      title={heading}
+      title={toolsFor ? `${toolsFor.name} · ${t("employee.tools")}` : creationSources ? (draft ? `${t("sidebar.newAgent")} · ${fromTemplate?.template.name ?? draft.name}` : t("employee.createFrom")) : heading}
       size={draft || gallery ? "lg" : "wide"}
       footer={draft ? (
         <AgentEditorFooter
@@ -739,7 +760,7 @@ export function AgentsPanel({
           saving={busy}
           error={error}
           canSave={draft.name.trim() !== "" && editorDirty && !discardConfirm}
-          saveLabel="Save"
+          saveLabel={t("employee.save")}
           cancelLabel={t("common.cancel")}
           onCancel={() => requestClose(false)}
           form="agent-editor-form"
@@ -763,9 +784,9 @@ export function AgentsPanel({
             >
               {discardConfirm && (
                 <div role="group" aria-labelledby="discard-agent-title" className="mb-3 flex flex-wrap items-center gap-2 rounded-field border border-warning/50 bg-warning/10 p-3 text-sm">
-                  <p id="discard-agent-title" className="min-w-0 flex-1 font-medium">Discard unsaved changes?</p>
-                  <Button ref={keepEditingRef} type="button" variant="secondary" onClick={() => { setDiscardConfirm(false); setCloseAfterDiscard(false); }}>Keep editing</Button>
-                  <Button type="button" variant="danger" onClick={discardAndClose}>Discard changes</Button>
+                  <p id="discard-agent-title" className="min-w-0 flex-1 font-medium">{t("emp.discardPrompt")}</p>
+                  <Button ref={keepEditingRef} type="button" variant="secondary" onClick={() => { setDiscardConfirm(false); setCloseAfterDiscard(false); }}>{t("emp.keep")}</Button>
+                  <Button type="button" variant="danger" onClick={discardAndClose}>{t("emp.discard")}</Button>
                 </div>
               )}
               <Tabs
@@ -773,65 +794,65 @@ export function AgentsPanel({
                 onValueChange={(value) => setEditorSection(value as EditorSection)}
                 className="flex min-h-0 flex-1 flex-col"
               >
-                <TabList label="Agent settings sections">
-                  <Tab value="basics">Basics</Tab>
-                  <Tab value="model">Model and approvals</Tab>
-                  {canEditConnectedApps && <Tab value="apps">Connected apps</Tab>}
-                  <Tab value="memory">Memory and notes</Tab>
+                <TabList label={t("employee.profile")}>
+                  {!toolsFor && <Tab value="basics">{t("emp.basics")}</Tab>}
+                  <Tab value="model">{toolsFor ? t("employee.execution") : t("emp.modelApproval")}</Tab>
+                  {canEditConnectedApps && <Tab value="apps">{t("employee.apps")}</Tab>}
+                  {!toolsFor && <Tab value="memory">{t("employee.memory")}</Tab>}
                 </TabList>
                 <div className="min-h-0 flex-1 overflow-y-auto pb-4 pt-4">
-                  <TabPanel value="basics" className="space-y-3">
+                  {!toolsFor && <TabPanel value="basics" className="space-y-3">
                     {draft.id === null && onSetupChat && admin && (
                       <SetupEntryDisclosure agents={agents} engines={engines} onStart={onSetupChat} onCreateLead={() => setRoleChoice({ id: null, value: true })} />
                     )}
                     <label className="block text-xs text-muted">
-                      Name
+                      {t("receipt.name")}
                       <input
                         autoFocus
                         value={draft.name}
                         maxLength={80}
                         onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                        placeholder="Code reviewer"
+                        placeholder={t("emp.nameExample")}
                         className={`${FIELD} mt-1`}
                       />
                     </label>
                     <label className="block text-xs text-muted">
-                      Title
+                      {t("receipt.title")}
                       <input
                         value={draft.title}
                         maxLength={200}
                         onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-                        placeholder="Reviews pull requests before merge"
+                        placeholder={t("emp.titleExample")}
                         className={`${FIELD} mt-1`}
                       />
                     </label>
                     <label className="block text-xs text-muted">
-                      Description
+                      {t("receipt.description")}
                       <textarea
                         value={draft.description}
                         rows={2}
                         maxLength={4000}
                         onChange={(e) => setDraft({ ...draft, description: e.target.value })}
-                        placeholder="For you: what this agent is for. Not sent to Claude."
+                        placeholder={t("emp.dutiesHint")}
                         className={`${FIELD} mt-1 resize-y`}
                       />
                     </label>
                     <label className="block text-xs text-muted">
-                      Instructions
+                      {t("receipt.instructions")}
                       <textarea
                         value={draft.instructions}
                         rows={5}
                         onChange={(e) => setDraft({ ...draft, instructions: e.target.value })}
-                        placeholder="How this agent should behave. Added to every conversation it starts."
+                        placeholder={t("emp.instructionsHint")}
                         className={`${FIELD} mt-1 resize-y`}
                       />
                     </label>
                     <label className="block text-xs text-muted">
-                      Workspace folder
+                      {t("receipt.workspace_path")}
                       <input
                         value={draft.workspace_path}
                         onChange={(e) => setDraft({ ...draft, workspace_path: e.target.value })}
-                        placeholder="Leave empty for the agent's own folder"
+                        placeholder={t("emp.folderHint")}
                         className={`${FIELD} mt-1 font-mono`}
                       />
                     </label>
@@ -859,16 +880,16 @@ export function AgentsPanel({
                         onChange={(skills) => setFromTemplate({ ...fromTemplate, skills })}
                       />
                     )}
-                  </TabPanel>
+                  </TabPanel>}
 
                   <TabPanel value="model" className="space-y-4">
-                    <section className="space-y-2">
-                      <h3 className="text-sm font-medium text-ink">Model</h3>
+                    {!toolsFor && <section className="space-y-2">
+                      <h3 className="text-sm font-medium text-ink">{t("portal.model")}</h3>
                       <EngineModelFields engines={engines} provider={draft.provider} model={draft.model} effort={draft.effort} disabled={busy} hasComputer={agents.some((agent) => agent.id === draft.id && agent.computer != null)} onChange={(provider, model, effort) => setDraft({ ...draft, provider, model, effort: effort ?? null, approval_mode: approvalModesForProvider(provider).some((mode) => mode.value === draft.approval_mode) ? draft.approval_mode : "ask" })} />
-                      <p className="text-xs text-muted">Engine changes apply to new conversations. Existing conversations keep their engine.</p>
-                    </section>
+                      <p className="text-xs text-muted">{t("emp.engineHint")}</p>
+                    </section>}
 
-                    {admin && <fieldset className="space-y-2 rounded-field border border-line p-3">
+                    {!toolsFor && admin && <fieldset className="space-y-2 rounded-field border border-line p-3">
                       <legend className="px-1 text-sm font-medium">{t("agentTeam.teamPermissionsTitle")}</legend>
                       <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={isLead} disabled={busy || !team || (!roleSupported && !isLead)} onChange={event => setRoleChoice({ id: draft.id, value: event.target.checked })} />{t("agentTeam.leadRole")}</label>
                       <p className="text-xs text-muted">{t("agentTeam.leadRoleDescription")}</p>
@@ -880,30 +901,30 @@ export function AgentsPanel({
 
                     {admin && draft.provider === "claude" && claudeAccounts.length > 0 && (
                       <label className="block text-xs text-muted">
-                        Claude account
+                        {t("employee.account")}
                         <Select
-                          aria-label="Claude account"
+                          aria-label={t("employee.account")}
                           value={draft.claude_account && claudeAccounts.some((a) => a.id === draft.claude_account) ? draft.claude_account : ""}
                           disabled={busy}
                           onChange={(e) => setDraft({ ...draft, claude_account: e.target.value || null })}
                           className={`${FIELD} mt-1`}
                         >
-                          <option value="">Default account</option>
+                          <option value="">{t("employee.defaultAccount")}</option>
                           {claudeAccounts.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
                         </Select>
-                        <span className="mt-1 block">New conversations use this account. Accounts are added and signed in through the API for now.</span>
+                        <span className="mt-1 block">{t("emp.accountHint")}</span>
                       </label>
                     )}
                     <label className="block text-xs text-muted">
-                      Fallback engine when limited
+                      {t("employee.fallback")}
                       <Select
-                        aria-label="Fallback engine"
+                        aria-label={t("employee.fallback")}
                         value={draft.fallback_provider && draft.fallback_provider !== draft.provider ? draft.fallback_provider : ""}
                         disabled={busy}
                         onChange={(e) => setDraft({ ...draft, fallback_provider: e.target.value || null, fallback_model: null })}
                         className={`${FIELD} mt-1`}
                       >
-                        <option value="">None</option>
+                        <option value="">{t("employee.none")}</option>
                         {engines.filter((engine) => engine.id !== draft.provider).map((engine) => (
                           <option key={engine.id} value={engine.id}>{engine.label}</option>
                         ))}
@@ -911,12 +932,12 @@ export function AgentsPanel({
                     </label>
                     {draft.fallback_provider && draft.fallback_provider !== draft.provider && (
                       <label className="block text-xs text-muted">
-                        Fallback model
+                        {t("employee.fallbackModel")}
                         <input
-                          aria-label="Fallback model"
+                          aria-label={t("employee.fallbackModel")}
                           value={draft.fallback_model ?? ""}
                           onChange={(e) => setDraft({ ...draft, fallback_model: e.target.value || null })}
-                          placeholder="Engine default"
+                          placeholder={t("employee.defaultModel")}
                           maxLength={200}
                           className={`${FIELD} mt-1`}
                         />
@@ -924,7 +945,7 @@ export function AgentsPanel({
                     )}
                     <p className="text-xs text-muted">{t("agentTeam.fallbackEngineDescription")}</p>
                     <fieldset className="space-y-2 text-xs text-muted">
-                      <legend>Approvals</legend>
+                      <legend>{t("employee.approvals")}</legend>
                       <div className="mt-1 flex flex-wrap gap-2">
                         {availableApprovalModes.map((mode) => (
                           <label
@@ -942,11 +963,11 @@ export function AgentsPanel({
                               checked={draft.approval_mode === mode.value}
                               onChange={() => setDraft({ ...draft, approval_mode: mode.value })}
                             />
-                              <span className="inline-flex min-h-8 items-center rounded-md peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-accent touch:min-h-11">{mode.label}</span>
+                              <span className="inline-flex min-h-8 items-center rounded-md peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-accent touch:min-h-11">{t(`profile.approval.${mode.value}`)}</span>
                           </label>
                         ))}
                       </div>
-                      {modeInfo && <p>{modeInfo.description}</p>}
+                      {modeInfo && <p>{t(`emp.approvalHelp.${modeInfo.value}`)}</p>}
                     </fieldset>
                   </TabPanel>
 
@@ -963,10 +984,10 @@ export function AgentsPanel({
                     </TabPanel>
                   )}
 
-                  <TabPanel value="memory" className="space-y-3">
+                  {!toolsFor && <TabPanel value="memory" className="space-y-3">
                     {draft.id === null && (
                       <label className="block text-xs text-muted">
-                        Starter notes
+                        {t("emp.starterNotes")}
                         <textarea
                           value={draft.starter_notes}
                           rows={5}
@@ -984,26 +1005,26 @@ export function AgentsPanel({
                         disabled={busy}
                         onChange={() => setDraft({ ...draft, memory_enabled: !draft.memory_enabled })}
                       />
-                      Use notes: load this agent&apos;s MEMORY.md into each conversation
+                      {t("emp.useNotes")}
                     </label>
-                  </TabPanel>
+                  </TabPanel>}
                 </div>
               </Tabs>
             </form>
           ) : gallery ? (
             <div className="space-y-3">
               {hireSeveral ? (
-                <ChooseTeam skipLabel="Skip · back to templates" onSkip={() => setHireSeveral(false)} onHired={onChanged} onUndone={onChanged} />
+                <ChooseTeam skipLabel={t("emp.backTemplates")} onSkip={() => setHireSeveral(false)} onHired={onChanged} onUndone={onChanged} />
               ) : (
                 <>
                   <button type="button" onClick={() => setHireSeveral(true)} className={BUTTON}>
-                    Hire several
+                    {t("emp.hireSeveral")}
                   </button>
                   <TemplatesGallery onAdd={addTemplate} />
                 </>
               )}
               <button type="button" onClick={() => { setHireSeveral(false); back(); }} className={BUTTON}>
-                Back to agents
+                {creationSources ? t("employee.createFrom") : t("onboarding.back")}
               </button>
             </div>
           ) : computerOf ? (
@@ -1015,28 +1036,28 @@ export function AgentsPanel({
                 engineLabel={engines.find((engine) => engine.id === computerOf.provider)?.label ?? computerOf.provider}
               />
               <button onClick={back} className={BUTTON}>
-                Back
+                {t("onboarding.back")}
               </button>
             </div>
           ) : historyOf ? (
             <div className="space-y-3">
               <AgentHistory key={historyOf.id} agent={historyOf} onRestored={onChanged} />
               <button onClick={back} className={BUTTON}>
-                Back
+                {t("onboarding.back")}
               </button>
             </div>
           ) : pictureOf ? (
             <div className="space-y-3">
               <AgentImageGenerator key={pictureOf.id} agent={pictureOf} onChanged={() => setPictureTick((n) => n + 1)} />
               <button onClick={back} className={BUTTON}>
-                Back
+                {t("onboarding.back")}
               </button>
             </div>
           ) : skillsOf ? (
             <div className="space-y-3">
               <SkillsPanel key={skillsOf.id} agent={skillsOf} />
               <button onClick={back} className={BUTTON}>
-                Back
+                {t("onboarding.back")}
               </button>
             </div>
           ) : notes ? (
@@ -1073,10 +1094,10 @@ export function AgentsPanel({
               {exporting.notice && <p className="text-xs text-muted">{exporting.notice}</p>}
               <div className="flex gap-2">
                 <button onClick={doExport} disabled={busy} className={PRIMARY}>
-                  {busy ? "Saving…" : "Save file"}
+                  {busy ? t("emp.saving") : t("emp.saveFile")}
                 </button>
                 <button onClick={back} disabled={busy} className={BUTTON}>
-                  Done
+                  {t("emp.done")}
                 </button>
               </div>
             </div>
@@ -1084,22 +1105,22 @@ export function AgentsPanel({
             <div className="space-y-3 text-sm">
               {migration.source === null ? (
                 <>
-                  <p>Choose a source for the instructions and profile details you want to bring in.</p>
+                  <p>{t("emp.sourceHint")}</p>
                   <div className="flex flex-wrap gap-2">
-                    <button type="button" onClick={() => setMigration({ ...migration, source: "grok" })} className={BUTTON}>Grok Bot export</button>
-                    <button type="button" onClick={() => setMigration({ ...migration, source: "hermes" })} className={BUTTON}>Hermes Agent export</button>
+                    <button type="button" onClick={() => setMigration({ ...migration, source: "grok" })} className={BUTTON}>Grok Bot</button>
+                    <button type="button" onClick={() => setMigration({ ...migration, source: "hermes" })} className={BUTTON}>Hermes Agent</button>
                     <button
                       type="button"
                       onClick={() => { setOpenBotDatabase(null); setMigration({ ...migration, source: "openbot" }); }}
                       disabled={!canReadOpenBotDatabase}
                       className={BUTTON}
-                      title={canReadOpenBotDatabase ? undefined : "Available only when connected to a local backend."}
+                      title={canReadOpenBotDatabase ? undefined : t("emp.localOnly")}
                     >
-                      OpenBot database{canReadOpenBotDatabase ? "" : " · local app only"}
+                      {t("emp.openbot")}{canReadOpenBotDatabase ? "" : ` · ${t("emp.localOnly")}`}
                     </button>
-                    <button type="button" onClick={() => setMigration({ ...migration, source: "other" })} className={BUTTON}>Another agent JSON</button>
+                    <button type="button" onClick={() => setMigration({ ...migration, source: "other" })} className={BUTTON}>{t("emp.otherJSON")}</button>
                   </div>
-                  <button type="button" onClick={back} className={BUTTON}>Cancel</button>
+                  <button type="button" onClick={back} className={BUTTON}>{t("common.cancel")}</button>
                 </>
               ) : migration.source === "openbot" ? (
                 <>
@@ -1155,7 +1176,7 @@ export function AgentsPanel({
                       </button>
                     </>
                   )}
-                  <button type="button" onClick={back} disabled={busy} className={BUTTON}>Cancel</button>
+                  <button type="button" onClick={back} disabled={busy} className={BUTTON}>{t("common.cancel")}</button>
                 </>
               ) : (
                 <>
@@ -1232,7 +1253,7 @@ export function AgentsPanel({
                     >
                       {busy ? "Previewing…" : canReadLocalBackend && (migration.source === "grok" || migration.source === "hermes") ? "Preview manifest roster" : "Review import"}
                     </button>
-                    <button type="button" onClick={back} disabled={busy} className={BUTTON}>Cancel</button>
+                    <button type="button" onClick={back} disabled={busy} className={BUTTON}>{t("common.cancel")}</button>
                   </div>
                 </>
               )}
@@ -1252,24 +1273,24 @@ export function AgentsPanel({
                     </p>
                     <dl className="mt-3 space-y-2">
                       <div>
-                        <dt className="text-xs font-medium text-muted">Name</dt>
+                        <dt className="text-xs font-medium text-muted">{t("receipt.name")}</dt>
                         <dd className="break-words">{importing.migration.name}</dd>
                       </div>
                       <div>
-                        <dt className="text-xs font-medium text-muted">Title</dt>
-                        <dd className="break-words">{importing.migration.title || "Not provided"}</dd>
+                        <dt className="text-xs font-medium text-muted">{t("receipt.title")}</dt>
+                        <dd className="break-words">{importing.migration.title || t("receipt.empty")}</dd>
                       </div>
                       <div>
-                        <dt className="text-xs font-medium text-muted">Description</dt>
+                        <dt className="text-xs font-medium text-muted">{t("receipt.description")}</dt>
                         <dd className="max-h-20 overflow-auto whitespace-pre-wrap break-words">
-                          {importing.migration.description || "Not provided"}
+                          {importing.migration.description || t("receipt.empty")}
                         </dd>
                       </div>
                       <div>
-                        <dt className="text-xs font-medium text-muted">Instructions</dt>
+                        <dt className="text-xs font-medium text-muted">{t("receipt.instructions")}</dt>
                         <dd>
                           <details className="mt-1">
-                            <summary className="cursor-pointer">Review full instructions</summary>
+                            <summary className="cursor-pointer">{t("emp.reviewInstructions")}</summary>
                             <div className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded border border-line p-2 text-xs">
                               {importing.migration.instructions}
                             </div>
@@ -1293,8 +1314,7 @@ export function AgentsPanel({
                 </>
               ) : (
                 <p>
-                  Add <span className="font-medium">{importing.name}</span> as a new agent. It starts on &quot;Ask first&quot;
-                  with the default model and its own folder; a name already in use gets a number.
+                  {t("emp.importPreview", {name:importing.name})}
                 </p>
               )}
               {importing.hasNotes && (
@@ -1319,12 +1339,34 @@ export function AgentsPanel({
                   disabled={busy}
                   className={PRIMARY}
                 >
-                  {busy ? "Adding…" : "Add agent"}
+                  {busy ? t("emp.adding") : t("sidebar.newAgent")}
                 </button>
                 <button onClick={back} disabled={busy} className={BUTTON}>
-                  Cancel
+                  {t("common.cancel")}
                 </button>
               </div>
+            </div>
+          ) : creationSources ? (
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" onClick={() => setGallery(true)}>{t("employee.templates")}</Button>
+              <Button variant="secondary" onClick={() => fileInput.current?.click()}>{t("employee.import")}</Button>
+              <Button variant="secondary" onClick={() => { setError(null); setOpenBotDatabase(null); setMigration({source:null, text:"", copied:false}); }}>{t("employee.migrate")}</Button>
+              <input ref={fileInput} type="file" accept=".json,application/json" className="hidden" aria-label={t("employee.import")} onChange={e => void pickImport(e.target.files?.[0])} />
+            </div>
+          ) : toolsFor ? (
+            <div className="space-y-4">
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Button variant="secondary" disabled={busy} onClick={() => openDraft(toDraft(toolsFor))}>{t("employee.execution")}</Button>
+                <Button variant="secondary" disabled={busy} onClick={() => setSkillsOf(toolsFor)}>{t("employee.skills")}</Button>
+                <Button variant="secondary" disabled={busy} onClick={() => void openNotes(toolsFor)}>{t("employee.memory")}</Button>
+                {!toolsFor.archived_at && <Button variant="secondary" disabled={busy} onClick={() => setComputerOf(toolsFor)}>{t("employee.computer")}</Button>}
+                <Button variant="secondary" disabled={busy} onClick={() => setHistoryOf(toolsFor)}>{t("employee.history")}</Button>
+                <Button variant="secondary" disabled={busy} onClick={() => setExporting({agent:toolsFor, includeNotes:false, notice:null})}>{t("employee.export")}</Button>
+              </div>
+              <details className="border-t border-line pt-3 text-sm">
+                <summary className="cursor-pointer">{t(toolsFor.archived_at ? "employee.restore" : "employee.archive")}</summary>
+                <Button className="mt-3" variant="secondary" disabled={busy} onClick={() => void run(() => api.updateAgent(toolsFor.id, {archived:!toolsFor.archived_at}), onClose)}>{t(toolsFor.archived_at ? "employee.confirmRestore" : "employee.confirmArchive")}</Button>
+              </details>
             </div>
           ) : (
             <>
@@ -1493,7 +1535,7 @@ function NotesEditor({
 }) {
   const t = useT();
   const { memory } = notes;
-  if (!memory) return <p className="text-sm text-muted">Loading notes…</p>;
+  if (!memory) return <p className="text-sm text-muted">{t("emp.loadingNotes")}</p>;
   const gauge = memoryGauge(memory);
   const dirty = notes.text !== memory.text;
   const enabled = notes.agent.memory_enabled ?? true;
@@ -1501,9 +1543,7 @@ function NotesEditor({
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted">
-        Notes this agent keeps between conversations, in <span className="font-mono break-all">{memory.path}</span>. Only
-        the first {memory.max_lines} lines load into each conversation. Anything that looks like a password or key is
-        replaced when saved.
+        {t("emp.notesHelp", {lines:memory.max_lines})} <span className="font-mono break-all">{memory.path}</span>
       </p>
       <div>
         <div className="h-1.5 w-full overflow-hidden rounded bg-hover" aria-hidden="true">
@@ -1535,7 +1575,7 @@ function NotesEditor({
       {notes.saved && <p className="text-xs text-muted">{notes.saved}</p>}
       <label className="flex cursor-pointer items-center gap-2 text-xs text-muted">
         <input type="checkbox" checked={enabled} disabled={busy} onChange={() => onToggle(!enabled)} />
-        Use notes in this agent&apos;s conversations
+        {t("emp.useNotes")}
       </label>
       <label className="flex cursor-pointer items-center gap-2 text-xs text-muted">
         <input type="checkbox" checked={recall} disabled={busy || !enabled} onChange={() => onToggleRecall(!recall)} />
@@ -1544,10 +1584,10 @@ function NotesEditor({
       </label>
       <div className="flex gap-2">
         <button onClick={onSave} disabled={busy || !dirty} className={PRIMARY}>
-          {busy ? "Saving…" : "Save notes"}
+          {busy ? t("emp.saving") : t("employee.save")}
         </button>
         <button onClick={onBack} disabled={busy} className={BUTTON}>
-          {dirty ? "Discard" : "Done"}
+          {dirty ? t("emp.discard") : t("emp.done")}
         </button>
       </div>
       <MemoryPanel agent={notes.agent} onAgentChange={onAgentChange} onNotesChanged={() => !dirty && onReload()} />

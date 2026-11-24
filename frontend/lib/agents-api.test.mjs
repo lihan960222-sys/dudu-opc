@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { api, ApiError } from './api.ts';
-import { activeAgents, agentFileHasNotes, agentFileText, agentNames, chatModelLabel, memoryGauge, tidyLine, modelFromInput, modelLabel, approvalModeLabel, parseAgentFile, redactionNotice } from './agents.ts';
+import { activeAgents, agentFileHasNotes, agentFileText, agentNames, chatModelLabel, modelChoice, memoryGauge, tidyLine, modelFromInput, modelLabel, approvalModeLabel, parseAgentFile, redactionNotice } from './agents.ts';
 
 const originalFetch = globalThis.fetch;
 test('the chat chip names the model selected for this conversation, including the engine default', () => {
@@ -145,4 +145,17 @@ test('a tidy-up is described in one line', () => {
     tidyLine({ organized: 2, expired: 1, duplicates: 3, superseded: 1, note: null }),
     'Tidied: 2 filed into topic notes, 1 expired moved to the archive, 3 repeats removed, 1 contradicted note struck through.'
   );
+});
+
+test("reasoning options come from the inherited role model, including unset and unknown defaults", () => {
+  const engine={default_model:"gpt-default",models:[
+    {id:"gpt-default", supported_reasoning_efforts:["minimal","high"]},
+    {id:"role-model", supported_reasoning_efforts:["medium","high"],default_reasoning_effort:"medium"},
+    {id:"fixed", supported_reasoning_efforts:["low","high"],reasoning_effort_configurable:false}]};
+  assert.deepEqual(modelChoice(engine,null,"role-model").efforts,["medium","high"]);
+  assert.deepEqual(modelChoice(engine,"saved-unknown","role-model").efforts,[]);
+  assert.deepEqual(modelChoice(engine,"fixed").efforts,[]);
+  assert.equal(modelChoice({models:[{id:"first"}]},null).id,null);
+  assert.equal(chatModelLabel(undefined,"gpt-6.2-sol",""),"GPT-6.2 Sol");
+  assert.equal(chatModelLabel(undefined,"my-team-model",""),"my-team-model");
 });

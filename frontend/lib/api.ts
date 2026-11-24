@@ -805,6 +805,9 @@ export type AgentExport = {
 };
 
 export type Thread = {
+  model_policy?: "conversation" | "role" | "feishu" | "task";
+  policy_model?: string | null;
+  policy_model_unavailable?: boolean;
   id: number;
   kind?: string;
   // Present once the backend supports named agents; null for a plain chat.

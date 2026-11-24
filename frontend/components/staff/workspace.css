@@ -1,0 +1,48 @@
+.opc-workspace {
+  display: grid;
+  grid-template-columns: clamp(8.5rem, 12vw, 11rem) minmax(0, 1fr);
+  height: 100dvh; overflow: hidden;
+  background: var(--bg-raised); color: var(--ink);
+}
+.opc-workspace-nav {
+  display: flex; flex-direction: column; gap: 4px; padding: 22px 10px 12px;
+  background: var(--bg-app); border-right: 1px solid var(--line);
+}
+.opc-workspace-brand {
+  display: flex; align-items: center; gap: 9px; margin: 0 7px 24px;
+  font-size: 15px; font-weight: 650; letter-spacing: -.02em;
+}
+.opc-workspace-brand svg { color: var(--accent); }
+.opc-workspace-nav > :is(a,button) {
+  display: flex; align-items: center; gap: 10px; min-height: 40px;
+  padding: 6px 11px; border-radius: 9px;
+  color: var(--ink-muted); text-decoration: none; font-size: 14px; font-weight: 500;
+}
+.opc-workspace-nav > :is(a,button):hover { color: var(--ink); background: var(--bg-hover); }
+.opc-workspace-nav > [aria-current="page"] {
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg-app));
+}
+.opc-workspace-more { margin-top: auto; }
+.opc-workspace-content { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.opc-workspace-content > :is(.opc-chat,.opc-chat-gate) { height: 100%; }
+.opc-history-button {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 4px 8px;
+  border-radius: 7px; color: var(--ink-muted); font-size: 13px; white-space: nowrap;
+}
+.opc-history-button:hover { background: var(--bg-hover); color: var(--ink); }
+.opc-workspace-content .dp-archived, .opc-workspace-content .dp-import { margin-block: 8px; }
+.opc-workspace-content #workbench { min-height: 100%; }
+.opc-workspace-content .dp-main { padding-top: 2px; }
+@media (max-width: 720px) {
+  .opc-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .opc-workspace-nav {
+    flex-direction: row; justify-content: space-around; align-items: center; gap: 3px;
+    padding: max(4px, env(safe-area-inset-top)) 7px 4px;
+    border-right: 0; border-bottom: 1px solid var(--line);
+  }
+  .opc-workspace-brand { display: none; }
+  .opc-workspace-nav > :is(a,button) { justify-content: center; gap: 5px; padding: 3px 6px; min-height: 40px; }
+  .opc-workspace-more { margin-top: 0; }
+  .opc-history-button span { display: none; }
+  .opc-history-button { min-width: 40px; min-height: 40px; justify-content: center; }
+}

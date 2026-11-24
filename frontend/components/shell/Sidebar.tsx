@@ -100,6 +100,7 @@ export function Sidebar({
   onOpenPlanner,
   onOpenWorkflows,
   showApps = true,
+  historyOnly = false,
   onNavigate,
   collaboration,
   workspaces,
@@ -125,6 +126,7 @@ export function Sidebar({
   onOpenWorkflows?: () => void;
   // The Apps page is for admins; a member is not offered it.
   showApps?: boolean;
+  historyOnly?: boolean;
   onNavigate?: () => void;
   collaboration?: React.ReactNode;
   // The hosted company switcher (components/shell/WorkspaceSwitcher.tsx); absent on the desktop and self-hosted.
@@ -169,7 +171,7 @@ export function Sidebar({
     <nav aria-label={t("shell.conversations")} className="opc-chat-sidebar flex h-full min-h-0 flex-col text-ink">
       <div className="opc-chat-brand">
         <span className="opc-chat-brand-icon"><MessagesSquare size={20} aria-hidden="true" /></span>
-        <span>{t("shell.conversations")}</span>
+        <span>{t(historyOnly ? "workspace.history" : "shell.conversations")}</span>
       </div>
       {workspaces}
       <div className="opc-chat-compose-action">
@@ -238,7 +240,7 @@ export function Sidebar({
         </section>
 
         {/* 2. Custom Agents - Collapsible */}
-        {agents !== null && (
+        {!historyOnly && agents !== null && (
           <section aria-label={t("sidebar.agents")} className="mt-1">
             <CollapsibleSectionHeader
               title={t("sidebar.agents")}
@@ -356,7 +358,7 @@ export function Sidebar({
       {/* Navigation Tools & Footer */}
       <div className="opc-chat-sidebar-footer mt-auto shrink-0 border-t border-line p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
         <div className="space-y-0.5">
-          {onOpenPlanner && (
+          {!historyOnly && onOpenPlanner && (
             <button
               type="button"
               onClick={() => {
@@ -404,7 +406,7 @@ export function Sidebar({
         </div>
 
         {/* Bottom bar with Settings and Theme Toggle */}
-        <div className="opc-chat-preferences mt-1.5 border-t border-line/60 pt-1.5">
+        {!historyOnly && <div className="opc-chat-preferences mt-1.5 border-t border-line/60 pt-1.5">
           <Link
             href="/settings/"
             onClick={onNavigate}
@@ -416,9 +418,9 @@ export function Sidebar({
             {updateAvailable && (
               <span
                 className="ml-auto inline-flex items-center rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent"
-                title={`Suparagent ${latestVersion ?? ""} is available`}
+                title={`${t("workspace.update")} · Suparagent ${latestVersion ?? ""}`}
               >
-                Update
+                {t("workspace.update")}
               </span>
             )}
           </Link>
@@ -426,7 +428,7 @@ export function Sidebar({
             <LanguageSelect compact />
             <ThemeToggle iconOnly />
           </div>
-        </div>
+        </div>}
       </div>
     </nav>
   );

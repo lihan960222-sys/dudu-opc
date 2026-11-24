@@ -1,5 +1,5 @@
 "use client";
-import { STEWARD_MODELS } from "@/lib/agents";
+import { EngineModelFields } from "../chat/EngineModelFields";
 
 import { useRef, useState } from "react";
 import { Bot, Box, Compass, Folder, FolderOpen, Scan } from "lucide-react";
@@ -273,94 +273,14 @@ export function savePicture(id: number, data: string) {
 }
 
 export function StaffModelFields({
-  engines,
-  provider,
-  model,
-  disabled = false,
-  lockProvider = false,
-  stewardModels = false,
-  onChange,
+  engines, provider, model, effort, disabled, lockProvider, stewardModels, requireModel, onChange,
 }: {
-  engines: Engine[];
-  provider: string;
-  model: string | null;
-  disabled?: boolean;
-  lockProvider?: boolean;
-  stewardModels?: boolean;
-  onChange: (provider: string, model: string | null) => void;
+  engines: Engine[]; provider: string; model: string | null; effort?: string | null;
+  disabled?: boolean; lockProvider?: boolean; stewardModels?: boolean; requireModel?: boolean;
+  onChange: (provider: string, model: string | null, effort?: string | null) => void;
 }) {
-  const engine = engines.find((e) => e.id === provider);
-  const [custom, setCustom] = useState(false);
-  const models = [...(engine?.models ?? [])];
-  if (stewardModels && provider === "codex") {
-    for (const item of STEWARD_MODELS) {
-      if (!models.some(m => m.id === item.id)) models.push({ ...item, default: false });
-    }
-  }
-  const customValue = !!model && !models.some((m) => m.id === model);
-  return (
-    <div className="dp-fields space-y-2">
-      <div className="dp-pair grid min-w-0 gap-2 sm:grid-cols-2">
-        <label className="dp-field grid gap-1 text-xs">
-          <span>执行引擎</span>
-          <select
-            className="dp-select rounded-md border border-line p-2"
-            value={provider}
-            disabled={disabled || lockProvider}
-            onChange={(e) => {
-              setCustom(false);
-              const selected = engines.find((v) => v.id === e.target.value);
-              onChange(e.target.value, selected?.default_model || null);
-            }}
-          >
-            {!engine && <option value={provider}>{provider}</option>}
-            {engines.map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.label}
-                {e.available ? "" : " · 待配置"}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="dp-field grid gap-1 text-xs">
-          <span>默认模型</span>
-          <select
-            className="dp-select rounded-md border border-line p-2"
-            value={custom || customValue ? "__custom__" : (model ?? "")}
-            disabled={disabled}
-            onChange={(e) => {
-              setCustom(e.target.value === "__custom__");
-              if (e.target.value !== "__custom__")
-                onChange(provider, e.target.value || null);
-            }}
-          >
-            <option value="">
-              引擎默认
-              {engine?.default_model ? " · " + engine.default_model : ""}
-            </option>
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-            {(engine?.custom_models || customValue) && (
-              <option value="__custom__">自定义模型 ID</option>
-            )}
-          </select>
-        </label>
-      </div>
-      {(custom || customValue) && (
-        <label className="dp-field grid gap-1 text-xs">
-          <span>模型 ID</span>
-          <input
-            className="dp-input dp-mono rounded-md border border-line p-2"
-            value={model ?? ""}
-            maxLength={200}
-            disabled={disabled}
-            onChange={(e) => onChange(provider, e.target.value || null)}
-          />
-        </label>
-      )}
-    </div>
-  );
+  return <EngineModelFields engines={engines} provider={provider} model={model} effort={effort}
+    showEffort={effort !== undefined} disabled={disabled} lockProvider={lockProvider}
+    leadDefault={stewardModels ? null : undefined} requireModel={requireModel}
+    profile preferModelSelect onChange={onChange} />;
 }

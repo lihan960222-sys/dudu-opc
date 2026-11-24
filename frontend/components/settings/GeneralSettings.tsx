@@ -8,9 +8,13 @@ import { LanguageSettings } from "./LanguageSettings";
 import { Applies } from "./Applies";
 import { SavedConfirmation, useSavedConfirmation } from "./SavedConfirmation";
 import { useT } from "@/lib/use-i18n";
+import { useSession } from "@/components/AuthGate";
+import { canOpenWorkbench } from "@/lib/session";
 
 export function GeneralSettings() {
   const t = useT();
+  const { session } = useSession();
+  const ownerProfiles = canOpenWorkbench(session) && session?.kind !== "desktop";
   const confirmation = useSavedConfirmation();
   return <div className="space-y-6">
     <div id="setting-general-appearance" data-setting-id="setting-general-appearance" data-setting-container tabIndex={-1}>
@@ -32,7 +36,10 @@ export function GeneralSettings() {
     </div>
     <SettingsCard title={t("appSettings.general.agentSettings")} description={t("appSettings.general.agentSettingsHelp")}>
       <ul className="divide-y divide-line">
-        <li className="py-2 first:pt-0">
+        {ownerProfiles ? <li className="py-2 first:pt-0">
+          <Link className="text-sm text-accent hover:underline" href="/chat/?section=people">{t("employee.profile")}</Link>
+          <p className="mt-1 text-xs text-muted">{t("employee.settingsHelp")}</p>
+        </li> : <><li className="py-2 first:pt-0">
           <Link className="text-sm text-accent hover:underline" href="/chat/?view=agents">{t("appSettings.general.agentsApprovals")}</Link>
           <p className="mt-1 text-xs text-muted">{t("appSettings.general.agentsApprovalsHelp")}</p>
         </li>
@@ -43,7 +50,7 @@ export function GeneralSettings() {
         <li className="py-2">
           <Link className="text-sm text-accent hover:underline" href="/chat/?view=agents">{t("appSettings.general.memory")}</Link>
           <p className="mt-1 text-xs text-muted">{t("appSettings.general.memoryHelp")}</p>
-        </li>
+        </li></>}
         <li className="py-2">
           <Link className="text-sm text-accent hover:underline" href="/chat/?view=routines">{t("appSettings.general.routines")}</Link>
         </li>

@@ -156,10 +156,31 @@ async def rename_thread(db: AsyncSession, thread_id: int, title: str) -> Thread:
     return await _change_quietly(db, thread_id, title=title)
 
 
+class ModelFixed(Exception):
+    """This thread takes its model from a durable owner rather than its chat settings."""
+
+
+async def model_policy(db, thread):
+    from app.db.models import Agent, FeishuLeadChat
+    managed = await db.get(FeishuLeadChat, thread.id)
+    if managed is not None:
+        return "feishu", managed.model, None
+    agent = await db.get(Agent, thread.agent_id) if thread.agent_id else None
+    role_path = agent.role_path if agent and agent.owner_id == thread.owner_id else None
+    if thread.job_id or thread.kind in {"feature", "feature_consult", "steward_ledger"}:
+        return "task", thread.model, role_path
+    if role_path:
+        return "role", None, role_path
+    return "conversation", None, None
+
+
 async def set_model(db: AsyncSession, thread_id: int, model: str | None, effort: str | None = None) -> Thread:
     """Change the model the next turns ask for (None: the engine's default).
     Not activity: the list order does not change. Raises ThreadNotFound."""
     thread = await _locked_thread(db, thread_id)
+    if model != thread.model and (await model_policy(db, thread))[0] != "conversation":
+        await db.rollback()
+        raise ModelFixed
     state = dict(thread.provider_state or {})
     if effort is not None:
         state["effort"] = effort

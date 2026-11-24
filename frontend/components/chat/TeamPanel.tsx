@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Activity, ArrowRight, Clock3, GitBranch, Hash, Users } from "lucide-react";
+import { Activity, ArrowRight, Clock3, GitBranch, Hash } from "lucide-react";
+import { AgentImage } from "./AgentImage";
+import { employeeModelName, teamActivityLabel } from "@/lib/team-employee";
 import { ApiError, type Agent } from "@/lib/api";
 import { collaboration, type Room, type TeamAgent, type TeamJob, type TeamState } from "@/lib/collaboration";
 import { useSession } from "@/components/AuthGate";
@@ -173,7 +175,7 @@ export function JobCard({ job: initial, agents, onChanged }: { job: TeamJob; age
   );
 }
 
-export function TeamPanel({ agents, onClose, onChanged }: { agents: Agent[]; onClose: () => void; onChanged: () => void }) {
+export function TeamPanel({ agents, onClose, onChanged, onOpenEmployee }: { agents: Agent[]; onClose: () => void; onChanged: () => void; onOpenEmployee?: (id: number) => void }) {
   const t = useT();
   const [data, setData] = useState<TeamState | null>(null);
   const [jobs, setJobs] = useState<TeamJob[]>([]);
@@ -248,6 +250,8 @@ export function TeamPanel({ agents, onClose, onChanged }: { agents: Agent[]; onC
 
   const visibleGroups: Exclude<WorkFilter, "all">[] = filter === "all" ? ["attention", "running", "waiting", "finished"] : [filter];
   const groupJobs = (group: Exclude<WorkFilter, "all">) => matchingJobs.filter((job) => jobGroup(job) === group);
+  const outsideAgents = agents.filter(agent => !agent.archived_at && !teamAgents.some(member => member.id === agent.id));
+  const openProfile = (id: number) => { onClose(); onOpenEmployee?.(id); };
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }} title={data?.team?.name ?? t("team.title")} description={t("team.description")} size="workspace" flush>
@@ -283,22 +287,22 @@ export function TeamPanel({ agents, onClose, onChanged }: { agents: Agent[]; onC
 
               {teamAgents.length > 0 && (
                 <section aria-label={t("team.agentsTab")} className="space-y-3">
-                  <h2 className="text-sm font-semibold">{t("team.agentsTab")}</h2>
                   {teamAgents.map((agent) => (
                     <article key={agent.id} className="space-y-3 rounded-card border border-line bg-raised p-4">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div className="flex min-w-0 items-center gap-3">
-                          <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-accent/10 text-accent"><Users size={18} aria-hidden="true" /></span>
+                          <AgentImage agentId={agent.id} name={agent.name} />
                           <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2"><strong>{agent.name}</strong>{agent.is_lead && <Badge tone="accent">{t("agentTeam.leadBadge")}</Badge>}</div>
-                            {agent.title && <p className="mt-0.5 text-xs text-muted">{agent.title}</p>}
-                            <p className="mt-0.5 text-xs text-muted">{[agent.provider, agent.model].filter(Boolean).join(" · ")}</p>
+                            <p className="mt-0.5 text-xs text-muted">{employeeModelName(agent.model, t("employee.defaultModel"), t("employee.customModel"))}</p>
                           </div>
                         </div>
-                        <Badge tone={agent.state === "waiting_on_you" ? "warning" : agent.state === "working" ? "accent" : "neutral"}>{agent.state.replaceAll("_", " ")}</Badge>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <Badge tone={agent.state === "waiting_on_you" ? "warning" : agent.state === "working" ? "accent" : "neutral"}>{t(agent.state === "waiting_on_you" ? "employee.waiting" : agent.state === "working" ? "room.working" : "employee.idle")}</Badge>
+                          {onOpenEmployee && <button className="text-sm text-accent hover:underline" onClick={() => openProfile(agent.id)}>{t("employee.profile")}</button>}
+                        </div>
                       </div>
-                      <p className="text-xs text-muted">{agent.created_by_agent_id ? t(agent.instructions_reviewed ? "team.instructionsReviewed" : "team.instructionsReview", { id: agent.created_by_agent_id }) : t("team.addedByYou")}</p>
-                      {admin && (
+                      {admin && !onOpenEmployee && (
                         <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3">
                           <label className="flex items-center gap-2 text-xs"><input type="checkbox" disabled={busy} checked={agent.delegation_enabled} onChange={(event) => void act(() => collaboration.delegation(agent.id, event.target.checked))} />{t("team.canDelegate")}</label>
                           {!agent.is_lead && <><button className={BUTTON} disabled={busy} onClick={() => void act(() => collaboration.lead(agent.id))}>{t("team.makeLead")}</button><button className={BUTTON} disabled={busy} onClick={() => void act(() => collaboration.removeMember(agent.id))}>{t("team.removeMember")}</button></>}
@@ -310,12 +314,12 @@ export function TeamPanel({ agents, onClose, onChanged }: { agents: Agent[]; onC
                 </section>
               )}
 
-              {admin && (
+              {admin && outsideAgents.length > 0 && (
                 <label className="block max-w-md text-sm">
-                  {data.team ? t("team.addAgent") : t("team.chooseLead")}
-                  <Select className="mt-1" value="" disabled={busy} onChange={(event) => { const id = Number(event.target.value); if (id) void act(() => data.team ? collaboration.addMember(id) : collaboration.lead(id)); }}>
+                  {onOpenEmployee ? t("employee.selectProfile") : data.team ? t("team.addAgent") : t("team.chooseLead")}
+                  <Select className="mt-1" value="" disabled={busy} onChange={(event) => { const id = Number(event.target.value); if (!id) return; if (onOpenEmployee) openProfile(id); else void act(() => data.team ? collaboration.addMember(id) : collaboration.lead(id)); }}>
                     <option value="">{t("team.selectAgent")}</option>
-                    {agents.filter((agent) => !teamAgents.some((member) => member.id === agent.id) && !agent.archived_at).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+                    {outsideAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
                   </Select>
                 </label>
               )}
@@ -366,7 +370,7 @@ export function TeamPanel({ agents, onClose, onChanged }: { agents: Agent[]; onC
                     {activity.map((item) => {
                       const relatedJob = item.job_id ? jobs.find((job) => job.id === item.job_id) : undefined;
                       const threadId = item.thread_id ?? relatedJob?.assignee_thread_id;
-                      return <li key={item.id} className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-2 text-xs"><span>{item.kind.replaceAll("_", " ")}{item.job_id ? ` · ${t("team.job", { id: item.job_id })}` : ""}</span><div className="flex items-center gap-3"><time className="shrink-0 text-muted">{displayTime(item.created_at)}</time>{threadId && <Link className="underline" href={`/chat?thread=${threadId}`}>{t("team.openWork")}</Link>}</div></li>;
+                      return <li key={item.id} className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-2 text-xs"><span>{teamActivityLabel(item.kind, t)}{item.job_id ? ` · ${t("team.job", { id: item.job_id })}` : ""}</span><div className="flex items-center gap-3"><time className="shrink-0 text-muted">{displayTime(item.created_at)}</time>{threadId && <Link className="underline" href={`/chat?thread=${threadId}`}>{t("team.openWork")}</Link>}</div></li>;
                     })}
                   </ol>
                 </details>

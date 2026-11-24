@@ -52,7 +52,12 @@ export const STEWARD_MODELS = [
 ] as const;
 
 export function modelLabel(model: string | null): string {
-  return STEWARD_MODELS.find(item => item.id === model)?.label ?? model ?? "default";
+  if (!model) return "default";
+  const steward = STEWARD_MODELS.find(item => item.id === model);
+  if (steward) return steward.label;
+  const gpt = /^gpt-(\d+(?:\.\d+)*)(?:-(sol|astra|terra|luna|mini|nano|pro|codex))?$/i.exec(model);
+  if (gpt) return "GPT-" + gpt[1] + (gpt[2] ? " " + gpt[2][0].toUpperCase() + gpt[2].slice(1) : "");
+  return model;
 }
 
 export function chatModelLabel(engine: Engine | undefined, model: string | null, fallback: string): string {
@@ -60,6 +65,15 @@ export function chatModelLabel(engine: Engine | undefined, model: string | null,
   if (!id) return fallback;
   const label = engine?.models.find(item => item.id === id)?.label;
   return label && label !== id ? label : modelLabel(id);
+}
+
+// A model catalogue is capability metadata, never a substitute for an unknown saved model.
+export function modelChoice(engine: Engine | undefined, model: string | null, inheritedModel?: string | null) {
+  const engineDefault = engine?.default_model || engine?.models.find(entry => entry.default)?.id || null;
+  const id = model || inheritedModel || engineDefault;
+  const metadata = engine?.models.find(entry => entry.id === id);
+  const efforts = metadata?.reasoning_effort_configurable !== false ? metadata?.supported_reasoning_efforts ?? [] : [];
+  return { id, engineDefault, efforts: efforts.length > 1 ? efforts : [], defaultEffort: metadata?.default_reasoning_effort };
 }
 
 // Names by id, for lists that show which agent a conversation uses.

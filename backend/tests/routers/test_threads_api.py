@@ -695,3 +695,41 @@ async def test_delete_removes_only_this_apps_records_and_touches_no_files_or_oth
     await wait_for_terminals(api, keep["id"], 2)
     second = (await api.get(f"/api/v1/threads/{keep['id']}")).json()["turns"][1]
     assert second["status"] == "succeeded", (second["error_code"], second["error"])
+
+
+async def test_model_editing_respects_role_file_feature_and_feishu_binding(api, rt, tmp_path):
+    from app.db.models import FeishuLeadChat
+    from app.services import agent_store, role_workspace
+
+    plain = await create(api)
+    url = f"/api/v1/threads/{plain['id']}"
+    assert (await api.get(url)).json()["model_policy"] == "conversation"
+    assert (await api.patch(url,json={"model":"sonnet"})).status_code == 200
+    async with rt.session() as db:
+        db.add(FeishuLeadChat(thread_id=plain["id"],channel="a",selection="b",
+            model=None,project="sample",isolated=True))
+        await db.commit()
+    view = (await api.get(url)).json()
+    assert view["model_policy"] == "feishu" and view["policy_model"] is None and not view["policy_model_unavailable"]
+    blocked = await api.patch(url,json={"model":"opus","title":"must not rename"})
+    assert blocked.status_code == 409 and blocked.json()["detail"]["error_code"] == "model_fixed"
+    assert (await api.get(url)).json()["title"] != "must not rename"
+    assert (await api.patch(url,json={"effort":"medium"})).status_code == 200
+
+    folder = tmp_path / "role"
+    folder.mkdir()
+    role_workspace.initialize(folder,"from-file","Role instructions")
+    async with rt.session() as db:
+        employee = await agent_store.create_agent(db,owner_id=rt.owner_id,name="Reviewer",model="old-db-model")
+        employee.role_path = str(folder)
+        await db.commit()
+        role = await store.create_thread(db, owner_id=rt.owner_id, agent_id=employee.id, provider="claude", model="previous-thread")
+        task = await store.create_thread(db, owner_id=rt.owner_id, provider="claude", model="task-model", kind="feature")
+    for thread, policy, model in ((role,"role","from-file"),(task,"task","task-model")):
+        url = f"/api/v1/threads/{thread.id}"
+        view = (await api.get(url)).json()
+        assert (view["model_policy"],view["policy_model"]) == (policy,model)
+        assert (await api.patch(url,json={"model":"opus"})).status_code == 409
+    (folder / "AGENTS.md").unlink()
+    view = (await api.get(f"/api/v1/threads/{role.id}")).json()
+    assert view["model_policy"] == "role" and view["policy_model"] is None and view["policy_model_unavailable"]

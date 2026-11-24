@@ -1,5 +1,6 @@
 "use client";
 
+import { useT } from "@/lib/use-i18n";
 import { Button } from "@/components/ui/Button";
 import { saveBarState } from "@/components/settings/save-bar-state";
 
@@ -22,8 +23,9 @@ export function AgentEditorFooter({
   onCancel: () => void;
   form: string;
 }) {
+  const t = useT();
   const state = saveBarState({ dirty, saving, error, saved: false });
-  const status = state === "saving" ? "Saving…" : state === "error" ? error : state === "dirty" ? "Unsaved changes" : null;
+  const status = state === "saving" ? t("emp.saving") : state === "error" ? error : state === "dirty" ? t("emp.unsaved") : null;
 
   return (
     <div className="flex w-full flex-wrap items-center gap-2">
@@ -40,7 +42,7 @@ export function AgentEditorFooter({
         loading={saving}
         className="disabled:bg-inset disabled:text-muted disabled:opacity-100"
       >
-        {saving ? "Saving…" : saveLabel}
+        {saving ? t("emp.saving") : saveLabel}
       </Button>
       <Button type="button" disabled={saving} onClick={onCancel}>{cancelLabel}</Button>
     </div>

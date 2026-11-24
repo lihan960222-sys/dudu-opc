@@ -1,10 +1,10 @@
 import { Suspense } from "react";
 import { AuthGate } from "@/components/AuthGate";
-import { ChatApp } from "@/components/chat/ChatApp";
+import { Workspace } from "@/components/staff/Workspace";
 import "@/components/chat/chat-shell.css";
 
 export const metadata = {
-  title: "Chat · Suparagent",
+  title: "工作区 · Suparagent",
 };
 
 // The open conversation is a query string (/chat?thread=3), not a route
@@ -12,9 +12,9 @@ export const metadata = {
 // the Suspense boundary for that.
 export default function ChatPage() {
   return (
-    <Suspense fallback={<p className="p-6 text-center text-sm text-muted">Loading…</p>}>
+    <Suspense fallback={null}>
       <AuthGate>
-        <ChatApp />
+        <Workspace />
       </AuthGate>
     </Suspense>
   );

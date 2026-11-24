@@ -1,7 +1,6 @@
 "use client";
 
-import { ArrowLeft, BarChart3, CalendarDays, ChevronDown, Folder, Link2, PanelLeftOpen, MoreHorizontal, ShieldCheck, Undo2 } from "lucide-react";
-import Link from "next/link";
+import { BarChart3, CalendarDays, ChevronDown, Folder, Link2, PanelLeftOpen, MoreHorizontal, ShieldCheck, Undo2 } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Agent } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -16,7 +15,7 @@ import { Select } from "@/components/ui/Select";
 // approval mode, computer), and a few quiet icon buttons. Everything else lives in the sidebar
 // or opens in a panel. On a phone the secondary buttons fold into one menu.
 export function ChatHeader({
-  workbenchHref,
+  unified = false,
   title,
   agent,
   onOpenSidebar,
@@ -34,7 +33,7 @@ export function ChatHeader({
   trailing,
   status,
 }: {
-  workbenchHref: string | null;
+  unified?: boolean;
   title: string;
   // The conversation's agent, for the avatar; null for a plain chat.
   agent: Pick<Agent, "id" | "name"> | null;
@@ -74,16 +73,15 @@ export function ChatHeader({
   return (
     <header className="opc-chat-header">
       <div className="opc-chat-navigation">
-        {workbenchHref && (
-          <Link href={workbenchHref} className="opc-workbench-link">
-            <ArrowLeft size={16} aria-hidden="true" />{t("portal.workbench")}
-          </Link>
-        )}
-        {onOpenSidebar && (
+        {onOpenSidebar && (unified ? (
+          <button type="button" className="opc-history-button" onClick={onOpenSidebar} aria-label={t("shell.openSidebar")}>
+            <PanelLeftOpen size={18} aria-hidden="true" /><span>{t("workspace.history")}</span>
+          </button>
+        ) : (
           <IconButton label={t("shell.openSidebar")} onClick={onOpenSidebar}>
             <PanelLeftOpen size={18} />
           </IconButton>
-        )}
+        ))}
       </div>
       <div className="opc-chat-identity flex min-w-0 items-center gap-2.5">
         {visibleAgent
@@ -120,11 +118,11 @@ export function ChatHeader({
       )}
       <div className="opc-chat-tools">
         {status && <span role="status" className={cn("max-w-24 truncate text-xs", status.warn ? "text-warning" : "text-muted")}>{status.text}</span>}
-        <div className="hidden items-center lg:flex">
+        {!unified && <div className="hidden items-center lg:flex">
           {secondary.filter(item => item.key === "approvals" || item.key === "usage").map(item => (
             <IconButton key={item.key} label={item.label} title={item.hint} onClick={item.run}>{item.icon}</IconButton>
           ))}
-        </div>
+        </div>}
         {trailing}
         {secondary.length > 0 || computer || approvalMode ? (
           <Menu

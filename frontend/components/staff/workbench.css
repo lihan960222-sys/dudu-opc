@@ -24,17 +24,7 @@
 #workbench :is(button,input,select,textarea):focus-visible{outline:2px solid var(--blue);outline-offset:3px}
 #workbench button i,#workbench i[data-lucide]{display:inline-block;width:17px;height:17px;flex:none}
 #workbench svg.lucide{width:17px;height:17px;stroke-width:1.7;flex:none}
-#workbench .dp-window{display:grid;grid-template-columns:156px minmax(0,1fr);background:var(--paper);border:1px solid var(--line);border-radius:16px;overflow:clip}
-#workbench .dp-rail{background:var(--rail);border-right:1px solid var(--line);display:flex;flex-direction:column;min-width:0;padding:22px 12px 15px}
-#workbench .dp-brand strong{display:block;font-size:20px;font-weight:680;letter-spacing:-.8px;line-height:1.1}
 #workbench small{display:block;color:var(--sub);font-size:12px;line-height:1.45}
-#workbench .dp-brand small{font-size:11px;margin-top:3px;letter-spacing:.04em}
-#workbench .dp-mark{display:grid;place-items:center;width:36px;height:36px;border-radius:11px;background:light-dark(#273546,#dfe7f2);color:light-dark(#fff,#20394d)}
-#workbench .dp-mark svg{width:23px;height:23px}
-#workbench .dp-navigation{display:grid;gap:4px;margin:32px 0}
-#workbench .dp-navigation button{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;color:var(--sub);font-weight:530}
-#workbench .dp-navigation button:hover{color:var(--ink);background:var(--line)}
-#workbench .dp-navigation button[aria-current=page]{background:var(--selected);color:var(--blue)}
 #workbench .dp-main{min-width:0;padding:0 clamp(17px,3cqw,34px) 20px}
 #workbench .dp-pagehead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:21px 0 19px}
 #workbench h1{font-size:30px;font-weight:650;letter-spacing:-1.1px;line-height:1.25}
@@ -135,14 +125,6 @@
 #workbench .dp-feishu fieldset>.dp-button {justify-self:start}
 
 /* Directory, work area and navigation share the application's theme. */
-#workbench .dp-window {min-height:100dvh;grid-template-columns:clamp(148px,14vw,200px) minmax(0,1fr);border:0;border-radius:0}
-#workbench .dp-rail {padding:28px 12px 18px}
-#workbench .dp-brand {display:flex;align-items:center;gap:10px;padding-inline:8px}
-#workbench .dp-mark {background:var(--ink);color:var(--paper)}
-#workbench .dp-navigation {margin:30px 0 16px}
-#workbench .dp-utilities {margin-top:auto;padding-top:12px;border-top:1px solid var(--line);display:grid;gap:2px}
-#workbench .dp-utilities a {display:flex;align-items:center;gap:10px;border-radius:7px;padding:9px 12px;color:var(--sub);font-size:13px}
-#workbench .dp-utilities a:hover {background:var(--bg-hover);color:var(--ink)}
 #workbench :is(a,summary):focus-visible {outline:2px solid var(--focus);outline-offset:2px}
 #workbench .dp-main {width:100%;max-width:1350px;margin-inline:auto;padding:0 clamp(22px,3.5cqw,52px) 40px}
 #workbench .dp-pagehead {margin:0;padding:30px 0 21px;border-bottom:1px solid var(--line);min-height:90px}
@@ -183,6 +165,17 @@
 #workbench .dp-pair {grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 #workbench :is(.dp-input,.dp-select,.dp-textarea) {background:var(--well);padding-block:9px}
 #workbench .dp-fields fieldset {min-width:0}
+#workbench .dp-model-picker {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(170px,100%),1fr));gap:14px}
+#workbench .dp-model-picker>div {display:grid;align-content:start;min-width:0;gap:5px}
+#workbench .dp-model-picker>p {grid-column:1/-1}
+#workbench .dp-model-picker label {font-size:13px;font-weight:550;color:var(--ink)}
+#workbench .dp-model-picker button[aria-haspopup="menu"],#workbench .dp-model-picker input {
+  display:flex;align-items:center;justify-content:space-between;width:100%;min-height:40px;margin:0;
+  border:1px solid var(--line);border-radius:8px;background:var(--well);padding:8px 11px;
+}
+#workbench .dp-model-picker button[aria-haspopup="menu"]:hover {border-color:var(--sub)}
+#workbench .dp-model-picker .relative {width:100%}
+#workbench .dp-inventory:has(>section:only-child) {grid-template-columns:minmax(0,1fr)}
 #workbench .dp-error {color:var(--danger);margin:8px 0;overflow-wrap:anywhere}
 #workbench .dp-notice {margin:10px 0;color:var(--blue)}
 #workbench .dp-folders .dp-list {max-height:240px;overflow:auto}
@@ -210,24 +203,11 @@
 #workbench .dp-inventory .dp-listrow small {overflow-wrap:anywhere}
 
 @container (max-width:940px) {
-  #workbench .dp-window {grid-template-columns:138px minmax(0,1fr)}
   #workbench .dp-main {padding-inline:20px}
   #workbench .dp-directory {grid-template-columns:145px minmax(0,1fr);gap:18px}
   #workbench .dp-roster {padding-right:8px}
 }
 @container (max-width:760px) {
-  #workbench .dp-window {grid-template-columns:minmax(0,1fr);align-content:start}
-  #workbench .dp-rail {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 6px;padding:10px 15px 6px;border:0;border-bottom:1px solid var(--line)}
-  #workbench .dp-brand {padding:0;gap:7px}
-  #workbench .dp-brand strong {font-size:16px}
-  #workbench .dp-brand small {font-size:10px;margin:0}
-  #workbench .dp-mark {width:32px;height:32px}
-  #workbench .dp-mark svg {width:20px}
-  #workbench .dp-utilities {grid-column:2;grid-row:1;display:flex;gap:3px;border:0;padding:0;margin:0;align-items:center}
-  #workbench .dp-utilities a {gap:4px;padding:6px;font-size:12px}
-  #workbench .dp-utilities svg {width:14px}
-  #workbench .dp-navigation {grid-column:1/-1;grid-row:2;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;margin:0}
-  #workbench .dp-navigation button {justify-content:center;gap:5px;padding:7px 1px;font-size:13px}
   #workbench .dp-pagehead {padding:18px 0 14px;min-height:0}
   #workbench h1 {font-size:25px}
 }
@@ -247,6 +227,6 @@
   #workbench .dp-folderbuttons .dp-mono {overflow-wrap:anywhere}
 }
 @media (pointer:coarse) {
-  #workbench :is(.dp-button,.dp-link,.dp-tabs button,.dp-person,.dp-navigation button,.dp-utilities a,.dp-avatar-options button,summary) {min-height:44px}
+  #workbench :is(.dp-button,.dp-link,.dp-tabs button,.dp-person,.dp-avatar-options button,summary) {min-height:44px}
   #workbench :is(input,textarea,select) {font-size:16px}
 }

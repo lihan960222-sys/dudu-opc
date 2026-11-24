@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useT } from "@/lib/use-i18n";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { Input } from "@/components/ui/Input";
@@ -9,8 +10,6 @@ import {
   categoryLabel,
   filterTemplates,
   requirementBadges,
-  SETUP_DEPTH_LABELS,
-  starterRoutinesLabel,
   type AgentTemplate,
   type TemplateCatalog,
   type TemplateSkill,
@@ -21,6 +20,7 @@ const CHIP = "cursor-pointer rounded-full border px-3 py-1 text-xs font-medium";
 // Ready-made agents: browse and search a bundled list, then Add one. Add only
 // hands the template to the new-agent form; nothing is created here.
 export function TemplatesGallery({ onAdd }: { onAdd: (template: AgentTemplate) => void }) {
+  const t = useT();
   const [catalog, setCatalog] = useState<TemplateCatalog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -32,9 +32,9 @@ export function TemplatesGallery({ onAdd }: { onAdd: (template: AgentTemplate) =
     api
       .listTemplates()
       .then((value) => { if (!cancelled) setCatalog(value); })
-      .catch(() => { if (!cancelled) setError("Could not load the templates."); });
+      .catch(() => { if (!cancelled) setError(t("emp.templatesError")); });
     return () => { cancelled = true; };
-  }, [reload]);
+  }, [reload, t]);
 
   const shown = useMemo(() => filterTemplates(catalog?.templates ?? [], query, category), [catalog, query, category]);
 
@@ -47,10 +47,10 @@ export function TemplatesGallery({ onAdd }: { onAdd: (template: AgentTemplate) =
         type="search"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
-        placeholder="Search templates"
-        aria-label="Search templates"
+        placeholder={t("emp.searchTemplates")}
+        aria-label={t("emp.searchTemplates")}
       />
-      <div className="flex flex-wrap gap-2" role="group" aria-label="Category">
+      <div className="flex flex-wrap gap-2" role="group" aria-label={t("emp.category")}>
         {[null, ...catalog.categories].map((value) => (
           <button
             key={value ?? "all"}
@@ -59,12 +59,12 @@ export function TemplatesGallery({ onAdd }: { onAdd: (template: AgentTemplate) =
             onClick={() => setCategory(value)}
             className={`${CHIP} ${category === value ? "border-accent bg-inset" : "border-line hover:bg-hover"}`}
           >
-            {value === null ? "All" : categoryLabel(value)}
+            {value === null ? t("emp.all") : categoryLabel(value)}
           </button>
         ))}
       </div>
       {shown.length === 0 ? (
-        <EmptyPanel title="No templates match" description="Try another word or category." />
+        <EmptyPanel title={t("emp.noMatches")} description={t("emp.tryCategory")} />
       ) : (
         <ul className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {shown.map((template) => (
@@ -104,17 +104,17 @@ export function TemplatesGallery({ onAdd }: { onAdd: (template: AgentTemplate) =
                 )}
                 {template.skills.length > 0 && (
                   <span className="rounded border border-line px-1.5 py-0.5 text-[11px] text-muted">
-                    {template.skills.length} suggested skill{template.skills.length === 1 ? "" : "s"}
-                  </span>
-                )}
-                {starterRoutinesLabel(template.routines) && (
-                  <span className="rounded border border-line px-1.5 py-0.5 text-[11px] text-muted">
-                    {starterRoutinesLabel(template.routines)}
+                    {t("emp.skillCount", {count:template.skills.length})}
                   </span>
                 )}
                 {template.routines.length > 0 && (
                   <span className="rounded border border-line px-1.5 py-0.5 text-[11px] text-muted">
-                    {SETUP_DEPTH_LABELS[template.setup_depth]}
+                    {t("emp.routineCount", {count:template.routines.length})}
+                  </span>
+                )}
+                {template.routines.length > 0 && (
+                  <span className="rounded border border-line px-1.5 py-0.5 text-[11px] text-muted">
+                    {t(`emp.depth.${template.setup_depth}`)}
                   </span>
                 )}
               </div>
@@ -123,10 +123,10 @@ export function TemplatesGallery({ onAdd }: { onAdd: (template: AgentTemplate) =
                   type="button"
                   onClick={() => onAdd(template)}
                   disabled={!template.available}
-                  aria-label={`Add ${template.name}`}
+                  aria-label={t("emp.useNamed", {name:template.name})}
                   className="cursor-pointer rounded-md border border-line px-3 py-1 text-xs font-medium hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {template.available ? "Add" : "Unavailable"}
+                  {template.available ? t("emp.useTemplate") : t("header.unavailable")}
                 </button>
               </div>
             </li>
@@ -149,9 +149,10 @@ export function TemplateSkillChoices({
   disabled: boolean;
   onChange: (chosen: string[]) => void;
 }) {
+  const t = useT();
   return (
     <fieldset className="text-xs text-muted">
-      <legend>Suggested skills (added after the agent is created)</legend>
+      <legend>{t("emp.suggestedSkills")}</legend>
       <ul className="mt-1 space-y-1">
         {skills.map((skill) => (
           <li key={skill.name}>

@@ -7,8 +7,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, ApiError, isLaunchTokenMissing, type Agent, type Engine, type LocalStatus, type NotificationPreferences, type Thread } from "@/lib/api";
 import { notifyApprovalNeeded, notifyTurnCompletion } from "@/lib/desktop-notifications";
-import { activeAgents, approvalModeLabel, chatModelLabel, modelLabel } from "@/lib/agents";
-import { canOpenWorkbench } from "@/lib/session";
+import { activeAgents, chatModelLabel, modelChoice } from "@/lib/agents";
+import { createdThreadHref, workspaceHref } from "@/lib/workspace-navigation";
 import { pendingApprovals, type NeedsYouItem } from "@/lib/transcript";
 import { attachmentProblem, conversationUsage, formatCost, formatTokens, MAX_ATTACHMENTS } from "@/lib/everyday";
 import { FilesPanel } from "./FilesPanel";
@@ -17,7 +17,6 @@ import { SkillsPanel } from "./SkillsPanel";
 import { Inspector } from "@/components/shell/Inspector";
 import { Button } from "@/components/ui/Button";
 import { Dialog } from "@/components/ui/Dialog";
-import { computerChip } from "@/lib/computers";
 import { AgentsPanel } from "./AgentsPanel";
 import { NotificationBell } from "./NotificationBell";
 import { RoutinesPanel } from "./RoutinesPanel";
@@ -42,7 +41,7 @@ import { reportPresence } from "@/lib/presence";
 import { readCachedPreference, resolveEngineModel, writeCachedPreference } from "@/lib/engine-selection";
 import { EMPTY_QUEUED_FOLLOW_UPS, loadQueuedFollowUps, MAX_FOLLOW_UP_TEXT_CHARS, MAX_QUEUED_FOLLOW_UPS, newQueuedFollowUp, saveQueuedFollowUps, subscribeQueuedFollowUps, type QueuedFollowUp } from "@/lib/queued-follow-ups";
 import { chatHref, parsePanel, type Panel } from "@/lib/panel";
-import { parseSkillCommand, skillErrorText, toggleSkill, learnableTurn, type SkillSummary, type SkillLearnSource } from "@/lib/skills";
+import { parseSkillCommand, toggleSkill, learnableTurn, type SkillSummary, type SkillLearnSource } from "@/lib/skills";
 import { RoomList } from "./RoomList";
 import { RoomView } from "./RoomView";
 import { collaboration, type TeamState } from "@/lib/collaboration";
@@ -78,12 +77,12 @@ function parseThreadId(raw: string | null): number | null {
 }
 
 // What went wrong with a rename, archive or delete, in words a person can act on.
-function manageErrorText(err: unknown): string {
+function manageErrorText(err: unknown, t: (key: string) => string): string {
   if (err instanceof ApiError) {
-    if (err.code === "turn_running") return "Stop the running answer first.";
-    return err.message || "That did not work.";
+    if (err.code === "turn_running") return t("workspace.stopFirst");
+    return err.message || t("workspace.actionFailed");
   }
-  return "Could not reach the backend.";
+  return t("workspace.connectionFailed");
 }
 
 // Says what went wrong in words a person can act on.
@@ -92,15 +91,15 @@ function toggleSkillOn(chosen: string[], name: string): string[] {
   return chosen.includes(name) ? chosen : toggleSkill(chosen, name);
 }
 
-function sendErrorText(err: unknown): string {
+function sendErrorText(err: unknown, t: (key: string) => string): string {
   if (err instanceof ApiError) {
-    if (err.code === "skill_unavailable") return skillErrorText(err);
-    if (err.code === "turn_running") return "An answer to the last message is still running.";
-    if (err.code === "session_broken")
-      return "The engine can no longer find this conversation. Start a new session to continue.";
-    return err.message || "Could not send the message.";
+    if (err.code === "skill_unavailable") return t("workspace.skillUnavailable");
+    if (err.code === "turn_running") return t("workspace.alreadyRunning");
+    if (err.code === "session_broken") return t("workspace.sessionBroken");
+    if (err.message === "Start specialist work from its scoped steward task.") return t("workspace.employeeNeedsTask");
+    return err.message || t("workspace.sendFailed");
   }
-  return "Could not reach the backend.";
+  return t("workspace.connectionFailed");
 }
 
 function Notice({
@@ -133,7 +132,9 @@ function Notice({
 // The chat: a list of conversations and one conversation, on the durable threads
 // API. The page keeps nothing that matters: every conversation lives in the
 // backend, and the open one is replayed from its stored events.
-export function ChatApp() {
+export function ChatApp({ unified = false, foreground = true, onEmployeeChange, profileRevision = 0 }: {
+  unified?: boolean; foreground?: boolean; onEmployeeChange?: (id: number | null) => void; profileRevision?: number;
+} = {}) {
   const t = useT();
   const router = useRouter();
   const params = useSearchParams();
@@ -152,7 +153,7 @@ export function ChatApp() {
   // session is refused them, so the page does not ask. An unknown session (null) behaves as before.
   const fullAccess = session === null || session.scopes.includes("admin");
   // Creating and managing agents is its own permission for a member (a reply-only member is not offered it).
-  const mayManageAgents = can(session?.permissions, "agents");
+  const mayManageAgents = can(session?.permissions, "agents") && (fullAccess || !!session?.permissions?.includes("agents"));
 
   const [gate, setGate] = useState<Gate>({ phase: "loading" });
   // Bumped by "Check again": Claude may have been installed or signed in since.
@@ -163,7 +164,8 @@ export function ChatApp() {
   const [listTick, setListTick] = useState(0);
   // Below the sidebar breakpoint the conversation list is a drawer.
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const sidebarInline = useMediaQuery(SIDEBAR_INLINE);
+  const wideSidebar = useMediaQuery(SIDEBAR_INLINE);
+  const sidebarInline = !unified && wideSidebar;
   const inspectorInline = useMediaQuery(SIDEBAR_AND_PANEL_FIT);
   // The right-hand inspector page, kept in the address (?panel=usage) so a reload reopens it.
   const panel = parsePanel(params.get("panel"));
@@ -441,7 +443,7 @@ export function ChatApp() {
       }
     });
     return () => { cancelled = true; };
-  }, [ready, threadId, listTick, transcript.runningTurnId]);
+  }, [ready, threadId, listTick, profileRevision, transcript.runningTurnId]);
 
   useEffect(() => {
     const closeModel = () => setModelDraft(null);
@@ -462,10 +464,10 @@ export function ChatApp() {
     return () => {
       cancelled = true;
     };
-  }, [ready, agentTick, transcript.runningTurnId]);
+  }, [ready, agentTick, profileRevision, transcript.runningTurnId]);
 
   useEffect(() => {
-    if (!fullAccess || !ready || agents === null || agents.length > 0 || firstAgentRedirecting.current) return;
+    if (!foreground || !fullAccess || !ready || agents === null || agents.length > 0 || firstAgentRedirecting.current) return;
     let cancelled = false;
     onboarding.get().then((progress) => {
       if (!cancelled && progress.status === "pending" && !progress.existing_agents) {
@@ -474,14 +476,20 @@ export function ChatApp() {
       }
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [agents, ready, router, fullAccess]);
+  }, [agents, ready, router, fullAccess, foreground]);
 
   useEffect(() => {
     if (!ready) return;
     let live = true;
     collaboration.team().then(value => { if (live) setTeamState(value); }).catch(() => {});
     return () => { live = false; };
-  }, [ready, agentTick, transcript.runningTurnId]);
+  }, [ready, agentTick, profileRevision, transcript.runningTurnId]);
+
+  const openEmployee = useCallback((id: number) => {
+    setDrawerOpen(false);
+    setTeamOpen(false);
+    router.push(workspaceHref(window.location.search, "people", id), { scroll: false });
+  }, [router, setDrawerOpen, setTeamOpen]);
 
   useEffect(() => {
     const openAgent = (event: Event) => {
@@ -490,7 +498,8 @@ export function ChatApp() {
       if (detail.edit) {
         setFirstTaskSuggestion(null);
         const target = agents?.find(agent => agent.id === detail.id);
-        if (target) { setEditAgent(target); setAgentsCreate(false); setAgentsOpen(true); }
+        if (target && unified) openEmployee(target.id);
+        else if (target && mayManageAgents) { setEditAgent(target); setAgentsCreate(false); setAgentsOpen(true); }
       } else {
         const firstTask = typeof detail.firstTask === "string" && detail.firstTask.length <= 1000 ? detail.firstTask : null;
         const target = chatDraftKey(null, detail.id);
@@ -502,7 +511,7 @@ export function ChatApp() {
     };
     window.addEventListener("suparagent:open-agent", openAgent);
     return () => window.removeEventListener("suparagent:open-agent", openAgent);
-  }, [agents, drafts, router, setAgentsOpen]);
+  }, [agents, drafts, router, setAgentsOpen, unified, mayManageAgents, openEmployee]);
 
   useEffect(() => {
     if (!ready) return;
@@ -643,10 +652,14 @@ export function ChatApp() {
   const selectedAgent = threadId === null
     ? (startingAgent?.provider === selectedProvider ? startingAgent : null)
     : (threadAgent?.provider === thread?.provider ? threadAgent : null);
-  const selectedModel = (threadId === null ? newModel : thread?.model) ?? selectedAgent?.model ?? null;
-  const selectedEffort = threadId === null
-    ? newEffort ?? (selectedAgent && (newModel === null || newModel === selectedAgent.model) ? selectedAgent.effort ?? null : null)
-    : thread?.effort ?? null;
+  const modelPolicy = threadId === null ? (startingAgent?.role_path ? "role" : "conversation") : thread?.model_policy;
+  const fixedModel = modelPolicy != null && modelPolicy !== "conversation";
+  const modelLocked = modelPolicy !== "conversation";
+  const selectedModel = fixedModel
+    ? (threadId === null ? startingAgent?.model : thread?.policy_model) ?? null
+    : (threadId === null ? newModel : thread?.model) ?? selectedAgent?.model ?? null;
+  const unknownRoleModel = fixedModel && thread?.policy_model_unavailable === true;
+  const canSetEffort = !unknownRoleModel && modelChoice(selectedEngine, selectedModel).efforts.length > 0;
   const skillAgent = threadId === null ? startingAgent : threadAgent;
   const skillAgentId = skillAgent?.id ?? null;
   const [skillsTick, setSkillsTick] = useState(0);
@@ -704,49 +717,49 @@ export function ChatApp() {
       }
     }).catch((err) => {
       if (currentThreadIdRef.current === threadId) {
-        setSendError(sendErrorText(err));
+        setSendError(sendErrorText(err, t));
         setFailedQueued({ threadId, id: first.id });
       }
     }).finally(() => {
       queuedDrainRef.current = false;
       setQueuedSending(false);
     });
-  }, [threadId, threadQueuedFollowUps, stream.connection, transcript.runningTurnId, waiting, sending, queuedSending, queuedTurnPending, failedQueuedId]);
+  }, [threadId, threadQueuedFollowUps, stream.connection, transcript.runningTurnId, waiting, sending, queuedSending, queuedTurnPending, failedQueuedId, t]);
 
   const totals = conversationUsage(
     transcript.items.flatMap((item) => (item.kind === "turn_end" ? [{ usage: item.usage }] : []))
   );
   const conversationTotal =
     totals.turns === 0
-      ? "Tokens and cost by month"
-      : `This conversation: ${formatTokens(totals.tokens)} tokens, ${formatCost(totals.cost)}` +
-        (totals.reported < totals.turns ? ` (${totals.turns - totals.reported} turn(s) reported nothing)` : "");
+      ? t("workspace.monthlyUsage")
+      : t("workspace.chatUsage", { tokens: formatTokens(totals.tokens), cost: formatCost(totals.cost) }) +
+        (totals.reported < totals.turns ? t("workspace.usageMissing", { count: totals.turns - totals.reported }) : "");
 
   let blockedReason: string | null = null;
-  if (stream.connection === "failed") blockedReason = "This conversation cannot be opened.";
-  else if (threadId !== null && thread === null) blockedReason = "Loading conversation…";
+  if (stream.connection === "failed") blockedReason = t("workspace.chatFailed");
+  else if (threadId !== null && thread === null) blockedReason = t("common.loading");
   else if (thread?.session_state === "broken")
-    blockedReason = "Start a new session to continue this conversation.";
-  else if (waiting) blockedReason = "The engine is waiting for your answer above.";
-  else if (transcript.runningTurnId !== null && !canMessageDuringRun) blockedReason = "An answer is running…";
-  else if (selectedEngine && !selectedEngine.available && !canMessageDuringRun) blockedReason = selectedEngine.reason ?? "This engine is unavailable. Check its settings.";
+    blockedReason = t("workspace.sessionBroken");
+  else if (waiting) blockedReason = t("workspace.waitingOnYou");
+  else if (transcript.runningTurnId !== null && !canMessageDuringRun) blockedReason = t("workspace.replying");
+  else if (selectedEngine && !selectedEngine.available && !canMessageDuringRun) blockedReason = t("workspace.engineNotReady", { engine: selectedEngine.label });
 
   // A signed-out engine gets a button to its sign-in; there may be no terminal to use.
   const signInAction = selectedEngine && !selectedEngine.available && selectedEngine.signed_in === false
-    ? { label: `Sign in to ${selectedEngine.label}`, onClick: () => router.push("/settings/engines/") }
+    ? { label: t("workspace.signIn", { engine: selectedEngine.label }), onClick: () => router.push("/settings/engines/") }
     : undefined;
 
   const imagesAttached = attached.some((file) => file.type.startsWith("image/"));
   const imagesRefused = imagesAttached && selectedEngine !== undefined && !selectedEngine.capabilities.images;
   if (blockedReason === null && imagesRefused)
-    blockedReason = `${selectedEngine?.label ?? "This engine"} can't read images. Remove the image to send.`;
+    blockedReason = t("workspace.imageUnsupported", { engine: selectedEngine?.label ?? t("portal.engine") });
 
   const hasAudio = !!audioUrl.trim() || attached.some((file) => /\.(wav|mp3|m4a|ogg|flac|webm)$/i.test(file.name));
   if (blockedReason === null && hasAudio && (!audioCapability?.available || !audioConsent)) blockedReason = !audioCapability?.available ? t("chat.audioUnavailable") : t("chat.audioConsentRequired", { provider: audioCapability?.provider_label ?? "OpenAI" });
 
-  if (blockedReason === null && audioUrl.trim() && attached.length >= MAX_ATTACHMENTS) blockedReason = `Attach at most ${MAX_ATTACHMENTS} files or audio links to one message.`;
+  if (blockedReason === null && audioUrl.trim() && attached.length >= MAX_ATTACHMENTS) blockedReason = t("workspace.attachmentCount", { max: MAX_ATTACHMENTS });
   if (blockedReason === null && canMessageDuringRun && (attached.length > 0 || audioUrl.trim()))
-    blockedReason = "Remove attachments and audio links to send a text follow-up while this answer is running.";
+    blockedReason = t("workspace.textFollowup");
 
   const sendingReactionReplyDisabled = threadId === null || !ready || stream.connection === "failed" || thread === null ||
     thread.session_state === "broken" || waiting || transcript.runningTurnId !== null ||
@@ -760,7 +773,7 @@ export function ChatApp() {
       return problem === null;
     });
     const room = Math.max(0, MAX_ATTACHMENTS - attached.length);
-    if (accepted.length > room) problems.push(`Attach at most ${MAX_ATTACHMENTS} files to one message.`);
+    if (accepted.length > room) problems.push(t("workspace.attachmentCount", { max: MAX_ATTACHMENTS }));
     setAttached((previous) => [...previous, ...accepted.slice(0, room)]);
     setAttachNotice(problems.length ? problems.join(" ") : null);
   };
@@ -775,7 +788,7 @@ export function ChatApp() {
         return;
       }
       if (attached.length > 0 || audioUrl.trim()) {
-        setSendError("Remove attachments and audio links before sending a message during a running answer.");
+        setSendError(t("workspace.textFollowup"));
         return;
       }
       setSendError(null);
@@ -801,7 +814,7 @@ export function ChatApp() {
         setChosenSkills(() => []);
         setAttachNotice(null);
       } catch (err) {
-        setSendError(sendErrorText(err));
+        setSendError(sendErrorText(err, t));
       } finally {
         setSending(false);
         setListTick((n) => n + 1);
@@ -829,7 +842,7 @@ export function ChatApp() {
         }
         // Open it now: the stream replays from the start, so nothing is missed.
         drafts.moveSubmitted(draftKey, String(id), draft);
-        if (activeDraftKey.current === draftKey) router.replace(`/chat?thread=${id}`);
+        if (activeDraftKey.current === draftKey) router.replace(createdThreadHref(window.location.search, id), { scroll: false });
       }
       const ids: string[] = [];
       for (const file of attached) ids.push((await api.uploadAttachment(id, file, audioConsent ? "openai" : undefined, processing.signal)).id);
@@ -845,7 +858,7 @@ export function ChatApp() {
       setAudioConsent(false);
       setAttachNotice(null);
     } catch (err) {
-      setSendError(sendErrorText(err));
+      setSendError(sendErrorText(err, t));
       if (err instanceof ApiError && err.code === "skill_unavailable") setSkillsTick((n) => n + 1);
     } finally {
       audioAbort.current = null;
@@ -877,7 +890,7 @@ export function ChatApp() {
       await api.sendTurn(threadId!, message);
       return true;
     } catch (err) {
-      setSendError(sendErrorText(err));
+      setSendError(sendErrorText(err, t));
       return false;
     } finally {
       setSending(false);
@@ -893,11 +906,11 @@ export function ChatApp() {
     const effort = target.effort?.trim() || null;
     try {
       if (target.threadId !== null) {
-        const updated = await api.updateThread(target.threadId, { model, effort });
-        setThreads((previous) => previous?.map((item) => item.id === target.threadId ? updated : item) ?? null);
-        setOpenedThread((previous) => previous?.id === target.threadId ? updated : previous);
+        const updated = await api.updateThread(target.threadId, modelLocked ? { effort } : { model, effort });
+        setThreads((previous) => previous?.map((item) => item.id === target.threadId ? { ...item, ...updated } : item) ?? null);
+        setOpenedThread((previous) => previous?.id === target.threadId ? { ...previous, ...updated } : previous);
       } else {
-        setNewModel(model);
+        setNewModel(modelLocked ? null : model);
         setNewEffort(effort);
         if (target.agentId !== null) {
           setNewProviderOverride(target.provider === startingAgent?.provider ? null : target.provider);
@@ -910,7 +923,7 @@ export function ChatApp() {
       }
       modelDraftRef.current = null;
       setModelDraft((previous) => previous === target ? null : previous);
-    } catch (err) { setModelError(err instanceof ApiError ? err.message : "Could not change the model."); }
+    } catch (err) { setModelError(err instanceof ApiError ? err.message : t("profile.modelSaveFailed")); }
     finally { setModelBusy(false); }
   };
 
@@ -923,7 +936,7 @@ export function ChatApp() {
     } catch (err) {
       // Already over: the stream says so, nothing to show.
       if (!(err instanceof ApiError && err.code === "no_running_turn")) {
-        setSendError(err instanceof ApiError ? err.message : "Could not stop the answer.");
+        setSendError(err instanceof ApiError ? err.message : t("workspace.stopFailed"));
       }
       setStoppingTurn(null);
     }
@@ -936,7 +949,7 @@ export function ChatApp() {
     try {
       await change();
     } catch (err) {
-      setManageError(manageErrorText(err));
+      setManageError(manageErrorText(err, t));
     } finally {
       setListTick((n) => n + 1);
     }
@@ -969,7 +982,7 @@ export function ChatApp() {
       // Not waiting any more (answered elsewhere, expired, the run ended): the
       // stream already says so, and the card updates by itself.
       if (!(err instanceof ApiError && err.code === "approval_not_waiting")) {
-        const message = err instanceof ApiError ? err.message : "Could not send your answer.";
+        const message = err instanceof ApiError ? err.message : t("workspace.sendFailed");
         setApprovalErrors((prev) => ({ ...prev, [approvalId]: message }));
       }
     } finally {
@@ -984,7 +997,7 @@ export function ChatApp() {
     } catch (err) {
       // 404: already removed (from the rules list, say). Anything else is shown.
       if (!(err instanceof ApiError && err.status === 404)) {
-        setManageError(err instanceof ApiError ? err.message : "Could not remove the rule.");
+        setManageError(err instanceof ApiError ? err.message : t("workspace.removeRuleFailed"));
         return;
       }
     }
@@ -998,7 +1011,7 @@ export function ChatApp() {
     try {
       await api.resetThreadSession(threadId);
     } catch (err) {
-      setResetError(err instanceof ApiError ? err.message : "Could not start a new session.");
+      setResetError(err instanceof ApiError ? err.message : t("workspace.sessionFailed"));
     } finally {
       setResetting(false);
       setListTick((n) => n + 1);
@@ -1007,8 +1020,8 @@ export function ChatApp() {
 
   const openModelDialog = () => {
     setModelError(null);
-    const activeModelId = (threadId === null ? newModel : thread?.model) ?? null;
-    const activeEffort = (threadId === null ? selectedEffort : thread?.effort) ?? null;
+    const activeModelId = fixedModel ? selectedModel : (threadId === null ? newModel : thread?.model) ?? null;
+    const activeEffort = (threadId === null ? newEffort : thread?.effort) ?? null;
     const draft = {
       threadId,
       agentId: startingAgentId,
@@ -1051,7 +1064,12 @@ export function ChatApp() {
     rows: todaySnapshot.items,
   } : null;
 
-  const computerText = threadComputer ? computerChip(threadComputer, liveComputerState) : null;
+  const computerState = liveComputerState ?? threadComputer?.state ?? "unknown";
+  const stateKey = `workspace.computerState.${computerState}`;
+  const computerText = threadComputer
+    ? t(threadComputer.kind === "desktop" ? "workspace.desktop" : "workspace.computer") + " · " +
+      (t(stateKey) === stateKey ? t("workspace.computerState.unknown") : t(stateKey))
+    : null;
   // The desktop app hands out its own link (the page's address is a private local one); the web app its page address.
   const linkTarget: ChatTarget | null = roomId !== null && roomId !== "new" ? { kind: "room", id: roomId } : roomId === null && threadId !== null ? { kind: "thread", id: threadId } : null;
   const copyLink = linkTarget ? async () => {
@@ -1084,12 +1102,12 @@ export function ChatApp() {
     }
   };
   const employee = threadId === null ? startingAgentId : thread?.agent_id;
-  const workbenchHref = roomId === null && employee != null
-    ? `/?employee=${employee}${threadId === null ? "" : `&thread=${threadId}`}`
-    : "/";
+  useEffect(() => {
+    if (foreground && (roomId !== null || threadId === null || thread)) onEmployeeChange?.(roomId === null ? employee ?? null : null);
+  }, [foreground, roomId, threadId, thread, employee, onEmployeeChange]);
   const header = (
     <ChatHeader
-      workbenchHref={canOpenWorkbench(session) ? workbenchHref : null}
+      unified={unified}
       title={roomId !== null
         ? (roomTitle?.id === roomId ? roomTitle.name : t(roomId === "new" ? "room.new" : "room.title"))
         : thread?.title || (threadId === null ? t("shell.newChat") : threadAgent?.name || t("chat.conversation"))}
@@ -1103,8 +1121,8 @@ export function ChatApp() {
       engine={
         roomId === null && ready && engines && (threadId === null || thread !== null)
           ? {
-              label: chatModelLabel(selectedEngine, selectedModel, t("onboarding.model.default")),
-              disabled: modelBusy || sending || transcript.runningTurnId !== null,
+              label: unknownRoleModel ? t("profile.unreadableModel") : chatModelLabel(selectedEngine, selectedModel, t("onboarding.model.default")),
+              disabled: modelBusy || sending || transcript.runningTurnId !== null || (threadId !== null && openedThread?.id !== threadId),
               onClick: openModelDialog,
             }
           : undefined
@@ -1113,7 +1131,7 @@ export function ChatApp() {
         threadComputer && threadAgent && computerText
           ? {
               text: computerText,
-              hint: `This conversation's commands and file edits run in ${threadAgent.name}'s computer (${threadComputer.image}), not on this machine.`,
+              hint: t("workspace.computerHint", { name: threadAgent.name, image: threadComputer.image }),
               onClick: () => setPanel("computer"),
             }
           : undefined
@@ -1121,8 +1139,8 @@ export function ChatApp() {
       approvalMode={
         ready && gate.phase === "ready" && (gate.status.tools_enabled || threadComputer) && threadId !== null
           ? {
-              label: approvalModeLabel(threadAgent?.approval_mode ?? "ask"),
-              hint: "How much the engine may do before it asks. Set by the conversation's agent; a plain chat asks first.",
+              label: t(`workspace.${threadAgent?.approval_mode ?? "ask"}`),
+              hint: t("workspace.approvalHint"),
             }
           : undefined
       }
@@ -1168,6 +1186,7 @@ export function ChatApp() {
 
   const sidebar = (
     <Sidebar
+      historyOnly={unified}
       agents={agents}
       threads={threads}
       selectedThreadId={threadId}
@@ -1182,13 +1201,13 @@ export function ChatApp() {
       leadAgentId={teamState?.team?.lead_agent_id ?? null}
       onChangeLead={session?.scopes.includes("admin") ? async (agent, remove) => {
         try { setTeamState(await (remove ? collaboration.clearLead(agent.id) : collaboration.lead(agent.id))); setAgentTick(value => value + 1); }
-        catch (err) { setManageError(err instanceof ApiError ? err.message : "Could not change the lead."); }
+        catch (err) { setManageError(err instanceof ApiError ? err.message : t("workspace.leadFailed")); }
       } : undefined}
       onEditAgent={session?.scopes.includes("admin") ? agent => { setEditAgent(agent); setAgentsCreate(false); setAgentsOpen(true); } : undefined}
       onDeleteAgent={agents !== null && fullAccess ? (agent) => { setAgentsCreate(false); setDeleteAgentTarget(agent); setAgentsOpen(true); } : undefined}
       onNewAgent={agents !== null && mayManageAgents ? () => { setEditAgent(null); setAgentsCreate(true); setAgentsOpen(true); } : undefined}
       workspaces={<WorkspaceSwitcher onNavigate={() => setDrawerOpen(false)} />}
-      collaboration={ready ? <RoomList selected={roomId} onTeam={() => setTeamOpen(true)} onNavigate={() => setDrawerOpen(false)} /> : undefined}
+      collaboration={ready ? <RoomList selected={roomId} onTeam={() => { setDrawerOpen(false); setTeamOpen(true); }} onNavigate={() => setDrawerOpen(false)} /> : undefined}
       onOpenRoutines={ready && fullAccess && agents !== null ? () => setRoutinesOpen(true) : undefined}
       onOpenPlanner={ready && fullAccess && agents !== null ? () => setPlannerOpen(true) : undefined}
       onOpenWorkflows={ready && fullAccess && agents !== null ? () => setWorkflowsOpen(true) : undefined}
@@ -1197,9 +1216,10 @@ export function ChatApp() {
     />
   );
 
+  if (!foreground) return null;
   if (gate.phase === "loading") {
     return (
-      <div className="flex h-dvh flex-col">
+      <div className="opc-chat-gate flex h-dvh flex-col">
         {header}
         <p className="p-6 text-center text-sm text-muted">{t("common.loading")}</p>
       </div>
@@ -1208,7 +1228,7 @@ export function ChatApp() {
 
   if (gate.phase === "locked") {
     return (
-      <div className="flex h-dvh flex-col">
+      <div className="opc-chat-gate flex h-dvh flex-col">
         {header}
         <Notice title={t("portal.appWindow")}>
           {t("portal.appWindowHint")}
@@ -1219,7 +1239,7 @@ export function ChatApp() {
 
   if (gate.phase === "unreachable") {
     return (
-      <div className="flex h-dvh flex-col">
+      <div className="opc-chat-gate flex h-dvh flex-col">
         {header}
         <Notice title={t("portal.unreachable")} action={{label: t("portal.retry"), onClick: checkAgain}}>
           {t("portal.unreachableHint")}
@@ -1230,7 +1250,7 @@ export function ChatApp() {
 
   if (!ready) {
     return (
-      <div className="flex h-dvh flex-col">
+      <div className="opc-chat-gate flex h-dvh flex-col">
         {header}
         <Notice
           title={t(gate.status.enabled ? "portal.noEngine" : "portal.executionOff")}
@@ -1262,24 +1282,24 @@ export function ChatApp() {
       <div className="relative flex min-w-0 flex-1 flex-col">
       {header}
       {updateAvailable && !updateDismissed && (
-        <aside aria-label="Update available" className="flex justify-center px-4 py-2.5">
+        <aside aria-label={t("workspace.update")} className="flex justify-center px-4 py-2.5">
           <div className="inline-flex max-w-full flex-wrap items-center justify-center gap-2.5 rounded-full border border-accent/30 bg-accent/10 px-4 py-1.5 text-xs text-ink shadow-xs">
             <div className="flex items-center gap-1.5">
-              <span className="font-semibold text-accent">Update available:</span>
-              <span>Suparagent {latestVersion} is available.</span>
+              <span className="font-semibold text-accent">{t("workspace.update")}</span>
+              <span>Suparagent {latestVersion}</span>
             </div>
             <span className="hidden text-muted/60 sm:inline" aria-hidden="true">•</span>
             <Link
               href="/settings/#setting-general-updates"
               className="font-medium text-accent hover:underline"
             >
-              View in Settings
+              {t("workspace.updateSettings")}
             </Link>
             <button
               type="button"
               onClick={dismissUpdateNotice}
               className="ml-0.5 rounded p-0.5 text-muted transition-colors hover:text-ink cursor-pointer"
-              aria-label="Dismiss update notice"
+              aria-label={t("workspace.dismissUpdate")}
             >
               <X size={14} />
             </button>
@@ -1288,7 +1308,7 @@ export function ChatApp() {
       )}
       {modelDraft && modelDraft.threadId === threadId && (threadId !== null || modelDraft.agentId === startingAgentId) && engines && (
         <Dialog open onOpenChange={(open) => { if (!open) { modelDraftRef.current = null; setModelDraft(null); } }} title={t("portal.modelSettings")} size="sm">
-          <form onSubmit={(event) => { event.preventDefault(); void saveModel(); }} className="space-y-4">
+          <form onSubmit={(event) => { event.preventDefault(); if (!modelLocked || canSetEffort) void saveModel(); }} className="space-y-4">
             <EngineModelFields
               engines={engines}
               provider={modelDraft.provider}
@@ -1302,16 +1322,22 @@ export function ChatApp() {
                 setModelDraft(next);
               }}
               disabled={modelBusy}
-              lockProvider={threadId !== null}
+              lockProvider={threadId !== null || modelLocked}
+              lockModel={modelLocked}
+              fixedModelUnavailable={unknownRoleModel}
+              showEffort={!unknownRoleModel}
               hasComputer={startingAgent?.computer != null}
-              defaultLabel={selectedAgent?.model ? t("portal.agentDefault", { model: modelLabel(selectedAgent.model) }) : undefined}
+              inheritedModel={selectedAgent?.provider === modelDraft.provider ? (fixedModel ? selectedModel : selectedAgent.model) : undefined}
+              inheritedEffort={threadId === null && selectedAgent?.provider === modelDraft.provider ? selectedAgent.effort : undefined}
+              leadDefault={selectedAgent?.provider === modelDraft.provider && selectedAgent.id === teamState?.team?.lead_agent_id ? (fixedModel ? selectedModel : selectedAgent.model) : undefined}
               preferModelSelect
             />
-            {threadId !== null && <p className="text-xs text-muted">{t("portal.nextModel")}</p>}
+            {fixedModel ? <p className="text-xs text-muted">{t(`workspace.policy.${modelPolicy}`)} {unified && selectedAgent && modelPolicy === "role" && <button type="button" className="text-accent underline" onClick={() => { setModelDraft(null); openEmployee(selectedAgent.id); }}>{t("workspace.openProfile")}</button>}</p>
+              : threadId !== null && <p className="text-xs text-muted">{t("portal.nextModel")}</p>}
             {modelError && <p role="alert" className="text-sm text-danger">{modelError}</p>}
             <div className="flex flex-wrap items-center gap-2">
-              <Button type="submit" variant="primary" disabled={modelBusy}>{modelBusy ? t("room.saving") : t("portal.useModel")}</Button>
-              <Button disabled={modelBusy} onClick={() => { modelDraftRef.current = null; setModelDraft(null); }}>{t("common.cancel")}</Button>
+              {(!modelLocked || canSetEffort) && <Button type="submit" variant="primary" disabled={modelBusy}>{modelBusy ? t("room.saving") : t("portal.useModel")}</Button>}
+              <Button disabled={modelBusy} onClick={() => { modelDraftRef.current = null; setModelDraft(null); }}>{t(modelLocked && !canSetEffort ? "common.close" : "common.cancel")}</Button>
               <Button variant="ghost" disabled={modelBusy} onClick={() => { setModelBusy(true); api.getEngines(true).then(setEngines).catch(() => setModelError(t("portal.refreshFailed"))).finally(() => setModelBusy(false)); }}>{t("common.refresh")}</Button>
             </div>
           </form>
@@ -1338,7 +1364,7 @@ export function ChatApp() {
           onClose={() => setApprovalsOpen(false)}
         />
       )}
-      {teamOpen && agents !== null && <TeamPanel agents={agents} onClose={() => setTeamOpen(false)} onChanged={() => setAgentTick(value => value + 1)} />}
+      {(teamOpen || params.get("view") === "team") && agents !== null && <TeamPanel agents={agents} onOpenEmployee={unified ? openEmployee : undefined} onClose={() => { setTeamOpen(false); if (params.get("view") === "team") clearBriefTarget(); }} onChanged={() => setAgentTick(value => value + 1)} />}
       {routinesOpen && agents !== null && (
         <RoutinesPanel key={params.get("routine")} routineId={parseThreadId(params.get("routine"))} agents={agents} onClose={() => setRoutinesOpen(false)} />
       )}
@@ -1346,7 +1372,7 @@ export function ChatApp() {
       {workflowsOpen && agents !== null && (
         <WorkflowsPanel agents={agents} engines={engines ?? []} onClose={() => setWorkflowsOpen(false)} />
       )}
-      {agentsOpen && agents !== null && (
+      {!unified && mayManageAgents && agentsOpen && agents !== null && (
         <AgentsPanel
           agents={agents}
           startCreating={agentsCreate}
@@ -1393,7 +1419,7 @@ export function ChatApp() {
           )}
           <WaitingRoutineQuestions agentId={threadAgent?.id ?? startingAgent?.id ?? null} openThreadId={threadId} />
           {stream.connection === "failed" ? (
-            <Notice title="Cannot open this conversation">{stream.error}</Notice>
+            <Notice title={t("workspace.chatFailed")}>{stream.error}</Notice>
           ) : (
             <Conversation
               threadId={threadId}
@@ -1403,7 +1429,7 @@ export function ChatApp() {
               emptyAction={signInAction}
               emptyHint={
                 selectedEngine && !selectedEngine.available
-                  ? `${selectedEngine.label} is not ready: ${(selectedEngine.reason ?? "check it in Settings").replace(/\.+$/, "")}.`
+                  ? t("workspace.engineNotReady", { engine: selectedEngine.label })
                   : undefined
               }
               transcript={transcript}

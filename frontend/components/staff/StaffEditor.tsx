@@ -3,7 +3,10 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Check, FileText, MessageSquare, Pencil, UserRound } from "lucide-react";
 import { api, request, type Agent, type Engine } from "@/lib/api";
-import { collaboration } from "@/lib/collaboration";
+import { teamActionsFor, type ProfileTeamAction } from "@/lib/staff-team";
+import { canOpenWorkbench } from "@/lib/session";
+import { useT } from "@/lib/use-i18n";
+import { collaboration, type TeamState } from "@/lib/collaboration";
 import type { SkillSummary } from "@/lib/skills";
 import { StaffModelFields } from "./ProfileControls";
 import { DeepSeekKey } from "./DeepSeekKey";
@@ -30,9 +33,13 @@ type Props = {
   engines: Engine[];
   members: number[];
   openFeishu: boolean;
+  team?: TeamState | null;
+  onTeamChanged?: () => Promise<void>;
+  onOpenAdvanced?: () => void;
   onSaved: (id: number) => void;
 };
-export function StaffEditor({ agent, chatHref, lead, member, engines, members, openFeishu, onSaved }: Props) {
+export function StaffEditor({ agent, chatHref, lead, member, engines, members, openFeishu, onSaved, team, onTeamChanged, onOpenAdvanced }: Props) {
+  const t = useT();
   const { session } = useSession();
   const ownsHost = session?.kind === "browser" && !!session.session_id && session.scopes.includes("admin")
     && (session.role === "owner" || (!session.role && !session.person_id));
@@ -42,6 +49,9 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
     [summary, setSummary] = useState(agent?.description ?? "");
   const [provider, setProvider] = useState(agent?.provider ?? "codex"),
     [model, setModel] = useState<string | null>(agent?.model ?? null);
+  const [effort,setEffort] = useState<string | null>(agent?.effort ?? null);
+  const [confirm,setConfirm] = useState<ProfileTeamAction | null>(null);
+  const [teamError,setTeamError] = useState("");
   const [path, setPath] = useState(
       agent?.role_path ?? agent?.workspace_path ?? "",
     ),
@@ -102,6 +112,28 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
       : member
         ? "专业员工"
         : "独立员工";
+  const teamAgent = team?.agents.find(person => person.id === agent?.id);
+  const actions = teamActionsFor(canOpenWorkbench(session), agent, team);
+  const actionKeys: Record<ProfileTeamAction,string> = {delegate:"team.canDelegate", lead:"team.makeLead",
+    remove:"team.removeMember", undo:"team.undoCreation", join:"profile.joinTeam"};
+  async function changeTeam(action: ProfileTeamAction) {
+    if (!agent || !actions.includes(action) || busy) return;
+    setBusy(true);
+    setTeamError("");
+    try {
+      if (action === "join") await collaboration.addMember(agent.id);
+      if (action === "lead") await collaboration.lead(agent.id);
+      if (action === "remove") await collaboration.removeMember(agent.id);
+      if (action === "undo") await collaboration.undoCreate(agent.id);
+      if (action === "delegate") await collaboration.delegation(agent.id,!teamAgent?.delegation_enabled);
+      setConfirm(null);
+      await onTeamChanged?.();
+    } catch (e) {
+      setTeamError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function save() {
     setBusy(true);
     setError("");
@@ -116,7 +148,7 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
         title: title.trim() || null,
         description: summary.trim() || null,
         provider,
-        model,
+        model, effort,
       };
       const before = persisted.current;
       if (agent?.role_path && !rules) throw Error("请先重新读取工作指令");
@@ -261,10 +293,13 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
                 engines={engines}
                 provider={provider}
                 model={model}
+                effort={effort}
+                requireModel={!agent || !!agent.role_path}
                 disabled={!!agent?.role_path && !rules}
                 lockProvider={!!agent?.role_path}
                 stewardModels={isLead}
-                onChange={(p, m) => {
+                onChange={(p, m, e) => {
+                  setEffort(e ?? null);
                   setProvider(p);
                   setModel(m);
                 }}
@@ -330,16 +365,11 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
                 </>
               )}
               <h3>执行权限</h3>
-              <p>审批模式 · {agent?.approval_mode ?? "ask"}</p>
-              <p>执行引擎 · {provider}</p>
+              <p>审批模式 · {t(`profile.approval.${agent?.approval_mode ?? "ask"}`)}</p>
               <p>
                 工作记忆 · {agent?.memory_enabled === false ? "关闭" : "开启"}
               </p>
-              {agent && (
-                <Link href={`/chat?view=agents`} className="dp-link">
-                  打开员工高级设置
-                </Link>
-              )}
+              {agent && onOpenAdvanced && <button type="button" className="dp-link" onClick={onOpenAdvanced}>更多员工设置</button>}
             </>
           )}
           {ruleError && (
@@ -352,7 +382,7 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
           )}
         </div>
         <details className="dp-reporting">
-          <summary>汇报关系</summary>
+          <summary>汇报关系与团队管理</summary>
           <div className="dp-chain">
             <div className="dp-chainrow">
               <span className="dp-face blue">
@@ -379,6 +409,24 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
               </div>
             )}
           </div>
+          {actions.length > 0 && <div className="dp-fields">
+            {actions.includes("delegate") && <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={Boolean(teamAgent?.delegation_enabled)} disabled={busy}
+                onChange={() => void changeTeam("delegate")} />{t("team.canDelegate")}
+            </label>}
+            <div className="flex flex-wrap gap-2">{actions.filter(action => action !== "delegate").map(action => (
+              <button key={action} type="button" className="dp-button" disabled={busy}
+                onClick={() => { setTeamError(""); if (action === "join") void changeTeam(action); else setConfirm(action); }}>
+                {t(actionKeys[action])}
+              </button>
+            ))}</div>
+            {confirm && actions.includes(confirm) && <div className="space-y-2 rounded-md border border-line p-3">
+              <p>{t(`profile.confirm.${confirm}`, {name: agent?.name ?? "", lead: lead?.name ?? ""})}</p>
+              <button type="button" disabled={busy} className="dp-button" onClick={() => setConfirm(null)}>{t("common.cancel")}</button>{" "}
+              <button type="button" disabled={busy} className="dp-button" onClick={() => void changeTeam(confirm)}>{t(actionKeys[confirm])}</button>
+            </div>}
+            {teamError && <p role="alert" className="dp-error">{teamError}</p>}
+          </div>}
         </details>
       </div>
       <div className="dp-actions">

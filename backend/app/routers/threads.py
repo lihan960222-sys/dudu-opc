@@ -149,10 +149,21 @@ async def get_thread(thread_id: int, rt: ThreadRuntime = Depends(get_runtime)):
     thread = await _thread_or_404(rt, thread_id)
     async with rt.session() as db:
         turns = await store.list_turns(db, thread_id)
+        policy, policy_model, role_path = await store.model_policy(db, thread)
+    policy_model_unavailable = False
+    if role_path:
+        from pathlib import Path
+        from starlette.concurrency import run_in_threadpool
+        from app.services import role_workspace
+        try:
+            policy_model = (await run_in_threadpool(role_workspace.load, Path(role_path))).model
+        except (ValueError, OSError):
+            policy_model = None
+            policy_model_unavailable = True
     running = next((turn.id for turn in turns if turn.status == "running"), None)
     detail = (await _with_computers(rt, [thread]))[0].model_dump()
     return ThreadDetailResponse(
-        **detail,
+        **detail, model_policy=policy, policy_model=policy_model, policy_model_unavailable=policy_model_unavailable,
         turns=[TurnResponse.model_validate(turn) for turn in turns],
         active_turn_id=running,
     )
@@ -168,6 +179,10 @@ async def update_thread(
     `unknown_model`) and applies from the next message."""
     current = await _thread_or_404(rt, thread_id)
     if "model" in payload.model_fields_set:
+        if current.model != payload.model:
+            async with rt.session() as db:
+                if (await store.model_policy(db, current))[0] != "conversation":
+                    raise _error(409, "model_fixed", "The model is controlled by the role or channel.")
         try:
             rt.check_engine_model(current.provider, payload.model)
         except UnknownProvider:
@@ -190,6 +205,8 @@ async def update_thread(
                 thread = await store.set_model(db, thread_id, model, effort=effort)
     except store.ThreadNotFound:
         raise HTTPException(status_code=404, detail="Thread not found")
+    except store.ModelFixed:
+        raise _error(409, "model_fixed", "The model is controlled by the role or channel.")
     except store.ThreadBusy:
         raise _error(409, "turn_running", "Stop the running answer before archiving this conversation.")
     rt.hub.notify(thread_id)

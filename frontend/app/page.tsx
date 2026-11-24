@@ -1,13 +1,13 @@
 import { Suspense } from "react";
 import { AuthGate } from "@/components/AuthGate";
-import { Workbench } from "@/components/staff/Workbench";
+import { WorkspaceEntry } from "@/components/staff/WorkspaceEntry";
 
-export const metadata = { title: "Dudu · OPC 工作台" };
+export const metadata = { title: "工作区 · Suparagent" };
 export default function HomePage() {
   return (
     <Suspense fallback={<p>正在打开工作台…</p>}>
       <AuthGate>
-        <Workbench />
+        <WorkspaceEntry />
       </AuthGate>
     </Suspense>
   );

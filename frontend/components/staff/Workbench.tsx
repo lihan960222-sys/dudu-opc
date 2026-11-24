@@ -1,22 +1,13 @@
 "use client";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useSession } from "../AuthGate";
-import { canOpenWorkbench } from "@/lib/session";
+import { workspaceHref, type WorkspaceSection } from "@/lib/workspace-navigation";
+import { useT } from "@/lib/use-i18n";
+import { teamActivityLabel } from "@/lib/team-employee";
+import { EmployeeAdvancedTools, EmployeeCreationSources } from "../chat/EmployeeAdvancedTools";
 import { employeeChatHref } from "@/lib/sidebar";
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Activity,
-  ChevronRight,
-  FolderKanban,
-  Layers3,
-  ListTodo,
-  MessageSquare,
-  Monitor,
-  Plus,
-  Settings2,
-  UsersRound,
-} from "lucide-react";
+import { Activity, ChevronRight, Monitor, Plus } from "lucide-react";
 import { api, request, type Agent, type Engine, type Thread } from "@/lib/api";
 import {
   collaboration,
@@ -31,12 +22,7 @@ import { Face } from "./ProfileControls";
 import { FEISHU_RETURN_EMPLOYEE, feishuEntry } from "@/lib/feishu-employee";
 import "./workbench.css";
 
-const pages = [
-  { id: "people", label: "员工", icon: UsersRound },
-  { id: "projects", label: "项目", icon: FolderKanban },
-  { id: "activity", label: "运行记录", icon: Activity },
-  { id: "host", label: "家庭主机", icon: Monitor },
-] as const;
+type ManagementSection = Exclude<WorkspaceSection, "chat">;
 type Pending = {
   requestId: string;
   version: number;
@@ -556,38 +542,30 @@ function Projects({ staff }: { staff: Agent[] }) {
   );
 }
 
-export function Workbench() {
-  const { session } = useSession();
-  const router = useRouter();
-  const canManage = canOpenWorkbench(session);
-  useEffect(() => {
-    if (!canManage) router.replace("/chat/");
-  }, [canManage, router]);
-  return canManage ? <ManagementPortal /> : <Link href="/chat/">进入对话</Link>;
-}
-
-function loadPortal() {
+function loadPortal(page: ManagementSection) {
+  const people = page === "people";
   return Promise.allSettled([
-    api.listAgents(),
-    collaboration.team(),
-    api.getEngines(),
-    request<Pending[]>("/staff/pending"),
-    collaboration.activity(),
-    api.listThreads(),
+    page === "host" ? Promise.resolve<Agent[]>([]) : api.listAgents(people),
+    people ? collaboration.team() : Promise.resolve(null),
+    people || page === "host" ? api.getEngines() : Promise.resolve<Engine[]>([]),
+    people ? request<Pending[]>("/staff/pending") : Promise.resolve<Pending[]>([]),
+    page === "activity" ? collaboration.activity() : Promise.resolve([]),
+    people ? api.listThreads() : Promise.resolve<Thread[]>([]),
   ]);
 }
 
-function ManagementPortal() {
+export function Workbench({ page, onChanged }: { page: ManagementSection; onChanged: () => void }) {
+  const router = useRouter();
   const params = useSearchParams();
-  const [entry] = useState(() => {
+  const t = useT();
+  const entry = (() => {
     let employee = null;
     if (typeof window !== "undefined" && params.has("feishu_oauth")) {
       try { employee = sessionStorage.getItem(FEISHU_RETURN_EMPLOYEE); } catch { /* use lead */ }
     }
     return feishuEntry(params, typeof window === "undefined" ? "" : window.location.hash, employee);
-  });
-  const [page, setPage] = useState<string>(() => !entry.requested && params.get("section") === "host" ? "host" : "people"),
-    [agents, setAgents] = useState<Agent[]>([]),
+  })();
+  const [agents, setAgents] = useState<Agent[]>([]),
     [threads, setThreads] = useState<Thread[] | null>(null),
     [engines, setEngines] = useState<Engine[]>([]),
     [team, setTeam] = useState<TeamState | null>(null);
@@ -595,9 +573,10 @@ function ManagementPortal() {
     [activity, setActivity] = useState<
       Awaited<ReturnType<typeof collaboration.activity>>
     >([]),
-    [active, setActive] = useState<string>(""),
+    [showArchived, setShowArchived] = useState(false),
+    [restoring, setRestoring] = useState(false),
     [rev, setRev] = useState(0),
-    [loaded, setLoaded] = useState(false),
+    [loadedPage, setLoadedPage] = useState<ManagementSection | null>(null),
     [errors, setErrors] = useState<string[]>([]);
   const applyPortal = useCallback(([a, t, e, p, log, chats]: Awaited<ReturnType<typeof loadPortal>>) => {
     if (a.status === "fulfilled") setAgents(a.value);
@@ -617,71 +596,59 @@ function ManagementPortal() {
           : [],
       ),
     );
-    setLoaded(true);
-  }, []);
+    setLoadedPage(page);
+  }, [page]);
+  const loaded = loadedPage === page;
   const sequence = useRef<symbol | null>(null);
   const refresh = useCallback(() => {
     const requestId = Symbol();
     sequence.current = requestId;
-    return loadPortal().then(result => {
+    return loadPortal(page).then(result => {
       if (requestId === sequence.current) applyPortal(result);
     });
-  }, [applyPortal]);
+  }, [applyPortal, page]);
   useEffect(() => {
     void refresh();
     return () => { sequence.current = null; };
   }, [refresh]);
   const lead = agents.find((a) => a.id === team?.team?.lead_agent_id) ?? null;
-  const ordered = lead
-    ? [lead, ...agents.filter((a) => a.id !== lead.id)]
-    : agents;
+  const activeAgents = agents.filter(agent => !agent.archived_at);
+  const archived = agents.filter(agent => agent.archived_at);
+  const ordered = lead && !lead.archived_at ? [lead, ...activeAgents.filter(agent => agent.id !== lead.id)] : activeAgents;
   const members = team?.agents.filter(a => a.state !== "outside").map(a => a.id) ?? [];
   const initialEmployee = members.includes(Number(entry.employee)) ? entry.employee : lead ? String(lead.id) : "";
-  const returningEmployee = agents.find(a => String(a.id) === params.get("employee"));
-  const key =
-    active ||
-    (entry.requested && initialEmployee) ||
-    (returningEmployee && String(returningEmployee.id)) ||
-    (ordered[0] ? String(ordered[0].id) : (pending[0]?.requestId ?? "new"));
-  const chosen = agents.find((a) => String(a.id) === key) ?? null,
-    proposal = pending.find((p) => p.requestId === key);
-  const label = pages.find((p) => p.id === page)?.label;
+  const requested = params.get("employee");
+  const named = agents.find(agent => String(agent.id) === requested);
+  const pendingProfile = pending.find(item => item.requestId === requested);
+  const key = (entry.requested && initialEmployee) || (named && String(named.id)) || pendingProfile?.requestId ||
+    (requested === "new" ? "new" : ordered[0] ? String(ordered[0].id) : pending[0]?.requestId ?? "new");
+  const chosen = agents.find(agent => String(agent.id) === key) ?? null;
+  const proposal = pending.find(item => item.requestId === key);
+  const setActive = (id: string, advanced = false, replace = false) =>
+    router[replace ? "replace" : "push"](workspaceHref(params.toString(), "people", id, advanced), { scroll: false });
+  async function teamChanged() {
+    await refresh();
+    onChanged();
+  }
+  async function restore() {
+    if (!chosen) return;
+    setRestoring(true);
+    try {
+      await api.updateAgent(chosen.id, { archived: false });
+      await teamChanged();
+    } catch (error) {
+      setErrors([String(error)]);
+    } finally {
+      setRestoring(false);
+    }
+  }
   return (
     <div id="workbench">
-      <div className="dp-window">
-        <aside className="dp-rail">
-          <div className="dp-brand">
-            <span className="dp-mark">
-              <Layers3 />
-            </span>
-            <span>
-              <strong>Dudu</strong>
-              <small>OPC 工作台</small>
-            </span>
-          </div>
-          <nav className="dp-navigation" aria-label="工作台导航">
-            {pages.map((p) => (
-              <button
-                key={p.id}
-                aria-current={page === p.id ? "page" : undefined}
-                onClick={() => setPage(p.id)}
-              >
-                <p.icon />
-                {p.label}
-              </button>
-            ))}
-          </nav>
-          <nav className="dp-utilities" aria-label="工作区入口">
-            <Link href="/chat/"><MessageSquare />对话</Link>
-            <Link href="/chat?view=planner"><ListTodo />任务板</Link>
-            <Link href="/settings/"><Settings2 />设置</Link>
-          </nav>
-        </aside>
         <main className="dp-main">
           <header className="dp-pagehead">
             <div>
-              <h1>{label}</h1>
-              {loaded && page === "people" && <p className="dp-headnote">{agents.length} 位员工{pending.length > 0 && ` · ${pending.length} 份待审批档案`}</p>}
+              <h1>{t(`workspace.${page}`)}</h1>
+              {loaded && page === "people" && <p className="dp-headnote">{activeAgents.length} 位员工{pending.length > 0 && ` · ${pending.length} 份待审批档案`}</p>}
             </div>
             {page === "people" && (
               <button
@@ -703,7 +670,6 @@ function ManagementPortal() {
           )}
           {page === "people" && (
             <>
-              <Suggestions />
               <div className="dp-directory">
               <nav className="dp-roster" aria-label="员工名册">
                 {ordered.map((a) => (
@@ -720,6 +686,15 @@ function ManagementPortal() {
                         {a.id === lead?.id ? "大管家" : a.title || "员工"}
                       </small>
                     </span>
+                  </button>
+                ))}
+                {archived.length > 0 && <button type="button" className="dp-link dp-archived" aria-expanded={showArchived || !!chosen?.archived_at} onClick={() => {
+                  if (chosen?.archived_at) setActive("");
+                  setShowArchived(!showArchived && !chosen?.archived_at);
+                }}>已归档（{archived.length}）</button>}
+                {(showArchived || !!chosen?.archived_at) && archived.map(a => (
+                  <button key={a.id} className="dp-person" aria-pressed={String(a.id) === key} onClick={() => setActive(String(a.id))}>
+                    <Face id={a.id} name={a.name} rev={rev} /><span><strong>{a.name}</strong><small>已归档</small></span>
                   </button>
                 ))}
                 {pending.map((p) => (
@@ -740,14 +715,18 @@ function ManagementPortal() {
                 ))}
               </nav>
               <section className="dp-record" aria-label="员工档案">
+              {loaded && key === "new" && <button type="button" className="dp-link dp-import" onClick={() => router.push(workspaceHref(params.toString(), "people", "new") + "&sources=1", { scroll: false })}>从模板或文件创建</button>}
+              {key === "new" && params.get("sources") === "1" && <EmployeeCreationSources
+                agents={agents} onClose={() => setActive("new", false, true)} onChanged={() => void teamChanged()}
+                onCreated={agent => setActive(String(agent.id), false, true)} />}
               {!loaded ? (
                 <p role="status">正在读取员工档案…</p>
               ) : proposal ? (
                 <TeamSetupCard
                   key={proposal.requestId}
                   onDecided={() => {
-                    setActive("");
-                    void refresh();
+                    setActive("", false, true);
+                    void teamChanged();
                   }}
                   item={{
                     kind: "team_setup",
@@ -761,12 +740,20 @@ function ManagementPortal() {
                     undoAvailable: false,
                   }}
                 />
+              ) : chosen?.archived_at ? (
+                <div className="dp-fields">
+                  <h2>{chosen.name}</h2><p>这位员工已归档。</p>
+                  <button className="dp-button" disabled={restoring} onClick={() => void restore()}>恢复员工</button>
+                </div>
               ) : (
                 <StaffEditor
                   key={key + "-" + rev}
                   agent={chosen}
                   chatHref={chosen ? employeeChatHref(threads, chosen.id, Number(params.get("thread")) || null) : "/chat/"}
                   lead={lead}
+                  team={team}
+                  onTeamChanged={teamChanged}
+                  onOpenAdvanced={chosen ? () => setActive(String(chosen.id), true) : undefined}
                   member={
                     !!team?.agents.some(
                       (a) => a.id === chosen?.id && a.state !== "outside",
@@ -776,13 +763,16 @@ function ManagementPortal() {
                   members={members}
                   openFeishu={entry.requested && key === initialEmployee}
                   onSaved={async (id) => {
-                    await refresh();
-                    setActive(String(id));
+                    await teamChanged();
+                    if (String(id) !== key) setActive(String(id), false, true);
                     setRev((i) => i + 1);
                   }}
                 />
               )}
               </section>
+              {chosen && !chosen.archived_at && params.get("tools") === "1" && (
+                <EmployeeAdvancedTools key={chosen.id} agent={chosen} onChanged={() => void teamChanged()} onClose={() => setActive(String(chosen.id), false, true)} />
+              )}
               </div>
             </>
           )}
@@ -800,9 +790,9 @@ function ManagementPortal() {
                 activity.map((a) => (
                   <div className="dp-listrow" key={a.id}>
                     <div>
-                      <strong>{a.kind}</strong>
+                      <strong>{teamActivityLabel(a.kind, t)}</strong>
                       <small>
-                        {agents.find((s) => s.id === a.agent_id)?.name} ·{" "}
+                        {agents.find((s) => s.id === a.agent_id)?.name && `${agents.find((s) => s.id === a.agent_id)?.name} · `}
                         {new Date(a.created_at).toLocaleString()}
                       </small>
                     </div>
@@ -836,7 +826,7 @@ function ManagementPortal() {
                 <div className="dp-listrow" key={e.id}>
                   <div>
                     <strong>{e.label}</strong>
-                    <small>{e.version || e.reason}</small>
+                    {e.version && <small>{e.version}</small>}
                   </div>
                   <span className={`dp-status ${e.available ? "" : "pending"}`}>
                     {e.available ? "可用" : "待配置"}
@@ -844,25 +834,10 @@ function ManagementPortal() {
                 </div>
               ))}
               </section>
-              <section>
-              <h3>员工工作目录</h3>
-              {loaded && !agents.length && <p className="dp-empty">暂无员工工作目录。</p>}
-              {agents.map((a) => (
-                <div className="dp-listrow" key={a.id}>
-                  <div>
-                    <strong>{a.name}</strong>
-                    <small className="dp-mono dp-wrap">
-                      {a.role_path || a.workspace_path || "使用默认目录"}
-                    </small>
-                  </div>
-                </div>
-              ))}
-              </section>
               </div>
             </>
           )}
         </main>
-      </div>
     </div>
   );
 }
