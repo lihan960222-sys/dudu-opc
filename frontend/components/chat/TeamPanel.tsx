@@ -254,7 +254,7 @@ export function TeamPanel({ agents, onClose, onChanged, onOpenEmployee }: { agen
   const openProfile = (id: number) => { onClose(); onOpenEmployee?.(id); };
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }} title={data?.team?.name ?? t("team.title")} description={t("team.description")} size="workspace" flush>
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }} title={data?.team?.name ?? t("team.title")} size={onOpenEmployee ? "lg" : "workspace"} flush>
       <div className="flex min-h-0 flex-1 flex-col">
         <nav aria-label={t("team.title")} className="flex shrink-0 gap-1 overflow-x-auto border-b border-line px-3 sm:px-6">
           {(["agents", "work", "rooms"] as const).map((value) => (
@@ -265,7 +265,7 @@ export function TeamPanel({ agents, onClose, onChanged, onOpenEmployee }: { agen
               className={`min-h-12 whitespace-nowrap border-b-2 px-3 text-sm transition-colors ${tab === value ? "border-accent font-semibold text-ink" : "border-transparent text-muted hover:text-ink"}`}
               onClick={() => setTab(value)}
             >
-              {value === "agents" ? t("team.agentsTab") : value === "work" ? t("team.workTab") : t("room.plural")}
+              {value === "agents" ? t("workspace.people") : value === "work" ? t("team.workTab") : t("room.plural")}
             </button>
           ))}
         </nav>
@@ -274,27 +274,23 @@ export function TeamPanel({ agents, onClose, onChanged, onOpenEmployee }: { agen
         {!data && !error && <div className="p-5"><LoadingState rows={4} /></div>}
 
         {data && tab === "agents" && (
-          <section aria-label={t("team.agentsTab")} className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+          <section aria-label={t("workspace.people")} className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
             <div className="mx-auto max-w-5xl space-y-5">
-              <div className="grid gap-3 sm:grid-cols-3">
-                <div className="rounded-card border border-line bg-inset/60 p-4"><span className="text-xs text-muted">{t("team.agentsTab")}</span><div className="mt-1 text-2xl font-semibold">{teamAgents.length}</div></div>
-                <div className="rounded-card border border-line bg-inset/60 p-4"><span className="text-xs text-muted">{t("team.allWork")}</span><div className="mt-1 text-2xl font-semibold">{jobs.length}</div></div>
-                <div className="rounded-card border border-line bg-inset/60 p-4"><span className="text-xs text-muted">{t("team.needsAttention")}</span><div className="mt-1 text-2xl font-semibold">{counts.attention}</div></div>
-              </div>
-
               {!data.team && <EmptyPanel title={t("team.noTeam")} description={t("team.noTeamHelp")} />}
               {data.team && !data.lead_ready.ok && <p className="rounded-field border border-warning/40 bg-warning/5 px-4 py-3 text-sm text-warning">{data.lead_ready.reason}</p>}
 
               {teamAgents.length > 0 && (
-                <section aria-label={t("team.agentsTab")} className="space-y-3">
+                <div className="space-y-3">
                   {teamAgents.map((agent) => (
                     <article key={agent.id} className="space-y-3 rounded-card border border-line bg-raised p-4">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div className="flex min-w-0 items-center gap-3">
                           <AgentImage agentId={agent.id} name={agent.name} />
                           <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-2"><strong>{agent.name}</strong>{agent.is_lead && <Badge tone="accent">{t("agentTeam.leadBadge")}</Badge>}</div>
-                            <p className="mt-0.5 text-xs text-muted">{employeeModelName(agent.model, t("employee.defaultModel"), t("employee.customModel"))}</p>
+                            <div className="flex flex-wrap items-center gap-2"><strong>{agent.name}</strong>{agent.is_lead && <Badge tone="accent">{t("workspace.lead")}</Badge>}</div>
+                            <p className="mt-0.5 flex flex-wrap gap-x-2 text-xs text-muted">
+                              {agent.title && <span>{agent.title}</span>}<span>{employeeModelName(agent.model, t("employee.defaultModel"), t("employee.customModel"))}</span>
+                            </p>
                           </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-3">
@@ -311,10 +307,10 @@ export function TeamPanel({ agents, onClose, onChanged, onOpenEmployee }: { agen
                       )}
                     </article>
                   ))}
-                </section>
+                </div>
               )}
 
-              {admin && outsideAgents.length > 0 && (
+              {admin && (!onOpenEmployee || !data.team) && outsideAgents.length > 0 && (
                 <label className="block max-w-md text-sm">
                   {onOpenEmployee ? t("employee.selectProfile") : data.team ? t("team.addAgent") : t("team.chooseLead")}
                   <Select className="mt-1" value="" disabled={busy} onChange={(event) => { const id = Number(event.target.value); if (!id) return; if (onOpenEmployee) openProfile(id); else void act(() => data.team ? collaboration.addMember(id) : collaboration.lead(id)); }}>
@@ -330,18 +326,10 @@ export function TeamPanel({ agents, onClose, onChanged, onOpenEmployee }: { agen
         {data && tab === "work" && (
           <section aria-label={t("team.workTab")} className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
             <div className="mx-auto max-w-5xl space-y-5">
-              <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-                {(["attention", "running", "waiting", "finished"] as const).map((group) => (
-                  <button key={group} type="button" className="rounded-card border border-line bg-inset/60 p-3 text-left hover:bg-hover" onClick={() => setFilter(group)}>
-                    <span className="text-xs text-muted">{t(FILTER_LABEL[group])}</span><span className="mt-1 block text-2xl font-semibold">{counts[group]}</span>
-                  </button>
-                ))}
-              </div>
-
               <div className="space-y-3">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div className="flex flex-wrap gap-1" aria-label={t("team.allWork")}>
-                    {FILTERS.map((value) => <button key={value} type="button" aria-pressed={filter === value} className={`shrink-0 rounded-full border px-3 py-1.5 text-xs transition-colors ${filter === value ? "border-accent bg-accent/10 text-accent" : "border-line text-muted hover:bg-hover"}`} onClick={() => setFilter(value)}>{t(FILTER_LABEL[value])}</button>)}
+                    {FILTERS.map((value) => <button key={value} type="button" aria-pressed={filter === value} className={`shrink-0 rounded-full border px-3 py-1.5 text-xs transition-colors ${filter === value ? "border-accent bg-accent/10 text-accent" : "border-line text-muted hover:bg-hover"}`} onClick={() => setFilter(value)}>{t(FILTER_LABEL[value])} <span className="tabular-nums">{value === "all" ? jobs.length : counts[value]}</span></button>)}
                   </div>
                   <label className="block w-full lg:max-w-xs">
                     <span className="sr-only">{t("team.allWork")}</span>

@@ -1,5 +1,6 @@
 export const workspaceMessages = {
   en: {
+    "workspace.lead": "Team lead",
     "workspace.waitingOnYou": "Please respond to the question above.",
     "workspace.replying": "Reply in progress…",
     "workspace.imageUnsupported": "{engine} cannot read images. Remove the image to send.",
@@ -42,6 +43,7 @@ export const workspaceMessages = {
     "workspace.policy.task": "This task uses the model assigned when it was delegated.",
   },
   zh: {
+    "workspace.lead": "大管家",
     "workspace.waitingOnYou": "请先回答上面的问题。",
     "workspace.replying": "正在回复…",
     "workspace.imageUnsupported": "{engine} 无法读取图片。移除图片后即可发送。",
