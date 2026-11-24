@@ -80,7 +80,7 @@ jobs:
 
   backend-sqlite:
     name: Backend tests (SQLite)
-    timeout-minutes: 30
+    timeout-minutes: 55
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     # Pinned: on ubuntu-latest (Ubuntu 26 from 2026-10-19) test_a_hanging_and_a_crashing_engine_block_nothing
@@ -102,11 +102,12 @@ jobs:
           cache-dependency-glob: backend/uv.lock
       - name: Install audio validation runtime
         run: |
-          # Skip apt when the runner already has it; otherwise fail fast on a mirror/DNS outage instead of hanging.
-          if ! command -v ffprobe >/dev/null; then
-            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update
-            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install --yes ffmpeg
+          # The headless tests need both binaries. Optional GPU drivers and speech packs slow remote runners.
+          if ! command -v ffprobe >/dev/null || ! command -v ffmpeg >/dev/null; then
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install --yes --no-install-recommends ffmpeg
           fi
+          ffmpeg -version
           ffprobe -version
       - run: uv sync --frozen
       - run: uv run pytest -q
@@ -188,7 +189,7 @@ jobs:
 
   backend-postgres:
     name: Backend tests (PostgreSQL)
-    timeout-minutes: 30
+    timeout-minutes: 55
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     # Pinned: on ubuntu-latest (Ubuntu 26 from 2026-10-19) test_a_hanging_and_a_crashing_engine_block_nothing
@@ -224,11 +225,12 @@ jobs:
           cache-dependency-glob: backend/uv.lock
       - name: Install audio validation runtime
         run: |
-          # Skip apt when the runner already has it; otherwise fail fast on a mirror/DNS outage instead of hanging.
-          if ! command -v ffprobe >/dev/null; then
-            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update
-            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install --yes ffmpeg
+          # The headless tests need both binaries. Optional GPU drivers and speech packs slow remote runners.
+          if ! command -v ffprobe >/dev/null || ! command -v ffmpeg >/dev/null; then
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install --yes --no-install-recommends ffmpeg
           fi
+          ffmpeg -version
           ffprobe -version
       - run: uv sync --frozen
       - run: uv run alembic upgrade head
