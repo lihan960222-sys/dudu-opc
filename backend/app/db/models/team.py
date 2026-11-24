@@ -40,6 +40,7 @@ class AgentJob(Base):
     __table_args__ = (
         Index("ix_agent_job_requester_turn", 'requester_turn_id', unique=False),
         Index("ix_agent_job_status", 'owner_id', 'status', unique=False),
+        Index("ix_agent_job_task", "owner_id", "task_id"),
         Index("ix_agent_job_parent", 'parent_id', unique=False),
         {"sqlite_autoincrement": True},
     )
@@ -51,6 +52,8 @@ class AgentJob(Base):
     origin_kind: Mapped[str] = mapped_column(String, nullable=False, default='person', server_default='person')
     origin_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     origin_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    project: Mapped[str | None] = mapped_column(String, nullable=True)
     requester_agent_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     requester_thread_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     requester_turn_id: Mapped[int] = mapped_column(BigInteger, nullable=False)

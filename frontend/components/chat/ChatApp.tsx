@@ -31,6 +31,7 @@ import { Composer } from "./Composer";
 import { Conversation } from "./Conversation";
 import { WaitingRoutineQuestions } from "./WaitingRoutineQuestions";
 import { NeedsYouCard } from "./NeedsYouCard";
+import { NativeResume } from "../staff/NativeResume";
 import { ChatHeader } from "./ChatHeader";
 import { CommandPalette } from "@/components/shell/CommandPalette";
 import { Sidebar } from "@/components/shell/Sidebar";
@@ -49,7 +50,7 @@ import { WorkspaceSwitcher } from "@/components/shell/WorkspaceSwitcher";
 import { useSession } from "@/components/AuthGate";
 import { can } from "@/lib/permissions";
 import { onboarding } from "@/lib/onboarding";
-import { loadDraft } from "@/lib/drafts";
+import { createChatDrafts } from "@/lib/drafts";
 import { TeamPanel } from "./TeamPanel";
 import { parseRoom, roomHref } from "@/lib/rooms";
 import { chatAppLink, chatWebLink, type ChatTarget } from "@/lib/chat-link";
@@ -167,7 +168,10 @@ export function ChatApp() {
   // The right-hand inspector page, kept in the address (?panel=usage) so a reload reopens it.
   const panel = parsePanel(params.get("panel"));
   const setPanel = (next: Panel | null) => router.replace(chatHref(params.toString(), next));
-  const [draft, setDraft] = useState("");
+  const [drafts] = useState(() => createChatDrafts());
+  const draftKey = String(threadId ?? "new");
+  const draft = useSyncExternalStore(drafts.subscribe, () => drafts.get(draftKey), () => "");
+  const setDraft = useCallback((text: string) => drafts.set(draftKey, text), [drafts, draftKey]);
   const [pendingFirstTask, setPendingFirstTask] = useState<string | null>(null);
   const [firstTaskSuggestion, setFirstTaskSuggestion] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -286,10 +290,10 @@ export function ChatApp() {
     if (!fullAccess || params.get("onboarding") !== "1" || threadId !== null) return;
     let live = true;
     onboarding.get().then(value => {
-      if (live) setDraft(previous => previous || value.draft.first_request);
+      if (live && !drafts.get("new")) drafts.set("new", value.draft.first_request);
     }).catch(() => {});
     return () => { live = false; };
-  }, [params, threadId, fullAccess]);
+  }, [params, threadId, fullAccess, drafts]);
 
   useEffect(() => {
     const firstTask = pendingFirstTask;
@@ -300,7 +304,7 @@ export function ChatApp() {
     setFirstTaskSuggestion(null);
     setDraft(firstTask);
     setFocusComposer(true);
-  }, [params, threadId, pendingFirstTask]);
+  }, [params, threadId, pendingFirstTask, setDraft]);
 
   useEffect(() => {
     if (threadId === null || transcript.runningTurnId !== null || !transcript.items.some(item => item.kind === "turn_end")) return;
@@ -486,7 +490,7 @@ export function ChatApp() {
         if (target) { setEditAgent(target); setAgentsCreate(false); setAgentsOpen(true); }
       } else {
         const firstTask = typeof detail.firstTask === "string" && detail.firstTask.length <= 1000 ? detail.firstTask : null;
-        const savedNewDraft = loadDraft("new");
+        const savedNewDraft = drafts.get("new");
         setPendingFirstTask(firstTask && !savedNewDraft.trim() && !(threadId === null && draft.trim()) ? firstTask : null);
         setFirstTaskSuggestion(firstTask && (savedNewDraft.trim() || (threadId === null && draft.trim())) ? firstTask : null);
         setNewAgentId(detail.id); setNewModel(null); setNewEffort(null); router.push(`/chat?agent=${detail.id}`); setFocusComposer(true);
@@ -494,7 +498,7 @@ export function ChatApp() {
     };
     window.addEventListener("suparagent:open-agent", openAgent);
     return () => window.removeEventListener("suparagent:open-agent", openAgent);
-  }, [agents, draft, router, setAgentsOpen, threadId]);
+  }, [agents, draft, drafts, router, setAgentsOpen, threadId]);
 
   useEffect(() => {
     if (!ready) return;
@@ -789,7 +793,7 @@ export function ChatApp() {
           setSendError(t("composer.queueFull"));
           return;
         }
-        setDraft("");
+        drafts.clearSubmitted(draftKey, draft);
         setChosenSkills(() => []);
         setAttachNotice(null);
       } catch (err) {
@@ -820,7 +824,8 @@ export function ChatApp() {
           void api.setEnginePreference({ provider: selectedProvider, model: newModel, effort: newEffort }).catch(() => {});
         }
         // Open it now: the stream replays from the start, so nothing is missed.
-        router.replace(`/chat?thread=${id}`);
+        drafts.moveSubmitted(draftKey, String(id), draft);
+        if (currentThreadIdRef.current === null) router.replace(`/chat?thread=${id}`);
       }
       const ids: string[] = [];
       for (const file of attached) ids.push((await api.uploadAttachment(id, file, audioConsent ? "openai" : undefined, processing.signal)).id);
@@ -828,7 +833,7 @@ export function ChatApp() {
       processing.signal.throwIfAborted();
       liveTurnStarted.current = true;
       await api.sendTurn(id, message, ids, usedSkills);
-      setDraft("");
+      drafts.clearSubmitted(String(id), draft);
       setChosenSkills(() => []);
       setAttached([]);
       setAudioUrl("");
@@ -1136,6 +1141,7 @@ export function ChatApp() {
       usageHint={conversationTotal}
       trailing={
         <>
+          {roomId===null && thread?.provider==="codex" && threadId!==null && session?.scopes.includes("admin") && session.kind!=="device" && (!session.person_id || session.role==="owner") && (thread.kind==="feature" || thread.agent_id===teamState?.team?.lead_agent_id) && <NativeResume key={threadId} threadId={threadId}/>}
           <LanguageSelect compact />
           {ready && fullAccess ? (
             <NotificationBell
@@ -1358,7 +1364,7 @@ export function ChatApp() {
             setAgentTick(value => value + 1);
             setAgentsOpen(false); setEditAgent(null); setDeleteAgentTarget(null);
             const target = threads?.find(item => item.agent_id === id && !item.archived_at && item.session_state !== "broken");
-            setNewAgentId(id); setNewModel(null); setNewEffort(null); setDraft(t("agentTeam.setupStarter")); setFocusComposer(true);
+            setNewAgentId(id); setNewModel(null); setNewEffort(null); drafts.set(String(target?.id ?? "new"), drafts.get(String(target?.id ?? "new")) || t("agentTeam.setupStarter")); setFocusComposer(true);
             router.push(target ? `/chat?thread=${target.id}` : `/chat?agent=${id}`);
           }}
           initialDeleteAgent={deleteAgentTarget}
@@ -1497,7 +1503,8 @@ export function ChatApp() {
             </div>
           )}
           <Composer
-            draftKey={threadId === null ? "new" : String(threadId)}
+            key={draftKey}
+            draftKey={draftKey}
             focusRequested={focusComposer}
             onFocused={() => setFocusComposer(false)}
             value={draft}

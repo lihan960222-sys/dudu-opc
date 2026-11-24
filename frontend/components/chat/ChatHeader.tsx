@@ -1,6 +1,8 @@
 "use client";
 
 import { BarChart3, CalendarDays, Folder, Link2, Menu as MenuIcon, MoreHorizontal, ShieldCheck, Undo2 } from "lucide-react";
+import Link from "next/link";
+import { Layers3 } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Agent } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -71,6 +73,7 @@ export function ChatHeader({
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-2 border-b border-line bg-app px-3 pt-[env(safe-area-inset-top)] sm:px-4">
+      <Link href="/" aria-label="打开工作台" title="工作台" className="shrink-0 rounded-field p-1.5 text-muted hover:bg-hover"><Layers3 size={18}/></Link>
       {onOpenSidebar && (
         <IconButton label={t("shell.openSidebar")} onClick={onOpenSidebar} className="-ml-1">
           <MenuIcon size={20} />

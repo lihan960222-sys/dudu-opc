@@ -109,3 +109,30 @@ def test_routing_keeps_version_and_acceptance_separate():
         "version": "v2", "acceptance": "空目录可打开",
     }
     assert task_requirements("追加一张截图") == {}
+
+def test_each_supported_media_kind_uses_its_native_upload_and_send_type(tmp_path):
+    import httpx
+    from app.feishu.publisher import Publisher
+    from app.feishu.routing import enqueue
+    db=journal(tmp_path/'j')
+    cfg={'artifact_root':str(tmp_path),'steward':{'app_id':'s','open_id':'u'}}
+    pub=Publisher(cfg,db,tmp_path)
+    pub.headers=lambda identity:{}
+    folder=tmp_path/'2'
+    folder.mkdir()
+    for kind, filename, uploadtype in [('image','s.png','message'),('audio','v.opus','opus'),('media','m.mp4','mp4'),('file','l.txt','stream')]:
+        (folder/filename).write_bytes(b'test-fixture')
+        calls=[]
+        def send(request):
+            calls.append(request.url.path)
+            if request.url.path.endswith('/messages'):
+                body=json.loads(request.content)
+                assert body['msg_type']==kind and body['receive_id']=='u'
+                assert json.loads(body['content'])=={'image_key' if kind=='image' else 'file_key':'resource'}
+                return httpx.Response(200,json={'code':0,'data':{'message_id':'om'}})
+            assert uploadtype.encode() in request.content
+            return httpx.Response(200,json={'code':0,'data':{'image_key' if kind=='image' else 'file_key':'resource'}})
+        pub.http=httpx.Client(transport=httpx.MockTransport(send))
+        key=enqueue(db,2,'steward',{'kind':kind,'file':filename})
+        pub.deliver(db.execute('select * from outbox where id=?',(key,)).fetchone())
+        assert len(calls)==2

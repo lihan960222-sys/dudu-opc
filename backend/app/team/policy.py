@@ -25,6 +25,7 @@ class TurnTeam:
     configuration_allowed: bool = True
     setup_allowed: bool = False
     strict_hierarchy: bool = False
+    feature_consult: bool = False
 
 
 def automatic(tool, mode, team, arguments):
@@ -33,6 +34,11 @@ def automatic(tool, mode, team, arguments):
     if team is None:
         return 'denied', 'no_team'
     name = tool.removeprefix('mcp__team__')
+    if team.feature_consult:
+        if team.delegation_enabled and (name == 'list_agents' or
+                (name == 'ask_agent' and arguments.get('mode') == 'consult')):
+            return 'allowed', 'project_consult'
+        return 'denied', 'outside_consult_scope'
     if team.strict_hierarchy and not team.is_lead and name in ('ask_agent', 'delegate', 'say_in_room'):
         return 'denied', 'steward_only'
     if name == 'refresh_today':

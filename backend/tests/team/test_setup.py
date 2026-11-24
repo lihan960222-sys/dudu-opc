@@ -64,6 +64,32 @@ async def test_invalid_plan_changes_nothing(sessions, owner, team):
         assert not await db.scalar(select(Agent.id).where(Agent.name == 'Good'))
 
 
+async def test_review_card_model_and_custom_workspace(sessions, owner, team, tmp_path, monkeypatch):
+    monkeypatch.setattr(setup.settings, 'STEWARD_STRICT_OWNER', owner)
+    directory = tmp_path / 'Omni'
+    directory.mkdir()
+    async with sessions() as db:
+        lead = await db.get(Agent, team[0])
+        thread = Thread(owner_id=owner, provider='claude', agent_id=lead.id)
+        db.add(thread)
+        await db.flush()
+        turn = Turn(thread_id=thread.id, seq=1, status='running', prompt_text='Create Omni')
+        db.add(turn)
+        await db.commit()
+        card = await setup.prepare_pending(db, owner, lead.id, turn.id, thread.id,
+            {'operations':[{'op':'create','name':'Omni','instructions':'Develop extensions','first_task':'Inspect project'}]},
+            request_id='card-test', check_engine=engine_check)
+        plan = card['plan']
+        plan['operations'][0].update(model='m1', workspace_path=str(directory))
+        revised = await setup.revise_pending(db, owner, 'card-test', 1, plan, check_engine=engine_check)
+        assert revised['plan']['operations'][0]['workspace_path'] == str(directory)
+        await setup.decide_pending(db, owner, 'card-test', revised['version'], approve=True, check_engine=engine_check)
+        agent = await db.scalar(select(Agent).where(Agent.name == 'Omni'))
+        assert (agent.model, agent.workspace_path, agent.role_path) == ('m1', str(directory), str(directory))
+        from app.services.role_workspace import load
+        assert load(directory).instructions == 'Develop extensions'
+
+
 @pytest.mark.parametrize('operations,code', [
     ([], 'invalid_input'),
     ([{'op': 'create', 'name': 'X', 'provider': 'nope'}], 'unknown_provider'),
@@ -213,7 +239,7 @@ async def test_close_refuses_running_thread(sessions, owner, team):
         tid = thread.id
     async with sessions() as db:
         with pytest.raises(service.TeamError) as exc:
-            await setup.close_thread(db, owner, lead, tid, current_thread_id=5)
+            await setup.close_thread(db, owner, lead, tid, current_thread_id=tid + 1)
     assert exc.value.code == 'thread_busy'
 
 

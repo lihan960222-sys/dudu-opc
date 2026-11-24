@@ -42,3 +42,33 @@ export function saveDraft(key: string | null, text: string, store: Store | null 
     // storage full or blocked: the draft just is not kept
   }
 }
+
+// One instance belongs to the mounted chat page. The key is chosen by the caller
+// for every operation, including acknowledgements arriving after navigation.
+export function createChatDrafts(store: Store | null = defaultStore()) {
+  const edits = new Map<string, string>();
+  const listeners = new Set<() => void>();
+  const get = (key: string) => edits.get(key) ?? loadDraft(key, store);
+  const set = (key: string, value: string) => {
+    edits.set(key, value);
+    saveDraft(key, value, store);
+    for (const notify of listeners) notify();
+  };
+  const clearSubmitted = (key: string, submitted: string) => {
+    if (get(key) !== submitted) return;
+    edits.delete(key);
+    if (loadDraft(key, store) === submitted.slice(0, MAX_CHARS)) saveDraft(key, "", store);
+    for (const notify of listeners) notify();
+  };
+  return {
+    get, set, clearSubmitted,
+    moveSubmitted(from: string, to: string, submitted: string) {
+      if (!get(to)) set(to, submitted);
+      clearSubmitted(from, submitted);
+    },
+    subscribe(notify: () => void) {
+      listeners.add(notify);
+      return () => { listeners.delete(notify); };
+    },
+  };
+}

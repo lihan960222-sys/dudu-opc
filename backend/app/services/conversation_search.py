@@ -133,7 +133,7 @@ async def search_page(
     fetch = offset + limit + 1
 
     def scoped(statement, at_column):
-        statement = statement.where(Thread.owner_id == owner_id, Thread.kind.not_in(("room_member", "feature", "steward_ledger")))
+        statement = statement.where(Thread.owner_id == owner_id, Thread.kind.not_in(("room_member", "feature", "feature_consult", "steward_ledger")))
         if not include_delegated:
             statement = statement.where(Thread.kind != "job")
         if not include_archived:
@@ -269,7 +269,7 @@ async def search_any(
         .limit(candidates)
     )
     if feature_id is None:
-        statement = statement.where(Thread.kind.not_in(('feature', 'steward_ledger')))
+        statement = statement.where(Thread.kind.not_in(('feature', 'feature_consult', 'steward_ledger')))
     else:
         from app.db.models.feature import FeatureSession
         statement = statement.where(Thread.id.in_(select(FeatureSession.thread_id).where(FeatureSession.task_id == feature_id)))

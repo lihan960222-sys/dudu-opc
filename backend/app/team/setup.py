@@ -5,8 +5,10 @@ revalidates and applies the whole plan in one transaction. The request row is th
 receipt: retries replay the stored state. Undo refuses when anything it touched
 has changed. Plans cannot carry approval, delegation, memory, apps or archive settings.
 """
+from contextlib import ExitStack
 import hashlib
 import json
+from pathlib import Path
 from sqlalchemy import select, func
 from app.core.config import settings
 from app.db.models import Agent, AgentJob, Approval, Thread, Team, TeamEvent, TeamSetupRequest, Turn
@@ -18,7 +20,7 @@ from app.team.service import TeamError, audit, clean_line, member, now, team_for
 MAX_OPERATIONS = 8
 TEXT_FIELDS = {'name': 80, 'title': 120, 'description': 200}
 EDITABLE = ('name', 'title', 'description', 'instructions', 'provider', 'model')
-CREATE_KEYS = set(EDITABLE) | {'op', 'share_workspace', 'first_task'}
+CREATE_KEYS = set(EDITABLE) | {'op', 'share_workspace', 'workspace_path', 'first_task'}
 UPDATE_KEYS = {'op', 'agent_id', 'fields', 'expected_revision'}
 HASHED = EDITABLE + ('team_id', 'archived_at', 'approval_mode', 'workspace_path', 'delegation_enabled',
                     'memory_enabled', 'recall_enabled', 'memory_upkeep', 'compaction_summary', 'use_helper',
@@ -94,7 +96,7 @@ def text_value(field, value):
     raise TeamError('invalid_input', 'Unrecognised setting.')
 
 
-async def validate(db, owner, team, caller, plan, *, turn_id, check_engine):
+async def validate(db, owner, team, caller, plan, *, turn_id, check_engine, reviewed_workspace=False):
     """Normalise and check a plan against the current state. Raises TeamError."""
     if team is None or caller.team_id != team.id or team.lead_agent_id != caller.id:
         raise TeamError('lead_only', 'Only the team lead can change the team.')
@@ -130,7 +132,26 @@ async def validate(db, owner, team, caller, plan, *, turn_id, check_engine):
                         or any(ord(char) < 32 and char not in '\n\t' for char in first_task)):
                     raise TeamError('invalid_input', 'A first task must be plain text of at most 1,000 characters.')
                 first_task = agent_memory.redact_secrets(first_task.strip())[0]
+            if raw.get('workspace_path') is not None:
+                if not reviewed_workspace:
+                    raise TeamError('invalid_input', 'Set the local workspace on the review card.')
+                from app.services import role_workspace
+                from app.services.workspaces import require_workspace
+                path = raw['workspace_path']
+                if not isinstance(path, str) or not path.strip() or raw.get('share_workspace'):
+                    raise TeamError('invalid_input', 'Choose one workspace for this specialist.')
+                try:
+                    folder = role_workspace.checked_root(Path(path.strip()))
+                    role_workspace.validate_configured_location(folder)
+                    occupied = [Path(p) for a in live for p in (a.workspace_path, a.role_path) if p]
+                    occupied.extend(Path(o['fields']['workspace_path']) for o in out if o['op'] == 'create' and o['fields'].get('workspace_path'))
+                    role_workspace.validate_location(folder, occupied)
+                    fields['workspace_path'] = str(require_workspace(folder))
+                except (OSError, ValueError) as exc:
+                    raise TeamError('workspace_unavailable', '请选择已存在、可访问且与其他员工分开的本地绝对路径。') from exc
             if raw.get('share_workspace') is True:
+                if settings.STEWARD_STRICT_OWNER == owner:
+                    raise TeamError('workspace_unavailable', '每名员工需要独立的工作目录。')
                 if not caller.workspace_path:
                     raise TeamError('project_required', 'Give the lead a project folder first.')
                 fields['workspace_path'] = caller.workspace_path
@@ -255,6 +276,7 @@ def review_plan(plan, operations):
             fields = operation['fields']
             reviewed.append({'op': 'create', **{field: fields[field] for field in EDITABLE if field in fields},
                              'share_workspace': raw.get('share_workspace') is True,
+                             **({'workspace_path': fields['workspace_path']} if raw.get('workspace_path') else {}),
                              'first_task': operation.get('first_task') or ''})
         else:
             reviewed.append({'op': 'update', 'agent_id': operation['agent_id'], 'fields': operation['fields'],
@@ -276,7 +298,47 @@ def _guided_plan(plan):
             raise TeamError('revision_required', 'Read list_team_setup and include expected_revision before editing an agent.')
 
 
-async def _apply_operations(db, owner, caller, team, turn_id, thread_id, operations, check_engine):
+def _initialize_reviewed_role(agent, cleanup):
+    """Create only the reviewed role file. Leave pre-existing files intact on rollback."""
+    from app.services import role_workspace
+    if not agent.model:
+        raise TeamError("unknown_model", "请选择员工默认模型后再确认入职。")
+    folder = Path(agent.workspace_path) if agent.workspace_path else agent_memory.agent_home(agent.id)
+    try:
+        role_workspace.validate_configured_location(folder)
+        if not agent.workspace_path:
+            folder.mkdir(parents=True, exist_ok=True)
+        folder = role_workspace.checked_root(folder)
+        path = folder / "AGENTS.md"
+        expected = (agent.model, (agent.instructions or "").strip())
+        # Use exclusive creation so cleanup never removes a file that was already there.
+        content = f"---\ndefault_model: {agent.model}\n---\n\n{expected[1]}\n".encode("utf-8")
+        if len(content) > 65536:
+            raise ValueError("AGENTS.md exceeds 64 KiB")
+        try:
+            with path.open("xb") as f:
+                stat = path.stat()
+                f.write(content)
+            def undo_created():
+                try:
+                    if not role_workspace.linked(path) and path.stat().st_ino == stat.st_ino and path.read_bytes() == content:
+                        path.unlink()
+                except OSError:
+                    pass
+            cleanup.callback(undo_created)
+        except FileExistsError:
+            pass
+        if path.stat().st_nlink != 1:
+            raise ValueError("AGENTS.md linked")
+        role = role_workspace.load(folder)
+        if (role.model, role.instructions) != expected:
+            raise ValueError("已有 AGENTS.md 与审批内容不同，请选择独立目录或核对文件")
+        agent.workspace_path = agent.role_path = str(folder)
+    except (ValueError, OSError) as exc:
+        raise TeamError("workspace_unavailable", str(exc)) from exc
+
+
+async def _apply_operations(db, owner, caller, team, turn_id, thread_id, operations, check_engine, cleanup):
     """Apply already-validated operations and return the receipt and safe Undo data."""
     results, undo = [], {'created': [], 'updated': []}
     for op in operations:
@@ -285,6 +347,8 @@ async def _apply_operations(db, owner, caller, team, turn_id, thread_id, operati
             agent = Agent(owner_id=owner, team_id=team.id, created_by_agent_id=caller.id, approval_mode='ask', **fields)
             db.add(agent)
             await db.flush()
+            if settings.STEWARD_STRICT_OWNER == owner:
+                _initialize_reviewed_role(agent, cleanup)
             audit(db, team, 'agent_created', agent_id=agent.id, thread_id=thread_id, data={'turn_id': turn_id, 'instructions_length': len(agent.instructions or '')})
             result = {'action': 'created', 'agent_id': agent.id, 'name': agent.name,
                       'changes': changes({}, {**snapshot(agent), 'workspace_path': agent.workspace_path, 'approval_mode': 'ask'})}
@@ -384,7 +448,7 @@ async def revise_pending(db, owner, request_id, version, plan, *, check_engine):
     safe_plan = redacted(plan)
     executable = executable_plan(safe_plan)
     _guided_plan(executable)
-    operations = await validate(db, owner, team, caller, executable, turn_id=row.turn_id, check_engine=check_engine)
+    operations = await validate(db, owner, team, caller, executable, turn_id=row.turn_id, check_engine=check_engine, reviewed_workspace=True)
     card_plan = review_plan(safe_plan, operations)
     next_version = current_version + 1
     row.plan = {**card_plan, '_request_digest': (row.plan or {}).get('_request_digest', digest(public_plan(row.plan))), '_version': next_version}
@@ -414,23 +478,25 @@ async def decide_pending(db, owner, request_id, version, *, approve, check_engin
     thread = await db.get(Thread, row.thread_id, with_for_update=True, populate_existing=True)
     if thread is None or thread.owner_id != owner or thread.agent_id != caller.id:
         raise TeamError('request_not_found', 'The conversation for this setup plan no longer exists.')
-    if approve:
-        plan = executable_plan(public_plan(row.plan))
-        _guided_plan(plan)
-        operations = await validate(db, owner, team, caller, plan, turn_id=row.turn_id, check_engine=check_engine)
-        results, undo_data = await _apply_operations(db, owner, caller, team, row.turn_id, row.thread_id, operations, check_engine)
-        result = {'results': results, 'model_note': 'New conversations use the saved model defaults. Existing conversations retain their model.',
-                  'capability_note': 'App connections, skills, computers and routines require their own setup.'}
-        row.state, row.result, row.undo, row.decided_at = 'applied', result, undo_data, now()
-        event_data = {'request_id': row.request_id, 'results': results, 'undo_available': True}
-        event_type = 'team.setup.applied'
-    else:
-        row.state, row.result, row.decided_at = 'rejected', {'version': current_version}, now()
-        event_data = {'request_id': row.request_id, 'version': current_version, 'state': 'rejected'}
-        event_type = 'team.setup.dismissed'
-    from app.services import thread_store
-    await thread_store.add_event_in_transaction(db, row.thread_id, event_type, event_data)
-    await db.commit()
+    with ExitStack() as cleanup:
+        if approve:
+            plan = executable_plan(public_plan(row.plan))
+            _guided_plan(plan)
+            operations = await validate(db, owner, team, caller, plan, turn_id=row.turn_id, check_engine=check_engine, reviewed_workspace=True)
+            results, undo_data = await _apply_operations(db, owner, caller, team, row.turn_id, row.thread_id, operations, check_engine, cleanup)
+            result = {'results': results, 'model_note': 'New conversations use the saved model defaults. Existing conversations retain their model.',
+                      'capability_note': 'App connections, skills, computers and routines require their own setup.'}
+            row.state, row.result, row.undo, row.decided_at = 'applied', result, undo_data, now()
+            event_data = {'request_id': row.request_id, 'results': results, 'undo_available': True}
+            event_type = 'team.setup.applied'
+        else:
+            row.state, row.result, row.decided_at = 'rejected', {'version': current_version}, now()
+            event_data = {'request_id': row.request_id, 'version': current_version, 'state': 'rejected'}
+            event_type = 'team.setup.dismissed'
+        from app.services import thread_store
+        await thread_store.add_event_in_transaction(db, row.thread_id, event_type, event_data)
+        await db.commit()
+        cleanup.pop_all()
     return {'request_id': row.request_id, 'state': row.state, 'thread_id': row.thread_id}
 
 

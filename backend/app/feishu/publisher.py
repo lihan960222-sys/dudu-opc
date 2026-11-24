@@ -13,7 +13,7 @@ API = 'https://open.feishu.cn/open-apis'
 MAX_DOWNLOAD = 50 * 1024 * 1024
 
 
-class PlatformError(Exception):
+class PlatformError(RuntimeError):
     pass
 
 
@@ -95,6 +95,17 @@ class Publisher:
             self.db.execute('insert or replace into uploads values(?,?,?,?,?)', (*args,key))
         return key
 
+    def recall_notice(self, remote):
+        if not isinstance(remote,str) or not remote.startswith('om_'):
+            raise ValueError('Invalid Feishu notice message ID')
+        url = API + '/im/v1/messages/' + quote(remote,safe='')
+        response = self.http.delete(url,headers=self.headers(self.config['steward']),timeout=10)
+        # The platform also reports this state when an earlier recall succeeded
+        # but its response was lost.
+        if response.status_code==400 and response.json().get('code')==230110:
+            return
+        checked(response)
+
     def deliver(self, row):
         private = row['role'] == 'steward'
         role = self.config['steward'] if private else self.config['roles'][row['role']]
@@ -112,7 +123,23 @@ class Publisher:
             content = {'image_key' if kind=='image' else 'file_key': self.upload(role,path,kind)}
         data = {'uuid':row['id'],'msg_type':kind,'content':json.dumps(content,ensure_ascii=False)}
         params = {}
-        if private or row['is_root']:
+        if body.get('enquiry_reply'):
+            allowed = self.db.execute("""select q.message from enquiry_replies r join owner_enquiries q
+                on (q.app,q.event,q.role)=(r.app,r.event,r.role)
+                where r.outgoing=? and r.role=? and q.app=? and q.owner_open_id=?""",
+                (row['id'],row['role'],role['app_id'],role.get('owner_open_id'))).fetchone()
+            if private or kind!='text' or not allowed:
+                raise ValueError('专业机器人私聊只能回复老板已验证的原消息')
+            group=self.db.execute("""select g.chat,g.task from enquiry_replies r join group_enquiries g using(app,event)
+                where r.outgoing=?""",(row['id'],)).fetchone()
+            if group:
+                if group['chat']!=role['chat_id'] or group['task']!=row['task']:
+                    raise ValueError('工作群话题与当前任务不符')
+                data['reply_in_thread']=True
+            url = API + '/im/v1/messages/' + quote(allowed['message'],safe='') + '/reply'
+        elif private and body.get('reply_to'):
+            url = API + '/im/v1/messages/' + quote(body['reply_to'],safe='') + '/reply'
+        elif private or row['is_root']:
             params['receive_id_type'] = 'open_id' if private else 'chat_id'
             data['receive_id'] = role['open_id' if private else 'chat_id']
             url = API + '/im/v1/messages'

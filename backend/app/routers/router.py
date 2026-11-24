@@ -6,10 +6,12 @@ from app.routers.permission import router as permissions_router
 from app.routers.local import router as local_router
 from app.routers.providers import router as providers_router
 from app.routers.agents import router as agents_router
+from app.routers.staff import router as staff_router
 from app.routers.agent_skills import router as agent_skills_router
 from app.routers.threads import router as threads_router
 from app.routers.settings import router as settings_router
 from app.routers.decisions import router as decisions_router
+from app.routers.steward_suggestions import router as steward_suggestions_router
 from app.routers.approval_rules import router as approval_rules_router
 from app.routers.sentinel import router as sentinel_router
 from app.routers.computers import router as computers_router
@@ -26,6 +28,7 @@ from app.routers.workspace_files import router as workspace_files_router
 from app.routers.workspace_snapshots import router as workspace_snapshots_router
 from app.routers.images import router as images_router
 from app.routers.usage import router as usage_router
+from app.routers.feishu_owner_oauth import router as feishu_owner_oauth_router
 from app.routers.history_export import router as history_export_router
 from app.routers.profile import router as profile_router
 from app.auth.people_routes import join_router as people_join_router, router as people_router
@@ -42,6 +45,7 @@ def health():
 
 
 router.include_router(auth_router)
+router.include_router(feishu_owner_oauth_router)
 router.include_router(people_join_router)
 router.include_router(people_router)
 router.include_router(sandbox_router)
@@ -52,10 +56,12 @@ router.include_router(schedule_router)
 router.include_router(local_router)
 router.include_router(providers_router)
 router.include_router(agents_router)
+router.include_router(staff_router)
 router.include_router(agent_skills_router)
 router.include_router(threads_router)
 router.include_router(settings_router)
 router.include_router(decisions_router)
+router.include_router(steward_suggestions_router)
 router.include_router(approval_rules_router)
 router.include_router(sentinel_router)
 router.include_router(computers_router)

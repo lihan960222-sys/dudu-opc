@@ -10,6 +10,11 @@ def initialize(db):
         approval text primary key, dispatch text not null, thread integer not null, turn integer not null,
         outgoing text unique not null, decision_event text, state text not null default 'pending')""")
 
+    existing = {row[1] for row in db.execute("pragma table_info(approval_dm)")}
+    for column in ("decision","actor_open_id"):
+        if column not in existing:
+            db.execute(f"alter table approval_dm add column {column} text")
+
 
 def describe(approval):
     if approval.get("tool") != "feature_files.write_text":
@@ -67,8 +72,8 @@ def answer(worker, row, msg, text):
     # Reserve the specific reply before posting. A crash after this point requires
     # reconciliation, never a second decision on a guessed or newer approval.
     with db:
-        won = db.execute("""update approval_dm set state='verify',decision_event=?
-            where approval=? and state='pending'""",(row["event"],binding["approval"])).rowcount
+        won = db.execute("""update approval_dm set state='verify',decision_event=?,decision=?,actor_open_id=?
+            where approval=? and state='pending'""",(row["event"],decision,worker.cfg["steward"]["open_id"],binding["approval"])).rowcount
     if not won:
         worker.respond(row,"done","该请求已由另一条回复处理。",task)
         return True

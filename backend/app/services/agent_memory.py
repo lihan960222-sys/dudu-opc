@@ -320,12 +320,15 @@ def turn_instructions(agent, *, role_instructions: str | None = None) -> str | N
     then what the person wrote about themselves (About me, read by every
     agent), then the business profile (also read by every agent), then its notes when they are switched on. None when there is
     nothing."""
+    instructions = agent.instructions if role_instructions is None else role_instructions
+    return "\n\n".join(part for part in (instructions, turn_background(agent)) if part and part.strip()) or None
+
+
+def turn_background(agent) -> str | None:
+    """Profile and notes are reference data, separate from the agent's role policy."""
     from app.services import about_me
 
     parts = []
-    instructions = agent.instructions if role_instructions is None else role_instructions
-    if instructions and instructions.strip():
-        parts.append(instructions)
     about = about_me.prompt_block()
     if about:
         parts.append(about)

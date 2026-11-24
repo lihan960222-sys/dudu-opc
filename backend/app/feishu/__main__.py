@@ -2,19 +2,36 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
 import threading
+import multiprocessing
 from pathlib import Path
 
-from .ingress import receive
+from .ingress import listen
 from .publisher import Publisher
 from .routing import bind_config, enqueue, journal
 from .worker import Worker
 
 
+async def verify_chat(cfg,thread_id):
+    from app.db import session
+    from app.db.models import Thread
+    from app.team.service import team_for
+    async with session.AsyncSessionLocal() as db:
+        team=await team_for(db,cfg['owner_id'])
+        thread=await db.get(Thread,thread_id)
+        if not (thread and team and thread.owner_id==cfg['owner_id'] and thread.kind=='chat'
+                and thread.archived_at is None and thread.job_id is None and thread.room_id is None
+                and thread.agent_id==team.lead_agent_id==cfg['steward']['agent_id']):
+            raise ValueError('请选择当前老板与已配置的团队管家的普通会话，且该会话仍在使用。')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config',default=os.getenv('FEISHU_CONFIG'))
+    parser.add_argument('--bind-steward-thread',type=int,metavar='ID',help='Bind an existing ordinary chat with the current team lead')
+    parser.add_argument('--timings',action='store_true',help='Show measured queue, turn and delivery intervals for recent events')
     parser.add_argument('--status',action='store_true',help='List events and messages needing attention')
     parser.add_argument('--confirm-message',nargs=2,metavar=('OUTBOX_ID','REMOTE_ID'),help='Record a verified remote delivery')
     parser.add_argument('--retry-unsent',metavar='OUTBOX_ID',help='Retry after checking that no remote message exists')
@@ -30,6 +47,16 @@ def main():
     cfg = json.loads(path.read_text(encoding='utf-8-sig'))
     if cfg.get('owner_id') != 'local-owner':
         parser.error('独立本机后端使用 local-owner；网关与后端须连接同一数据库。')
+    if args.bind_steward_thread is not None:
+        from .setup_specialist import write_atomic
+        try:
+            asyncio.run(verify_chat(cfg,args.bind_steward_thread))
+        except ValueError as error:
+            parser.error(str(error))
+        cfg['steward_thread']=args.bind_steward_thread
+        write_atomic(path,(json.dumps(cfg,ensure_ascii=False,indent=2)+'\n').encode('utf-8'))
+        print('已绑定管家会话。网关下次启动时使用此配置。')
+        return
     directory = (path.parent / cfg['state_dir']).resolve()
     directory.mkdir(parents=True,exist_ok=True)
     channel = directory / 'channel.sqlite3'
@@ -37,6 +64,12 @@ def main():
     with journal(channel) as initial:
         bind_config(initial,cfg)
     initial.close()
+    if args.timings:
+        from .timing import report
+        with journal(channel) as db:
+            for row in report(db):
+                print(json.dumps(dict(row)))
+        return
     if args.status or args.confirm_message or args.retry_unsent:
         with journal(channel) as db:
             if args.status:
@@ -68,6 +101,13 @@ def main():
                     {'kind':args.kind,'file':args.artifact})
         return
 
+    if not cfg.get('steward_thread'):
+        parser.error('请先运行 --bind-steward-thread 会话编号，绑定团队管家的普通会话。')
+    cfg['_access_config_path'] = str(path)
+    try:
+        asyncio.run(verify_chat(cfg,cfg['steward_thread']))
+    except ValueError as error:
+        parser.error(str(error))
     # Keep the SDK event loop on the main thread. A separate worker owns its
     # database connection; the socket callback only commits the incoming event.
     lock = (directory / 'gateway.lock').open('a+b')
@@ -78,29 +118,53 @@ def main():
     else:
         import fcntl
         fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
-    asyncio.set_event_loop(asyncio.new_event_loop())
-    import lark_oapi as lark
-    def incoming(event):
-        db = journal(channel)
-        try:
-            receive(db,identity,json.loads(lark.JSON.marshal(event)))
-        finally:
-            db.close()
+    from .setup_specialist import load_secrets
+    load_secrets(path,cfg)
+    context = multiprocessing.get_context('spawn')
+    wake = context.Event()
+    specialists = [{**role,'tenant_key':identity['tenant_key'],'open_id':role['owner_open_id'],'enquiry_role':name}
+                   for name,role in cfg['roles'].items() if role.get('owner_open_id')]
+    children = {}
+    stop = threading.Event()
+
+    def supervise():
+        while not stop.is_set():
+            for specialist in specialists:
+                name = specialist['enquiry_role']
+                child = children.get(name)
+                if child and child.is_alive():
+                    continue
+                if child:
+                    child.join()
+                    logging.warning('Reconnecting specialist listener %s (previous exit %s)',name,child.exitcode)
+                    child.close()
+                child = context.Process(target=listen,args=(channel,specialist,wake),daemon=True)
+                child.start()
+                children[name] = child
+            stop.wait(30)
+
+    monitor = threading.Thread(target=supervise,daemon=True)
+    monitor.start()
 
     def work():
         db = journal(channel)
         try:
-            asyncio.run(Worker(cfg,Publisher(cfg,db,directory)).run())
+            asyncio.run(Worker(cfg,Publisher(cfg,db,directory)).run(wake))
         except BaseException:
             import logging
             logging.exception('Feishu worker stopped')
             os._exit(1)
 
-    handler = lark.EventDispatcherHandler.builder('','').register_p2_im_message_receive_v1(incoming).build()
     thread = threading.Thread(target=work,daemon=True)
     thread.start()
-    client = lark.ws.Client(identity['app_id'],os.environ[identity['secret_env']],event_handler=handler)
-    client.start()
+    try:
+        listen(channel,identity,wake)
+    finally:
+        stop.set()
+        monitor.join()
+        for child in children.values():
+            child.terminate()
+            child.join(timeout=5)
 
 
 if __name__ == '__main__':

@@ -27,7 +27,7 @@ TOOLS = [
 ]
 
 
-def turn_config(current, root, writable):
+def turn_config(current, root, writable, *, consult_only=False):
     if not isinstance(current, dict):
         raise ValueError("Cannot verify Codex configuration")
     servers = {key: {"enabled": False} for key in (current.get("mcp_servers") or {})}
@@ -36,7 +36,9 @@ def turn_config(current, root, writable):
     servers[SERVER] = {"command": sys.executable, "args": ["-I", str(Path(__file__).resolve()), str(root),
                         "write" if writable else "read"], "enabled": True, "required": True,
                        "enabled_tools": names, "default_tools_approval_mode": "prompt"}
-    return {"mcp_servers": servers, "plugins": plugins, "web_search": "disabled", "features": {
+    if consult_only:
+        servers[SERVER] = {"enabled": False}
+    return {"mcp_servers": servers, "plugins": plugins, "web_search": "disabled", "project_doc_max_bytes": 0, "features": {
         "shell_tool": False, "unified_exec": False, "view_image": False, "multi_agent": False,
         "apps": False, "plugins": False, "code_mode": False}}
 

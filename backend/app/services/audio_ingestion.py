@@ -15,6 +15,9 @@ import time
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
+import sys
+import wave
+
 import httpx
 
 from app.core.config import settings
@@ -30,10 +33,18 @@ TYPES = {'.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.ogg':
 
 
 def capabilities():
+    if local_whisper.installed_model():
+        local_ok = local_whisper.is_available()
+        return {
+            'model':'whisper-tiny', 'model_warning':None, 'provider':'local', 'provider_label':'Local Whisper (CPU)',
+            'available':local_ok, 'local_available':local_ok, 'local_device':'cpu',
+            'max_bytes':MAX_BYTES, 'max_seconds':MAX_SECONDS, 'extensions':list(TYPES),
+            'retention':'Speech recognition runs locally. The transcript is included in this conversation.',
+        }
     model = settings.AUDIO_TRANSCRIPTION_MODEL.strip()
     is_valid_model = model in ('gpt-transcribe', 'whisper-1')
     has_openai = is_valid_model and bool(settings.AUDIO_TRANSCRIPTION_API_KEY.strip()) and bool(shutil.which('ffprobe')) and bool(shutil.which('ffmpeg'))
-    local_ok = local_whisper.is_available() and bool(shutil.which('ffprobe')) and bool(shutil.which('ffmpeg'))
+    local_ok = local_whisper.is_available() and bool(shutil.which('ffprobe') and shutil.which('ffmpeg'))
     device, _ = local_whisper.get_device_info() if local_ok else ('none', 'none')
 
     if not is_valid_model:
@@ -80,6 +91,8 @@ def capabilities():
 
 
 def require_consent(provider: str | None):
+    if local_whisper.installed_model() and provider != 'local':
+        raise AttachmentError(422,'audio_consent_required','This steward processes speech locally. Select local transcription.')
     if provider == 'local':
         if not local_whisper.is_available():
             raise AttachmentError(503, 'transcription_unavailable', 'Local Whisper is not available.')
@@ -145,12 +158,39 @@ def validate(name: str, data: bytes, cancelled=None) -> tuple[str, float]:
     return TYPES[ext], duration
 
 
+def _private_local_wav(name, data, cancelled):
+    ext = Path(name).suffix.lower()
+    if ext not in TYPES or not data:
+        raise AttachmentError(415, 'invalid_audio', 'Unsupported or empty audio.')
+    if len(data) > MAX_BYTES:
+        raise AttachmentError(413, 'audio_too_large', 'Audio exceeds the 25 MB limit.')
+    with tempfile.TemporaryDirectory(prefix='voice-local-') as folder:
+        source, output = Path(folder)/'source', Path(folder)/'checked.wav'
+        source.write_bytes(data)
+        try:
+            _run_media([sys.executable, '-I', str(Path(__file__).with_name('local_audio_decoder.py')),
+                        str(source), str(output), ext, str(MAX_SECONDS)], 35, cancelled)
+            with wave.open(str(output)) as wav:
+                duration = wav.getnframes()/wav.getframerate()
+            return output.read_bytes(), duration
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode == 3:
+                raise AttachmentError(413,'audio_too_long','Audio exceeds the 20 minute limit.') from None
+        except (OSError, EOFError, wave.Error, subprocess.TimeoutExpired):
+            pass
+    raise AttachmentError(415,'invalid_audio','Audio is corrupt, unsupported or could not be decoded.')
+
+
 async def transcribe(name: str, data: bytes, provider: str | None) -> dict:
     require_consent(provider)
     if provider == 'local':
         cancelled = threading.Event()
         try:
-            mime, duration = await asyncio.to_thread(validate, name, data, cancelled)
+            if local_whisper.installed_model():
+                data, duration = await asyncio.to_thread(_private_local_wav, name, data, cancelled)
+                name = "checked.wav"
+            else:
+                _, duration = await asyncio.to_thread(validate, name, data, cancelled)
         finally:
             cancelled.set()
         try:

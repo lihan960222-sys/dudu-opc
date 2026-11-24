@@ -167,6 +167,14 @@ class TurnOutcome:
 
 
 @dataclass
+class CodexPrompt:
+    """Keep the human message distinct from per-turn model context on the native protocol."""
+    user_text: str
+    instructions: str | None
+    background: dict[str, str]
+
+
+@dataclass
 class TurnContext:
     thread_id: int
     turn_id: int
@@ -189,10 +197,12 @@ class TurnContext:
     # Confined turns cannot act through alternate tools.
     draft_only: bool = False
     feature_workspace: str | None = None
+    consult_only: bool = False
     media_review_only: bool = False
     # Extra instructions from the thread's named agent, for the provider's
     # system prompt (appended, never replacing it), or None. Read fresh each turn.
     instructions: str | None = None
+    codex_prompt: CodexPrompt | None = None
     # The agent's computer (app/computers/service.TurnComputer) when it has
     # one: the turn's tools then run there, never on the host.
     computer: object | None = None

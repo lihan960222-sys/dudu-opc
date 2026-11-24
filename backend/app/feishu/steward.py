@@ -13,6 +13,8 @@ def validate_choice(proposal, roles, tasks):
         return None
     intent, role = proposal.get('intent'), proposal.get('role')
     title, task = proposal.get('title'), proposal.get('task')
+    if intent=='chat' and task is None:
+        return 'chat','','',None
     if role not in roles or not isinstance(title,str) or not 0 < len(title.strip()) <= 160:
         return None
     if intent in ('append','query'):
@@ -34,12 +36,12 @@ async def infer(model, instructions, roles, tasks, message, *, private_env=()):
     if not exe:
         return None
     schema = {'type':'object','additionalProperties':False,'properties':{
-        'intent':{'type':'string','enum':['deliver','independent','append','query','clarify']},
-        'role':{'type':'string','enum':list(roles)},'title':{'type':'string'},
+        'intent':{'type':'string','enum':['deliver','independent','append','query','clarify','chat']},
+        'role':{'type':'string','enum':['',*roles]},'title':{'type':'string'},
         'task':{'type':['integer','null']}},'required':['intent','role','title','task']}
     role_details = roles if isinstance(roles, dict) and all(isinstance(v, str) for v in roles.values()) else list(roles)
     prompt = json.dumps({'职责':instructions,'可用角色':role_details,'现有任务':tasks,
-        '用户来信':message,'本轮要求':'只判断意图和归属。查询用query，追加或修正用append，独立交付用deliver，明确另开才用independent。引用或查询现有任务必须选其编号。多个合理候选或依据不足选clarify。'},ensure_ascii=False)
+        '用户来信':message,'本轮要求':'只判断意图和归属。查询用query，追加或修正用append，独立交付用deliver，明确另开才用independent。引用或查询现有任务必须选其编号。普通聊天、问候、向嘟嘟本人提问选chat，role留空。工作目标有多个合理候选或依据不足选clarify。'},ensure_ascii=False)
     host_exec.ensure_allowed('steward intent classification')
     with tempfile.TemporaryDirectory(prefix='suparagent-steward-') as working:
         folder = Path(working)

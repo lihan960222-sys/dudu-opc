@@ -520,6 +520,9 @@ async def start_turn(
     *,
     owner_instance: str | None = None,
     feature_event_key: str | None = None,
+    direct_event_key: str | None = None,
+    direct_attachment_ids: list[str] | None = None,
+    direct_skills: list[str] | None = None,
     attachments: list[dict] | None = None,
     origin: str | None = None,
     person_id: int | None = None,
@@ -537,6 +540,12 @@ async def start_turn(
     if thread is None:
         await db.rollback()
         raise ThreadNotFound(thread_id)
+    if direct_event_key is not None:
+        from app.services import feature_tasks
+        digest = feature_tasks.direct_input_hash(prompt_text, direct_attachment_ids, direct_skills)
+        prior = await feature_tasks.direct_submission(db, thread, direct_event_key, digest, lock=True)
+        if prior is not None:
+            raise TurnAlreadyStarted(prior)
     if feature_event_key is not None:
         from app.services import feature_tasks
         prior = await feature_tasks.submission(db, thread, feature_event_key, prompt_text,
@@ -574,6 +583,10 @@ async def start_turn(
         started["attachments"] = attachments
     if person_label:
         started["person"] = {"id": person_id, "label": person_label}
+    if direct_event_key is not None:
+        from app.db.models import DirectTurnReceipt
+        db.add(DirectTurnReceipt(owner_id=thread.owner_id,event_key=direct_event_key,thread_id=thread.id,
+                                 turn_id=turn.id,input_sha256=digest))
     if feature_event_key is not None:
         await feature_tasks.bind_turn(db, thread.owner_id, feature_event_key, thread_id, turn.id)
     await _add_event(db, thread_id, "turn.started", started, turn.id)
@@ -663,7 +676,7 @@ async def finish_turn(
 
 
 # Events a turn stores that are not the engine's own work.
-NOT_ENGINE_EVENTS = ("turn.started", "memory.recalled", "skill.used", "context.compacted", "engine.switched", "approval.resolved")
+NOT_ENGINE_EVENTS = ("turn.started", "memory.recalled", "skill.used", "context.compacted", "engine.switched", "engine.timing", "approval.resolved")
 
 # How far a turn cut by a crash or a stop had got (docs/RELIABILITY.md):
 # before_accept  the prompt never reached the engine: nothing ran, safe to send again;

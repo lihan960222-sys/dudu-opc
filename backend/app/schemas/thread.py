@@ -127,6 +127,10 @@ class TurnCreateRequest(BaseModel):
         return value
 
 
+class DirectTurnRequest(TurnCreateRequest):
+    direct_event_key: str = Field(min_length=1, max_length=240)
+
+
 class FeatureTurnRequest(TurnCreateRequest):
     feature_event_key: str = Field(min_length=1, max_length=240)
 

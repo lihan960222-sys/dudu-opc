@@ -4,3 +4,17 @@
 .vscode/
 
 .internal/
+__pycache__/
+*.pyc
+
+# Windows steward profile and Feishu personal authorizations
+*.dpapi
+feishu.json
+feishu.json.before-*
+feishu-state/
+.specialist-credentials/
+owner-oauth.sqlite3*
+workspace-access.sqlite3*
+suparagent.db*
+private-access.json
+codex-network.json

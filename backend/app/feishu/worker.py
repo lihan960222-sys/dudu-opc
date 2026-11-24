@@ -10,9 +10,9 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from . import approvals
+from . import approvals, direct_requests, enquiries, recalls, suggestions, team_progress, timing, video_frames
 from . import submissions
-from .routing import enqueue, parts, task_requirements
+from .routing import enqueue, ensure_group_root, parts, task_requirements
 from .artifacts import REPORT_REQUEST, parse_report, snapshot
 
 
@@ -37,8 +37,15 @@ class Worker:
         create table if not exists bindings(task integer primary key, role text, title text);
         create table if not exists executions(event text primary key, thread integer, turn integer);
         create table if not exists prepared(event text, position integer, attachment text, primary key(event,position));
+        create table if not exists video_previews(event text,thread integer,ids text,primary key(event,thread));
+        create table if not exists direct_requests(app text,event text,thread integer,body text,primary key(app,event));
+        create table if not exists direct_turns(app text,event text,thread integer,turn integer,primary key(app,event));
+        create table if not exists direct_notices(app text,event text,stage text,outgoing text,primary key(app,event,stage));
         """)
         approvals.initialize(self.db)
+        recalls.initialize(self.db)
+        suggestions.initialize(self.db)
+        team_progress.initialize(self.db)
         url = config.get('backend','http://127.0.0.1:8000')
         if urlsplit(url).hostname not in ('127.0.0.1','localhost','::1'):
             raise ValueError('仅支持本机后端')
@@ -50,6 +57,8 @@ class Worker:
     def respond(self, row, state, text, task=None):
         with self.db:
             outgoing = enqueue(self.db,task,'steward',{'text':text})
+            if state in ('clarify','done'):
+                self.bind_final(row,outgoing)
             if state == 'clarify':
                 self.db.execute('insert into questions(outgoing,app,event) values(?,?,?)',(outgoing,row['app'],row['event']))
             self.db.execute('update inbox set state=?,task=? where app=? and event=?',
@@ -72,7 +81,24 @@ class Worker:
         msg = json.loads(row['payload'])
         items = parts(msg['message_type'],json.loads(msg['content']))
         text = '\n'.join(p['text'] for p in items if p['kind']=='text')
-        if approvals.answer(self, row, msg, text):
+        if row['app'] != self.cfg['steward']['app_id']:
+            role = next((name for name,r in self.cfg['roles'].items() if r.get('app_id')==row['app'] and r.get('owner_open_id')),None)
+            if role:
+                await enquiries.answer(self,row,role,msg,text)
+            else:
+                with self.db:
+                    self.db.execute("update inbox set state='ignored' where app=? and event=?",(row['app'],row['event']))
+            return
+        from . import documents
+        if await documents.handle(self,row,msg,text):
+            return
+        if suggestions.answer(self,row,msg,text) or approvals.answer(self, row, msg, text):
+            return
+        from . import history
+        if await history.answer(self,row,msg,text):
+            return
+        if not self.cfg['roles'] and self.cfg.get('steward_thread'):
+            self.direct_chat(row, msg, text)
             return
         intent, role, title, prompt = command(text)
         ref = self.reference(msg)
@@ -103,7 +129,18 @@ class Worker:
             binding = self.db.execute('select * from bindings where task=?',(ref,)).fetchone()
             if binding:
                 title, role, intent = binding['title'], binding['role'], intent or 'append'
+        if not intent and not ref and not pending and self.cfg.get('steward_thread'):
+            is_direct_reply = self.db.execute("""select 1 from direct_turns d join inbox i using(app,event)
+                where i.app=? and i.message=? union all select 1 from direct_finals f join outbox o on o.id=f.outgoing
+                join direct_turns d on d.app=f.app and d.event=f.event where f.app=? and o.remote=? limit 1""",
+                (row['app'],parent,row['app'],parent)).fetchone()
+            casual = re.fullmatch(r'(你好|您好|早上好|晚上好|谢谢|辛苦了|在吗|你在吗|hi|hello)[！!.。？? ]*',text.strip(),re.I)
+            if is_direct_reply or casual or not self.cfg.get('isolated_runner_enabled'):
+                self.direct_chat(row,msg,text)
+                return
         if not intent and not ref and not pending and text.strip() and self.cfg.get('isolated_runner_enabled'):
+            if self.direct_notice(row,'running','已收到，正在确认任务归属。'):
+                self.flush(cleanup=False)
             from .steward import classify
             try:
                 choice = await classify(self.cfg,self.db,row['app']+'|'+row['event'],text)
@@ -111,6 +148,9 @@ class Worker:
                 choice = None
             if choice:
                 intent,role,title,ref = choice
+                if intent=='chat' and self.cfg.get('steward_thread'):
+                    self.direct_chat(row,msg,text)
+                    return
         if intent == 'independent' and ref:
             previous = self.db.execute('select role from bindings where task=?',(ref,)).fetchone()
             if not previous or previous['role']!=role:
@@ -139,7 +179,7 @@ class Worker:
         with self.db:
             new = self.db.execute('insert or ignore into bindings values(?,?,?)',(task,role,title)).rowcount
             if new:
-                enqueue(self.db,task,role,{'text':f'任务 #{task} · {title}'},root=True)
+                ensure_group_root(self.db,task,role,title)
             if pending:
                 self.db.execute('update questions set resolved_by=? where app=? and event=?',(row['event'],pending['app'],pending['event']))
                 self.db.execute("update inbox set state='resolved',task=? where app=? and event=?",(task,pending['app'],pending['event']))
@@ -174,11 +214,15 @@ class Worker:
             mime = {'audio':'audio/ogg','media':'video/mp4'}.get(part['kind']) or mimetypes.guess_type(part['name'])[0] or 'application/octet-stream'
             name = part['name'] if '.' in part['name'] else part['name'] + {'audio':'.ogg','media':'.mp4'}.get(part['kind'],'')
             with path.open('rb') as stream:
-                resp = self.api.post(f'threads/{thread_id}/attachments',files={'file':(name,stream,mime)})
+                resp = self.api.post(f'threads/{thread_id}/attachments',files={'file':(name,stream,mime)},
+                                     data={'consent_provider':'local'} if part['kind']=='audio' else None)
             resp.raise_for_status()
             ids.append(resp.json()['id'])
             with self.db:
                 self.db.execute('insert into prepared values(?,?,?)',(event_key,i,ids[-1]))
+        videos=[(p['name'],path) for _,p,path in files if p['kind']=='media']
+        ids.extend(video_frames.add(self,event_key,thread_id,videos,ids,provider=thread.provider,
+                                    image_count=sum(p['kind']=='image' for _,p,_ in files)))
         if files:
             layout = []
             attachment_number = 0
@@ -233,18 +277,24 @@ class Worker:
                     issues.append('有一项产物未通过路径、大小或文件状态核对。')
         with self.db:
             enqueue(self.db,task,role,{'text':f"任务 #{task} 本轮状态：{turn['status']}。已登记 {len(artifacts)} 个公开产物。{public}"})
-            enqueue(self.db,task,'steward',{'text':f"任务 #{task}：{summary[:8000]}{''.join(issues)}"})
+            final = enqueue(self.db,task,'steward',{'text':f"任务 #{task}：{summary[:8000]}{''.join(issues)}"})
+            self.bind_final(row,final)
+            timing.finished(self.db,row,turn)
             for artifact in artifacts:
                 for audience in (role,'steward'):
                     enqueue(self.db,task,audience,artifact)
             self.db.execute("update inbox set state='done' where app=? and event=?",(row['app'],row['event']))
 
-    def flush(self):
+    def flush(self, *, cleanup=True, history_id=None):
+        with self.db:
+            self.db.execute("""update outbox set state='superseded' where state='pending' and id in
+                (select n.outgoing from direct_notices n join direct_finals f using(app,event))""")
         for row in self.db.execute("""select o.* from outbox o left join retry r on r.id=o.id
             where o.state='pending' and coalesce(r.after,0)<=unixepoch() and
-            (o.role='steward' or o.is_root=1 or exists
+            (o.role='steward' or o.is_root=1 or exists(select 1 from enquiry_replies q where q.outgoing=o.id) or exists
             (select 1 from outbox root where root.is_root=1 and root.role=o.role and root.task=o.task and root.state='sent'))
-            order by o.rowid""").fetchall():
+            and ((? is null and not exists(select 1 from history_reply_policy h where h.outgoing=o.id)) or o.id=?)
+            order by o.rowid""",(history_id,history_id)).fetchall():
             with self.db:
                 self.db.execute("update outbox set state='verify' where id=?",(row['id'],))
             try:
@@ -261,10 +311,101 @@ class Worker:
             with self.db:
                 self.db.execute("update outbox set state='sent',remote=? where id=?",(remote,row['id']))
 
+                self.db.execute("update delivery_timing set sent=unixepoch('subsec') where outgoing=?",(row['id'],))
+                self.db.execute('update notice_recalls set remote=? where outgoing=?',(remote,row['id']))
+        if cleanup:
+            recalls.flush(self.db,self.pub,self.cfg.get('steward',{}).get('app_id'))
+
+    def bind_final(self,row,outgoing):
+        self.db.execute('update delivery_timing set outgoing=? where app=? and event=?',(outgoing,row['app'],row['event']))
+        self.db.execute("""insert into direct_finals(app,event,outgoing)
+            select ?,?,? where exists(select 1 from direct_notices where app=? and event=?)
+            on conflict(app,event) do update set outgoing=excluded.outgoing""",
+            (row['app'],row['event'],outgoing,row['app'],row['event']))
+
+    def direct_final(self, row, state, text, *, history_policy=None):
+        keys = (row['app'],row['event'])
+        with self.db:
+            outgoing = enqueue(self.db,None,'steward',{'text':text,'reply_to':row['message']})
+            if history_policy:
+                self.db.execute('insert into history_reply_policy values(?,?,?,?,?,?)',(outgoing,*history_policy))
+            self.db.execute('update delivery_timing set outgoing=? where app=? and event=?',(outgoing,*keys))
+            self.db.execute('insert into direct_finals values(?,?,?) on conflict(app,event) do update set outgoing=excluded.outgoing',(*keys,outgoing))
+            self.db.execute("update inbox set state=? where app=? and event=?",(state,*keys))
+
+    def direct_notice(self, row, stage, text):
+        with self.db:
+            keys = (row['app'], row['event'])
+            if self.db.execute('select 1 from direct_notices where app=? and event=? and stage=?', (*keys, stage)).fetchone():
+                return
+            self.db.execute("""update outbox set state='superseded' where state='pending' and id in
+                (select outgoing from direct_notices where app=? and event=?)""", keys)
+            outgoing = enqueue(self.db,None,'steward',{'text':text,'reply_to':row['message']})
+            self.db.execute('insert into direct_notices values(?,?,?,?)', (*keys, stage, outgoing))
+            self.db.execute('insert into notice_recalls(outgoing) values(?)',(outgoing,))
+        return outgoing
+
+    def direct_chat(self, row, msg, text):
+        items = parts(msg['message_type'], json.loads(msg['content']))
+        resources = [part for part in items if 'key' in part]
+        if len(resources) > 8 or (not text.strip() and not resources):
+            self.respond(row,'held','请发送文字或最多 8 个附件。')
+            return
+        thread = self.cfg['steward_thread']
+        if self.db.execute("select 1 from inbox where state in ('direct_running','direct_submitting')").fetchone():
+            self.direct_notice(row,'queued','已排队，等上一条处理完就开始。')
+            return
+        if self.direct_notice(row,'running','思考中…'):
+            self.flush(cleanup=False)
+        ids = []
+        videos = []
+        source_key=submissions.event_key(row)
+        for position,part in enumerate(resources):
+            path = self.pub.download(-thread, row['message'], part)
+            kind = part['kind']
+            if kind=='media':
+                videos.append((part['name'],path))
+            prior=self.db.execute('select attachment from prepared where event=? and position=?',(source_key,position)).fetchone()
+            if prior:
+                ids.append(prior[0])
+                continue
+            name = part['name']
+            if '.' not in name:
+                name += {'audio':'.ogg','media':'.mp4'}.get(kind,'')
+            mime = {'audio':'audio/ogg','media':'video/mp4'}.get(kind) or mimetypes.guess_type(name)[0] or 'application/octet-stream'
+            with path.open('rb') as stream:
+                upload = self.api.post(f'threads/{thread}/attachments',files={'file':(name,stream,mime)},
+                                       data={'consent_provider':'local'} if kind=='audio' else None)
+            upload.raise_for_status()
+            ids.append(upload.json()['id'])
+            with self.db:
+                self.db.execute('insert into prepared values(?,?,?)',(source_key,position,ids[-1]))
+        ids.extend(video_frames.add(self,submissions.event_key(row),thread,videos,ids,
+                                    image_count=sum(p['kind']=='image' for p in resources)))
+        body = {'prompt_text':text.strip() or '请查看附件并回复。','attachment_ids':ids}
+        if self.cfg.get('steward_skills'):
+            body['skills'] = self.cfg['steward_skills']
+        direct_requests.prepare(self,row,thread,body)
+        direct_requests.send(self,row)
+
     async def tick(self):
-        for row in self.db.execute("select * from inbox where state in ('received','bound','submitting','running') and not exists (select 1 from retry where retry.id=inbox.app||'|'||inbox.event and retry.after>unixepoch()) order by rowid").fetchall():
+        for row in self.db.execute("select i.*,d.thread,d.turn from inbox i join direct_turns d using(app,event) where i.state='direct_running'").fetchall():
             try:
-                if row['state']=='submitting':
+                response = self.api.get(f"threads/{row['thread']}")
+                response.raise_for_status()
+                turn = next((t for t in response.json()['turns'] if t['id']==row['turn']),None)
+                if turn and turn.get('finished_at'):
+                    with self.db:
+                        timing.finished(self.db,row,turn)
+                    self.direct_final(row,'done' if turn['status']=='succeeded' else 'held',
+                                 turn.get('result') or turn.get('error') or '本轮已结束，请在本机查看详情。')
+            except httpx.HTTPError:
+                continue
+        for row in self.db.execute("select * from inbox where state in ('received','bound','submitting','running','suggestion_deciding','direct_submitting') and not exists (select 1 from retry where retry.id=inbox.app||'|'||inbox.event and retry.after>unixepoch()) order by rowid").fetchall():
+            try:
+                if row['state']=='direct_submitting':
+                    direct_requests.send(self,row)
+                elif row['state']=='submitting':
                     await submissions.send(self,row)
                 elif row['state']=='running':
                     await self.reconcile(row)
@@ -275,7 +416,7 @@ class Worker:
                 reason = type(exc).__name__
                 if isinstance(exc,httpx.HTTPStatusError):
                     reason += f' HTTP {exc.response.status_code}'
-                if latest['state'] in ('running','submitting'):
+                if latest['state'] in ('running','submitting','direct_submitting'):
                     # Neither phase may ever fall back to creating another dispatch.
                     with self.db:
                         retry_key = row['app']+'|'+row['event']
@@ -283,18 +424,48 @@ class Worker:
                             do update set attempts=attempts+1,after=unixepoch()+min(300,5*(attempts+1))""",(retry_key,))
                         self.db.execute('update inbox set error=? where app=? and event=?',(reason,row['app'],row['event']))
                         if not latest['error']:
-                            enqueue(self.db,latest['task'],'steward',{'text':f'任务 #{latest["task"]} 正在核对已登记的执行请求（{reason}）。'})
+                            enqueue(self.db,latest['task'],'steward',{'text':f'正在核对已登记的执行请求（{reason}）。'})
+                    continue
+                if row['app'] != self.cfg.get('steward',{}).get('app_id'):
+                    with self.db:
+                        self.db.execute('update inbox set error=? where app=? and event=?',(reason,row['app'],row['event']))
+                        self.db.execute('insert into retry values(?,1,unixepoch()+15) on conflict(id) do update set attempts=attempts+1,after=unixepoch()+min(600,15*(attempts+1))',
+                                        (row['app']+'|'+row['event'],))
                     continue
                 state = 'verify' if latest['state']=='verify' else 'held'
-                self.respond(latest,state,f'当前步骤需要核对（{reason}）。原消息已保存。',latest['task'])
+                feedback=f'当前步骤需要核对（{reason}）。原消息已保存。'
+                if isinstance(exc,httpx.HTTPStatusError) and exc.request.url.path.endswith('/attachments'):
+                    try:
+                        code=exc.response.json().get('detail',{}).get('error_code')
+                    except (ValueError,AttributeError):
+                        code=None
+                    reason_cn = {'transcription_unavailable':'本机语音转写或音频校验工具尚不可用',
+                                 'transcription_failed':'本机转写未成功','unsupported_type':'后端暂不能读取这一文件格式',
+                                 'too_large':'附件超过后端接收上限'}.get(code,'后端尚不能处理这个附件')
+                    feedback=f'已收到附件，原件保存在本机。{reason_cn}（{reason}），本轮未开始。'
+                if state=='held' and self.db.execute('select 1 from direct_notices where app=? and event=?',(row['app'],row['event'])).fetchone():
+                    self.direct_final(latest,state,feedback)
+                else:
+                    self.respond(latest,state,feedback,latest['task'])
                 with self.db:
                     self.db.execute('update inbox set error=? where app=? and event=?',(reason,row['app'],row['event']))
+        from .history import deliver_ready,resume_jobs
+        resume_jobs(self)
+        await deliver_ready(self)
         self.flush()
+        suggestions.poll(self)
+        await team_progress.poll(self)
 
-    async def run(self):
+    async def run(self, wake=None):
+        await team_progress.poll(self)
         while True:
+            if wake is not None:
+                wake.clear()
             await self.tick()
-            await asyncio.sleep(2)
+            if wake is None:
+                await asyncio.sleep(2)
+            else:
+                await asyncio.to_thread(wake.wait,2)
 
 async def resolve_workspace(session, config, task, cfg):
     from app.services import agent_store, role_workspace

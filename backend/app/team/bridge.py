@@ -50,6 +50,8 @@ class TeamBridge:
     @property
     def launch(self):
         extra = ['--escalations'] if notices.escalations_on() else []
+        if getattr(self.run.ctx.team, 'feature_consult', False):
+            extra.append('--project-consult')
         if getattr(sys, 'frozen', False):
             return SimpleNamespace(command=sys.executable, args=['--team-mcp', '--mailbox', str(self.folder), *extra], env={})
         root = str(Path(__file__).resolve().parents[2])
@@ -116,7 +118,20 @@ class TeamBridge:
             return await service_for(rt).read(refresh=True)
         async with rt.session() as db:
             caller = await service.member(db, rt.owner_id, run.agent_id, team_id=run.ctx.team.team_id)
-            if name == 'list_agents':
+            if run.ctx.team.feature_consult:
+                from app.db.models import Thread
+                from app.services import feature_tasks
+                team = await service.team_for(db, rt.owner_id)
+                turn = await db.get(Turn, run.turn_id)
+                thread = await db.get(Thread, run.thread_id)
+                if not team or not turn or turn.owner_token != run.owner_token:
+                    raise service.TeamError('parent_gone', 'This consultation turn is no longer active.')
+                _, peers = await feature_tasks.consult_scope(db, rt.owner_id, team, caller, turn, thread)
+                if name == 'list_agents':
+                    return {'agents':[{'id':p.id, 'name':fence.line(p.name), 'title':fence.line(p.title)} for p in peers]}
+                if name != 'ask_agent' or args.get('mode') != 'consult':
+                    raise service.TeamError('consult_only','Only same-project consultation is available.')
+            elif name == 'list_agents':
                 rows = (await db.execute(select(Agent).where(Agent.team_id == caller.team_id, Agent.owner_id == rt.owner_id, Agent.archived_at.is_(None)).order_by(Agent.id))).scalars()
                 return {'agents': [{'id': a.id, 'name': fence.line(a.name), 'title': fence.line(a.title), 'can_delegate': a.delegation_enabled} for a in rows]}
         if name in management.TOOLS:

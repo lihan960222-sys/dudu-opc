@@ -158,6 +158,10 @@ async def test_a_chat_turn_then_a_resumed_one(crt, sessions, owner, codex):
     await finished(sessions, thread.id)
     events = await events_of(sessions, thread.id)
     assert data_of(events, "assistant.message") == [{"text": "hello there"}]
+    timings, = data_of(events, "engine.timing")
+    stages = ("process_ms", "initialize_ms", "thread_ready_ms", "turn_start_ms", "first_output_ms", "finished_ms")
+    assert set(timings) == set(stages)
+    assert [timings[k] for k in stages] == sorted(timings.values())
     assert data_of(events, "turn.completed")[0]["result"] == "hello there"
     row = await reload(sessions, Thread, thread.id)
     assert row.session_state == "active"
@@ -448,3 +452,31 @@ async def test_codex_team_mutations_preserve_policy_floor(crt, sessions, owner, 
     assert codex.answers()[0]['result']['action'] == 'decline'
     async with sessions() as db:
         assert not await db.scalar(select(Agent).where(Agent.owner_id == owner, Agent.name == 'Forbidden worker'))
+
+
+async def test_native_context_keeps_skill_and_roster_out_of_user_message(crt, sessions, owner, codex, monkeypatch):
+    from app.services import agent_skills
+    from app.team import service
+    monkeypatch.setattr(settings, 'TEAM_ENABLED', True)
+    async with sessions() as db:
+        lead = await agent_store.create_agent(db, owner_id=owner, name='Writer', provider='codex', memory_enabled=False)
+        peer = await agent_store.create_agent(db, owner_id=owner, name='PrivateRosterMarker', provider='codex')
+        await service.set_lead(db, owner, lead.id)
+        await service.change_member(db, owner, peer.id)
+    agent_skills.write_skill(lead.id, "humanizer-zh", "Chinese editing", "PrivateSkillBodyMarker")
+    thread = await crt.create_thread(provider="codex", agent_id=lead.id)
+    for index, text in enumerate(("Please edit this.", "One more edit."), 1):
+        await crt.send_turn(thread.id, text, skills=["humanizer-zh"])
+        await finished(sessions, thread.id, count=index)
+        start = codex.received("thread/start" if index == 1 else "thread/resume")[-1]["params"]
+        turn = codex.received("turn/start")[-1]["params"]
+        assert turn["input"] == [{"type":"text","text":text}]
+        assert "Team tools are available." in start["developerInstructions"]
+        for key, marker in [("skills","PrivateSkillBodyMarker"),("team_state","PrivateRosterMarker")]:
+            assert marker not in start["developerInstructions"]
+            assert turn["additionalContext"][key]["kind"] == "untrusted"
+            assert marker in turn["additionalContext"][key]["value"]
+        assert codex.received("initialize")[-1]["params"]["capabilities"]["experimentalApi"] is True
+    events = await events_of(sessions, thread.id)
+    assert [e.data["prompt_text"] for e in events if e.type == "turn.started"] == ["Please edit this.","One more edit."]
+    assert [e.data["skills"] for e in events if e.type == "skill.used"] == [["humanizer-zh"],["humanizer-zh"]]

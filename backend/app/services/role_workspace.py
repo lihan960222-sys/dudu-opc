@@ -106,5 +106,5 @@ async def validate_model(runtime, provider: str, model: str) -> None:
     if provider == "codex":
         entries = await runtime.engines.describe(only=provider)
         models = {m["id"] for entry in entries for m in entry["models"]}
-        if not models or model not in models:
+        if model not in models and not any(entry.get("custom_models") for entry in entries):
             raise ValueError(f"Model {model!r} is unavailable in the Codex model list")

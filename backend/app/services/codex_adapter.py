@@ -42,6 +42,8 @@ import os
 import re
 import shlex
 import shutil
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -70,6 +72,27 @@ from app.services.thread_store import cap_tool_output
 from app.services.turn_clock import TurnClock
 
 logger = get_logger(__name__)
+
+
+def _codex_turn_env(*, platform: str | None = None) -> dict[str, str] | None:
+    """Optional Windows proxy for this standalone Codex process. None uses the normal engine env."""
+    local_proxy = os.environ.get("SUPARAGENT_CODEX_HTTPS_PROXY", "").strip()
+    if (platform or sys.platform) != "win32" or not local_proxy:
+        return None
+    env = local_claude_runner.child_env()
+    if any(key.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"} for key in env):
+        return None
+    # Require an explicit local port and a loopback host. No remote host, credentials or URL path.
+    match = re.fullmatch(r"http://(?:127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})/?", local_proxy, re.I)
+    if not match or not 1 <= int(match[1]) <= 65535:
+        raise ValueError("SUPARAGENT_CODEX_HTTPS_PROXY needs an uncredentialed HTTP loopback URL with a port.")
+    bypass = []
+    for name in ("NO_PROXY", "no_proxy"):
+        bypass.extend(part.strip() for part in env.pop(name, "").split(",") if part.strip())
+    env["NO_PROXY"] = ",".join(dict.fromkeys([*bypass, "localhost", "127.0.0.1", "::1"]))
+    env["HTTPS_PROXY"] = local_proxy.rstrip("/")
+    return env
+
 
 MAX_ERROR_CHARS = 2000
 # An app-server starting with the person's MCP servers can take a while.
@@ -393,6 +416,21 @@ class CodexAdapter:
         return result
 
 
+def _native_activity(data, checkpoint):
+    """Summarize intervening native turns only when the previous local turn is present."""
+    rows = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(rows, list) or not checkpoint:
+        return None
+    count = 0
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+            return None
+        if row["id"] == checkpoint:
+            return {"source":"native_session","count":count,"latest_turn_id":rows[0]["id"]} if count else None
+        count += 1
+    return None
+
+
 @dataclass(eq=False)
 class _CodexTurn:
     ctx: TurnContext
@@ -424,7 +462,13 @@ class _CodexTurn:
     breach: bool = False
 
     def __post_init__(self) -> None:
+        self.timing_start = time.monotonic()
+        self.timings: dict[str, int] = {}
         self.feature = getattr(self.ctx, "feature_workspace", None)
+        team = getattr(self.ctx, "team", None)
+        self.handoff_enabled = (bool(self.feature) and not getattr(self.ctx, "consult_only", False)) or bool(
+            team and team.is_lead and team.strict_hierarchy)
+        self.native_history = {}
         self.computer = self.ctx.computer
         # A computer is the agent's sandbox: its turns always have tools, and they are the computer's.
         self.tools = bool(app_settings.get("LOCAL_TOOLS_ENABLED")) or self.computer is not None
@@ -455,9 +499,14 @@ class _CodexTurn:
         self.ctx.on_abort(lambda: loop.call_soon_threadsafe(self.aborted.set))
         from app.core import turn_sandbox
         try:
+            launch_env = _codex_turn_env()
+        except ValueError as exc:
+            return TurnOutcome("failed", error=str(exc), error_code="invalid_codex_proxy")
+        try:
             self.rpc = await StdioRpc.spawn(
                 [str(self.exe), "app-server"],
                 cwd=str(self.workspace),
+                env=launch_env,
                 max_bytes=self.max_text * RAW_STREAM_SIZE_FACTOR,
                 sandbox=True,
                 sandbox_writable=turn_sandbox.mailbox_mounts((
@@ -474,6 +523,9 @@ class _CodexTurn:
             if early is not None:
                 return early
             await self._pump()
+            if self.completed:
+                self._mark("finished_ms")
+                await self._emit("engine.timing", self.timings)
         except _Stopped:
             await self._interrupt()
         except Exception:  # noqa: BLE001
@@ -509,24 +561,37 @@ class _CodexTurn:
                 request.cancel()
             await asyncio.gather(request, stop, return_exceptions=True)
 
+    def _mark(self, phase: str) -> None:
+        if phase not in self.timings:
+            self.timings[phase] = round((time.monotonic() - self.timing_start) * 1000)
+
     def _failed(self, error: str, code: str, **more) -> TurnOutcome:
         return TurnOutcome("failed", error=_clip(error), error_code=code, **{**self._common(), **more})
 
     def _common(self) -> dict:
+        state = {"codex_thread_id": self.thread_id} if self.thread_id else None
+        if state and self.handoff_enabled:
+            state["native_cwd"] = str(self.workspace)
+            state.update(self.native_history)
+            if self.codex_turn_id:
+                state["last_backend_turn_id"] = self.codex_turn_id
         return {
             "model": self.model,
             "usage": self.usage,
             "session_state": "active" if self.session_started else None,
-            "provider_state": {"codex_thread_id": self.thread_id} if self.thread_id else None,
+            "provider_state": state,
         }
 
     async def _start(self) -> TurnOutcome | None:
+        self._mark("process_ms")
         try:
             info = {"clientInfo": {"name": "suparagent", "title": "Suparagent", "version": "0"}}
-            if self.computer is not None or self.feature:
-                # `environments` on turn/start is an experimental field; without this it is rejected.
+            native_prompt = getattr(self.ctx, "codex_prompt", None)
+            if self.computer is not None or self.feature or self.handoff_enabled or (native_prompt and native_prompt.background):
+                # Both turn/start fields require the experimental protocol handshake.
                 info["capabilities"] = {"experimentalApi": True}
             await self._call("initialize", info)
+            self._mark("initialize_ms")
         except (RpcError, RpcClosed, asyncio.TimeoutError) as exc:
             return self._failed(self._why(exc, "Codex did not start its app-server."), "cli_error")
         self.rpc.notify("initialized", {})
@@ -538,7 +603,7 @@ class _CodexTurn:
         }
         if self.ctx.model:
             common["model"] = self.ctx.model
-        instructions = self.ctx.instructions
+        instructions = native_prompt.instructions if native_prompt else self.ctx.instructions
         if self.ctx.routine_uninterrupted:
             from app.services.routine_uninterrupted import TOOL_NOTE
             instructions = f"{instructions}\n\n{TOOL_NOTE}" if instructions else TOOL_NOTE
@@ -547,7 +612,7 @@ class _CodexTurn:
             try:
                 current = await self._call("config/read", {"includeLayers": False, "cwd": str(self.workspace)})
                 common["config"] = feature_files.turn_config(current.get("config"), self.workspace,
-                                                           self.tools and self.mode != "plan")
+                    self.tools and self.mode != "plan", consult_only=getattr(self.ctx, "consult_only", False))
             except (AttributeError, TypeError, ValueError, RpcError, RpcClosed, asyncio.TimeoutError):
                 return self._failed("Could not confirm scoped task tools.", "codex_error")
             common["environments"] = []
@@ -581,6 +646,7 @@ class _CodexTurn:
         if self.ctx.team_launch is not None:
             team_launch = self.ctx.team_launch
             common.setdefault("config", {}).setdefault("mcp_servers", {})["team"] = {
+                **({"enabled":True, "enabled_tools":["list_agents","ask_agent"]} if self.feature else {}),
                 "command": team_launch.command, "args": list(team_launch.args), "env": dict(team_launch.env),
                 "default_tools_approval_mode": "prompt",
             }
@@ -632,6 +698,10 @@ class _CodexTurn:
             else:
                 started = await self._call("thread/start", {**common, "ephemeral": False})
         except RpcError as exc:
+            if self.codex_thread and "already has an active writer" in str(exc).lower():
+                return self._failed(
+                    "The native Codex session is open in another client. Close that session there, then retry.",
+                    "native_session_busy", session_state="active", provider_state=self.ctx.provider_state)
             if self.codex_thread:
                 return self._failed(
                     "Codex could not find this conversation's session, so it cannot continue it. "
@@ -647,7 +717,11 @@ class _CodexTurn:
         self.thread_id = thread.get("id") if isinstance(thread, dict) and isinstance(thread.get("id"), str) else None
         if not self.thread_id:
             return self._failed("Codex did not return a session id.", "codex_error")
+        if self.codex_thread and self.thread_id != self.codex_thread:
+            self.thread_id = self.codex_thread
+            return self._failed("Codex resumed an unexpected session.", "codex_error", provider_state=self.ctx.provider_state)
         self.session_started = True
+        self._mark("thread_ready_ms")
         self.model = started.get("model") if isinstance(started.get("model"), str) else self.ctx.model
         reported_policy = started.get("approvalPolicy")
         sandbox = started.get("sandbox")
@@ -659,14 +733,38 @@ class _CodexTurn:
                 "started. Update Codex and try again.",
                 "codex_policy_mismatch",
             )
+        if self.handoff_enabled and self.codex_thread:
+            previous = self.ctx.provider_state or {}
+            self.native_history = {k:previous[k] for k in ("last_backend_turn_id","last_native_activity") if k in previous}
+            status = thread.get("status") or {}
+            if status.get("type") != "idle":
+                return self._failed("The native Codex session is busy or its idle state cannot be verified. Try again after it finishes.", "native_session_busy")
+            try:
+                page = await asyncio.wait_for(self._call("thread/turns/list", {
+                    "threadId": self.thread_id, "itemsView":"notLoaded", "limit":64, "sortDirection":"desc",
+                }), timeout=4)
+            except (RpcError, RpcClosed, asyncio.TimeoutError):
+                return self._failed("Codex could not verify the last native turn. Try again.", "native_session_unverified")
+            rows = page.get("data") if isinstance(page,dict) else None
+            if not isinstance(rows,list) or (rows and (not isinstance(rows[0],dict) or
+                    rows[0].get("status") not in {"completed","interrupted","failed"})):
+                return self._failed("A native turn is active or its state cannot be verified. Try again after it finishes.", "native_session_busy")
+            activity = _native_activity(page, self.native_history.get("last_backend_turn_id"))
+            if activity:
+                self.native_history["last_native_activity"] = activity
         turn_params = {
             "threadId": self.thread_id,
-            "input": [{"type": "text", "text": self.ctx.prompt},
+            "input": [{"type": "text", "text": native_prompt.user_text if native_prompt else self.ctx.prompt},
                       *({"type": "localImage", "path": str(image["path"])} for image in self.ctx.images)],
             "approvalPolicy": self.policy.approval,
             "approvalsReviewer": self.policy.reviewer,
             "sandboxPolicy": {"type": self.policy.sandbox_type},
         }
+        if native_prompt and native_prompt.background:
+            turn_params["additionalContext"] = {
+                key: {"kind": "untrusted", "name": key, "value": value}
+                for key, value in native_prompt.background.items()
+            }
         if self.ctx.model:
             turn_params["model"] = self.ctx.model
         if self.ctx.effort:
@@ -675,6 +773,7 @@ class _CodexTurn:
             turn_params["environments"] = []
         try:
             turn = await self._call("turn/start", turn_params)
+            self._mark("turn_start_ms")
         except RpcError as exc:
             return self._failed(f"Codex refused the message: {exc}", "codex_error")
         except (RpcClosed, asyncio.TimeoutError) as exc:
@@ -794,6 +893,7 @@ class _CodexTurn:
         if method == "item/agentMessage/delta":
             delta = params.get("delta")
             if isinstance(delta, str) and delta:
+                self._mark("first_output_ms")
                 item_id = params.get("itemId") or "_"
                 self.partial[item_id] = self.partial.get(item_id, "") + delta
                 self._count(delta)
@@ -855,7 +955,10 @@ class _CodexTurn:
         kind, item_id = item.get("type"), item.get("id")
         if kind not in TOOL_ITEMS or not isinstance(item_id, str):
             return
-        if self.feature and (kind != "mcpToolCall" or item.get("server") != "feature_files"):
+        project_tool = (self.ctx.team_launch is not None and item.get("server") == "team"
+                        and item.get("tool") in ("list_agents", "ask_agent"))
+        if self.feature and (getattr(self.ctx, "consult_only", False) or kind != "mcpToolCall"
+                             or (item.get("server") != "feature_files" and not project_tool)):
             self.breach = True
             return
         if self.computer is not None and kind != "mcpToolCall":
@@ -909,6 +1012,8 @@ class _CodexTurn:
         kind, item_id = item.get("type"), item.get("id")
         if kind == "agentMessage":
             text = item.get("text") if isinstance(item.get("text"), str) else ""
+            if text:
+                self._mark("first_output_ms")
             streamed = self.partial.pop(item_id, None) if isinstance(item_id, str) else None
             if streamed is None:
                 self._count(text)
@@ -991,7 +1096,10 @@ class _CodexTurn:
         )
         browser_call = kind == "mcp" and params.get("serverName") == COMPUTER_SERVER and self.ctx.browser is not None
         # Attached MCP policy decides reads versus mutations with local tools off.
-        if self.feature:
+        if self.feature and getattr(self.ctx, "consult_only", False):
+            self.rpc.respond(rid, payload(False))
+            return
+        if self.feature and not team_call:
             found = self._computer_call("feature_files", str(params.get("message") or ""), meta)
             if kind != "mcp" or params.get("serverName") != "feature_files" or not found:
                 self.rpc.respond(rid, payload(False))
@@ -1041,7 +1149,9 @@ class _CodexTurn:
                     return
                 name, tool_input = found
                 from app.team.mcp_server import TOOLS
-                if name not in {entry['name'] for entry in TOOLS}:
+                if (name not in {entry['name'] for entry in TOOLS} or
+                        (self.feature and name != 'list_agents' and
+                         (name != 'ask_agent' or tool_input.get('mode') != 'consult'))):
                     self.rpc.respond(rid, payload(False))
                     return
                 tool, approval_kind = "mcp__team__" + name, "other"

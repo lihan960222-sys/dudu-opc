@@ -222,7 +222,7 @@ def thread_result(thread_id, params):
     sandbox = {"read-only": "readOnly", "workspace-write": "workspaceWrite", "danger-full-access": "dangerFullAccess"}.get(params.get("sandbox"), "readOnly")
     if plan.get("policy_mismatch"):
         policy, sandbox = "never", "dangerFullAccess"
-    return {"thread": {"id": thread_id}, "model": params.get("model") or "gpt-fake", "approvalPolicy": policy, "sandbox": {"type": sandbox}}
+    return {"thread": {"id": thread_id,"status":{"type":plan.get("native_status","idle")}}, "model": params.get("model") or "gpt-fake", "approvalPolicy": policy, "sandbox": {"type": sandbox}}
 
 
 for line in sys.stdin:
@@ -258,10 +258,14 @@ for line in sys.stdin:
     elif method == "thread/resume":
         thread_id = params.get("threadId")
         thread_configs[thread_id] = params.get("config") or {}
-        if not (threads_dir / str(thread_id)).exists():
+        if plan.get("active_writer"):
+            send({"id":rid,"error":{"code":-32600,"message":f"thread {thread_id} already has an active writer"}})
+        elif not (threads_dir / str(thread_id)).exists():
             send({"id": rid, "error": {"code": -32600, "message": f"no rollout found for thread id {thread_id}"}})
         else:
             send({"id": rid, "result": thread_result(thread_id, params)})
+    elif method == "thread/turns/list":
+        send({"id":rid,"result":{"data":plan.get("native_turns",[]),"nextCursor":None}})
     elif method == "turn/start":
         turn_id = "turn-" + uuid.uuid4().hex[:8]
         send({"id": rid, "result": {"turn": {"id": turn_id, "status": "inProgress"}}})

@@ -56,7 +56,7 @@ def _may_set_workspace(request: Request) -> bool:
 def _plan_shares_workspace(plan: dict) -> bool:
     if not isinstance(plan, dict):
         return False
-    return any(isinstance(operation, dict) and operation.get('op') == 'create' and operation.get('share_workspace') is True
+    return any(isinstance(operation, dict) and operation.get('op') == 'create' and (operation.get('share_workspace') is True or operation.get('workspace_path'))
                for operation in plan.get('operations', []))
 
 
@@ -256,11 +256,66 @@ async def owned_job(rt, db, job_id):
     return job
 
 
+class ProtocolUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(ge=1)
+    priority: str | None = None
+    dependencies: list[int] | None = Field(default=None,max_length=32)
+    deliverables: list[str] | None = Field(default=None,max_length=32)
+    acceptance_criteria: list[str] | None = Field(default=None,max_length=32)
+
+
+def _is_owner(request):
+    principal = principal_of(request.scope)
+    return principal is None or (principal.is_admin and principal.kind != "device"
+                                 and principal.role in (None,"owner"))
+
+
+@router.patch('/tasks/{task_id}/protocol')
+async def revise_protocol(task_id: int, payload: ProtocolUpdate, request: Request, rt=Depends(get_runtime)):
+    from app.services.feature_tasks import update_protocol
+    if not _is_owner(request):
+        raise HTTPException(403, 'Only the workspace owner may revise task requirements.')
+    async with rt.session() as db:
+        try:
+            return await update_protocol(db, rt.owner_id, task_id, payload.revision,
+                                         payload.model_dump(exclude_none=True,exclude={'revision'}))
+        except service.TeamError as exc:
+            raise error(exc)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+
+
+@router.get('/threads/{thread_id}/native-handoff')
+async def native_handoff(thread_id: int, request: Request, rt=Depends(get_runtime)):
+    from app.services.feature_tasks import thread_handoff
+    if not _is_owner(request):
+        raise HTTPException(403, 'Only the workspace owner may open the native session.')
+    async with rt.session() as db:
+        return await thread_handoff(db, rt.owner_id, thread_id)
+
+
+@router.get('/tasks/{task_id}/protocol')
+async def task_protocol(task_id: int, request: Request, rt=Depends(get_runtime)):
+    from app.services.feature_tasks import protocol
+    if not _is_owner(request):
+        raise HTTPException(403, 'Only the workspace owner may read the task protocol.')
+    async with rt.session() as db:
+        record = await protocol(db, rt.owner_id, task_id, owner_handoff=True)
+        if record is None:
+            raise HTTPException(404, 'Project task not found')
+        return record
+
+
 @router.get('/jobs')
-async def list_jobs(root_id: int | None = None, thread_id: int | None = None, status: str | None = None,
+async def list_jobs(request: Request, root_id: int | None = None, thread_id: int | None = None, status: str | None = None, task_id: int | None = None,
                     limit: int = Query(100, ge=1, le=500), rt=Depends(get_runtime)):
     async with rt.session() as db:
         query = select(AgentJob).where(AgentJob.owner_id == rt.owner_id, AgentJob.kind != 'root')
+        if not _is_owner(request):
+            query = query.where(AgentJob.task_id.is_(None))
+        if task_id is not None:
+            query = query.where(AgentJob.task_id == task_id)
         if root_id is not None:
             query = query.where((AgentJob.root_id == root_id) | (AgentJob.id == root_id))
         if thread_id is not None:
@@ -272,10 +327,15 @@ async def list_jobs(root_id: int | None = None, thread_id: int | None = None, st
 
 
 @router.get('/jobs/{job_id}')
-async def job_detail(job_id: int, rt=Depends(get_runtime)):
+async def job_detail(job_id: int, request: Request, rt=Depends(get_runtime)):
     async with rt.session() as db:
         job = await owned_job(rt, db, job_id)
-        children = list((await db.execute(select(AgentJob).where(AgentJob.parent_id == job_id).order_by(AgentJob.id))).scalars())
+        child_query = select(AgentJob).where(AgentJob.parent_id == job.id, AgentJob.owner_id == rt.owner_id)
+        if not _is_owner(request):
+            if job.task_id is not None:
+                raise HTTPException(404, 'Job not found')
+            child_query = child_query.where(AgentJob.task_id.is_(None))
+        children = list(await db.scalars(child_query.order_by(AgentJob.id)))
         events = list((await db.execute(select(AgentJobEvent).where(AgentJobEvent.job_id == job_id).order_by(AgentJobEvent.id))).scalars())
         approvals = list((await db.execute(select(Approval).where(Approval.turn_id == job.assignee_turn_id, Approval.status == 'pending'))).scalars()) if job.assignee_turn_id else []
         from app.schemas.thread import ApprovalResponse

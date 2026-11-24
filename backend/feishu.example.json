@@ -3,6 +3,9 @@
   "project": "焊接验证",
   "backend": "http://127.0.0.1:8000",
   "backend_token_env": "FEISHU_BACKEND_TOKEN",
+  "proactive_suggestions": true,
+  "steward_thread": null,
+  "history_sources": {},
   "state_dir": "feishu-state",
   "artifact_root": "C:/SuparagentArtifacts",
   "isolated_runner_enabled": false,
@@ -18,12 +21,14 @@
       "agent_id": 2,
       "app_id": "cli_REPLACE_WELDER",
       "secret_env": "FEISHU_WELD_SECRET",
+      "owner_open_id": "ou_REPLACE_OWNER_IN_WELDER_APP",
       "chat_id": "oc_REPLACE_WORK_GROUP"
     },
     "Omniverse": {
       "agent_id": 3,
       "app_id": "cli_REPLACE_OMNIVERSE",
       "secret_env": "FEISHU_OMNIVERSE_SECRET",
+      "owner_open_id": "ou_REPLACE_OWNER_IN_OMNIVERSE_APP",
       "chat_id": "oc_REPLACE_WORK_GROUP"
     }
   }

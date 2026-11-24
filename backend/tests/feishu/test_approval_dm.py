@@ -23,7 +23,7 @@ def test_exact_private_approval_reply(tmp_path, reply, decision):
         import json
         calls.append((req.url.path,json.loads(req.content)))
         return httpx.Response(200,json={"decision":decision})
-    worker = SimpleNamespace(db=db,cfg={"steward":{"app_id":"steward"}},
+    worker = SimpleNamespace(db=db,cfg={"steward":{"app_id":"steward","open_id":"ou_test_owner"}},
         api=httpx.Client(transport=httpx.MockTransport(backend),base_url="http://localhost"),
         respond=lambda *args: None)
     execution = dict(thread=2,turn=3,event="source")
@@ -42,6 +42,9 @@ def test_exact_private_approval_reply(tmp_path, reply, decision):
     assert approvals.answer(worker,{**row,"event":"retry"},msg,reply)
     assert calls == [("/threads/2/approvals/a1",{"decision":decision,"remember":False,"expected_turn_id":3})]
     db.close()
+    with journal(tmp_path/"journal") as reopened:
+        stored = reopened.execute("select decision,actor_open_id,decision_event,state from approval_dm").fetchone()
+        assert tuple(stored) == (decision,"ou_test_owner","decision","answered")
 
 
 @pytest.mark.asyncio

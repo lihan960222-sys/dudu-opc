@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useId } from "react";
+import { useId, useState } from "react";
 import type { Engine } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { engineLimitText } from "@/lib/everyday";
@@ -20,6 +20,7 @@ export function EngineModelFields({
   lockProvider = false,
   hasComputer = false,
   showEffort = true,
+  preferModelSelect = false,
   defaultLabel,
 }: {
   engines: Engine[];
@@ -31,9 +32,11 @@ export function EngineModelFields({
   lockProvider?: boolean;
   hasComputer?: boolean;
   showEffort?: boolean;
+  preferModelSelect?: boolean;
   defaultLabel?: string;
 }) {
   const listId = useId();
+  const [customProvider, setCustomProvider] = useState<string | null>(null);
   const engine = engines.find((item) => item.id === provider);
   const knownModel = model === null || engine?.models.some((item) => item.id === model);
 
@@ -117,13 +120,16 @@ export function EngineModelFields({
       )}
       <label className="block text-xs text-muted">
         Model
-        {engine && !engine.custom_models ? (
+        {preferModelSelect && engine?.custom_models && customProvider === provider && (
+          <button type="button" className="ml-2 underline" onClick={() => setCustomProvider(null)}>返回模型列表</button>
+        )}
+        {engine && (!engine.custom_models || (preferModelSelect && customProvider !== provider)) ? (
           <Select
             className={FIELD}
             aria-label="Model"
             value={model ?? ""}
             disabled={disabled}
-            onChange={(event) => handleModelChange(event.target.value || null)}
+            onChange={(event) => event.target.value === "__custom_model__" ? setCustomProvider(provider) : handleModelChange(event.target.value || null)}
           >
             <option value="">
               {defaultLabel ?? `Engine default${engine.default_model ? ` (${engine.default_model})` : ""}`}
@@ -132,6 +138,7 @@ export function EngineModelFields({
             {engine.models.map((item) => (
               <option key={item.id} value={item.id}>{item.label}</option>
             ))}
+            {engine.custom_models && <option value="__custom_model__">输入自定义模型 ID…</option>}
           </Select>
         ) : (
           <>

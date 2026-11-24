@@ -132,12 +132,16 @@ async def test_codex_literal_memory_write_needs_no_helper_and_fresh_chat_has_not
     assert 'my favorite color is teal' in text and f'thread {thread.id}, turn ' in text
     initial = codex.received('thread/start')[0]['params']['developerInstructions']
     assert 'Receipt:' in initial and 'was saved' in initial
-    assert 'my favorite color is teal' in initial
+    assert 'my favorite color is teal' not in initial
+    context = codex.received('turn/start')[0]['params']['additionalContext']['agent_notes']
+    assert context['kind'] == 'untrusted' and 'my favorite color is teal' in context['value']
     fresh = await crt.create_thread(provider='codex', agent_id=agent.id)
     await crt.send_turn(fresh.id, 'What is my favorite color?')
     await finished(sessions, fresh.id)
     instructions = codex.received('thread/start')[1]['params']['developerInstructions']
-    assert 'my favorite color is teal' in instructions
+    assert 'my favorite color is teal' not in instructions
+    saved = codex.received('turn/start')[1]['params']['additionalContext']['agent_notes']
+    assert saved['kind'] == 'untrusted' and 'my favorite color is teal' in saved['value']
     async with sessions() as db:
         found = await session_search.search(
             db, owner_id=owner, agent_id=agent.id, current_thread_id=fresh.id,

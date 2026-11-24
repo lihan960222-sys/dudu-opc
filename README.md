@@ -1,6 +1,10 @@
-# Suparagent
+# Dudu OPC · Suparagent
 
-[Windows 单机飞书管家开发版 · 启动与配置](docs/STEWARD_WINDOWS_ZH.md)
+在飞书把任务交给管家，在家中的 Windows 电脑上执行。管家按项目派工，员工可就明确的问题向同项目同事请教，最后由管家汇报。员工档案、工作目录、模型和角色规则在本机后台维护。
+
+[启动与配置](docs/STEWARD_WINDOWS_ZH.md) · [飞书接入与个人授权](docs/FEISHU.md) · [写飞书文档](docs/FEISHU_DOCUMENTS_ZH.md) · [功能与验收清单](docs/OPC_REQUIREMENTS_ZH.md)
+
+本项目基于 Suparagent 开发。以下保留上游的功能和安装说明。[上游项目](https://github.com/Anil-matcha/suparagent) · [Apache 2.0 许可证](LICENSE)
 
 **A workspace for AI coworkers.**
 

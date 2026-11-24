@@ -5,7 +5,6 @@ import { useEffect, useId, useRef, useState, useDeferredValue } from "react";
 import { cn } from "@/lib/cn";
 import { api } from "@/lib/api";
 import { isLongPaste, isSendKey, livePastes, removePaste } from "@/lib/composer";
-import { loadDraft, saveDraft } from "@/lib/drafts";
 import { useT } from "@/lib/use-i18n";
 import { MAX_SKILLS_PER_MESSAGE, skillCompletions, suggestSkills, type SkillSummary } from "@/lib/skills";
 import { Button } from "@/components/ui/Button";
@@ -122,19 +121,6 @@ export function Composer({
   const [dictationError, setDictationError] = useState<string | null>(null);
   const chips = pasted.key === draftKey ? livePastes(value, pasted.list) : [];
   const setPastes = (update: (all: string[]) => string[]) => setPasted({ key: draftKey, list: update(pasted.key === draftKey ? pasted.list : []) });
-  // Drafts: put the saved text back when the conversation changes, then keep saving edits.
-  // `restored` stops the old text being written under the new key before it is swapped.
-  const restored = useRef<string | null>(null);
-  useEffect(() => {
-    restored.current = draftKey;
-    const saved = loadDraft(draftKey);
-    if (draftKey && saved) onChange(saved);
-    // Only a change of conversation restores; later edits flow through `value`.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draftKey]);
-  useEffect(() => {
-    if (draftKey && restored.current === draftKey) saveDraft(draftKey, value);
-  }, [draftKey, value]);
   const [menu, setMenu] = useState({ context: "", index: 0, dismissed: false });
   const enabledSkills = (skills ?? []).filter((s) => s.enabled);
   const completions = onToggleSkill ? skillCompletions(value, enabledSkills, chosenSkills) : [];

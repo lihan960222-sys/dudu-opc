@@ -352,7 +352,7 @@ async def test_a_provider_that_is_not_ready_starts_no_turn(sessions, owner, cli)
         async def status(self):
             return ProviderStatus(ready=False, error="Claude is not signed in.")
 
-    runtime = ThreadRuntime(hub=ThreadHub(), adapters={"claude": NotReady()}, status_ttl=0, _session_factory=sessions)
+    runtime = ThreadRuntime(hub=ThreadHub(), adapters={"claude": NotReady()}, status_ttl=0, _session_factory=sessions, owner_id=owner)
     thread = await new_thread(sessions, owner)
     with pytest.raises(ProviderUnavailable, match="not signed in"):
         await runtime.send_turn(thread.id, "hello")

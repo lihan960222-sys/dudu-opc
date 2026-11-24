@@ -1,19 +1,14 @@
-"use client";
+import { Suspense } from "react";
+import { AuthGate } from "@/components/AuthGate";
+import { Workbench } from "@/components/staff/Workbench";
 
-import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect } from "react";
-
-// The home page is the chat. The page is plain client code so it also works as a
-// static export; /chat does its own sign-in check, so nothing is decided here.
+export const metadata = { title: "Dudu · OPC 工作台" };
 export default function HomePage() {
-  const router = useRouter();
-  useEffect(() => {
-    router.replace("/chat/");
-  }, [router]);
   return (
-    <p className="p-6 text-center text-sm text-muted">
-      Opening the chat… <Link href="/chat/" className="underline">Continue</Link>
-    </p>
+    <Suspense fallback={<p>正在打开工作台…</p>}>
+      <AuthGate>
+        <Workbench />
+      </AuthGate>
+    </Suspense>
   );
 }

@@ -1,3 +1,3 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "%~dp0scripts\windows\start-steward.ps1" %*
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File "%~dp0scripts\windows\open-steward.ps1" %*
 if errorlevel 1 pause

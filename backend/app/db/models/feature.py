@@ -12,6 +12,8 @@ class FeatureScope(Base):
     version: Mapped[str] = mapped_column(String)
     acceptance: Mapped[str] = mapped_column(Text)
     aliases: Mapped[list] = mapped_column(JSONValue)
+    dependencies: Mapped[list | None] = mapped_column(JSONValue)
+    deliverables: Mapped[list | None] = mapped_column(JSONValue)
     checkpoint: Mapped[str] = mapped_column(Text, default="")
     related_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("work_item.id"))
 
@@ -31,3 +33,12 @@ class FeatureSession(Base):
     thread_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("thread.id"), primary_key=True)
     task_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("work_item.id"), index=True)
     previous_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("thread.id"))
+
+class DirectTurnReceipt(Base):
+    """The channel event retains its original identity even if its chat is deleted."""
+    __tablename__ = "steward_direct_turn"
+    owner_id: Mapped[str] = mapped_column(String, primary_key=True)
+    event_key: Mapped[str] = mapped_column(String, primary_key=True)
+    thread_id: Mapped[int] = mapped_column(BigInteger)
+    turn_id: Mapped[int] = mapped_column(BigInteger)
+    input_sha256: Mapped[str] = mapped_column(String(64))

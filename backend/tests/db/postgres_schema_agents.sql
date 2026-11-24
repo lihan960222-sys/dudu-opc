@@ -12,6 +12,7 @@ CREATE TABLE agent (
 	fallback_model VARCHAR, 
 	claude_account VARCHAR, 
 	workspace_path VARCHAR, 
+	role_path VARCHAR,
 	approval_mode VARCHAR DEFAULT 'ask' NOT NULL, 
 	memory_enabled BOOLEAN DEFAULT true NOT NULL, 
 	recall_enabled BOOLEAN DEFAULT true NOT NULL, 

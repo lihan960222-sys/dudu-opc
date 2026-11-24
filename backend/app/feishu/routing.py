@@ -15,6 +15,25 @@ def journal(path):
     create table if not exists outbox(
         id text primary key, task integer, role text, body text, is_root integer,
         state text default 'pending', remote text, error text, created real default (unixepoch()));
+    create table if not exists delivery_timing(
+        app text,event text,received real,submit real,accepted real,engine_start real,engine_end real,
+        outgoing text unique,sent real,primary key(app,event));
+    create table if not exists owner_readwrite_requests(
+        app text,event text,message text,owner text,tenant text,primary key(app,event));
+    create table if not exists private_history_jobs(
+        id integer primary key,app text,event text,alias text,chat text,peer text,assignee integer,
+        start integer,end integer,cap integer,state text default 'assigned',matched integer,
+        unique(app,event));
+    create table if not exists history_reply_policy(
+        outgoing text primary key,alias text,source text,staff text,actor integer,cloud integer);
+    create table if not exists private_summary_notes(
+        app text,event text,notes text,primary key(app,event));
+    create table if not exists group_enquiries(
+        app text,event text,task integer,chat text,topic text,primary key(app,event));
+    create table if not exists owner_enquiries(
+        app text,event text,message text,role text,owner_open_id text,primary key(app,event));
+    create table if not exists enquiry_replies(
+        outgoing text primary key,app text,event text,role text,unique(app,event));
     create table if not exists resources(
         app text, message text, key text, task integer, name text, path text, digest text,
         primary key(app,message,key));
@@ -49,17 +68,27 @@ def enqueue(db, task, role, body, *, root=False):
     return outgoing
 
 
+def ensure_group_root(db, task, role, title):
+    if not db.execute('select 1 from outbox where task=? and role=? and is_root=1',(task,role)).fetchone():
+        enqueue(db,task,role,{'text':f'任务 #{task} · {title}'},root=True)
+
+
 def bind_config(db, cfg):
     """Bind persisted destinations to a tenant and owner before reading the queue."""
     steward = cfg['steward']
     roles = cfg['roles']
     apps = [steward['app_id']] + [r['app_id'] for r in roles.values()]
     agents = [steward['agent_id']] + [r['agent_id'] for r in roles.values()]
-    if ('steward' in roles or not roles or len(set(apps)) != len(apps)
+    if ('steward' in roles or len(set(apps)) != len(apps)
             or len(set(agents)) != len(agents)):
         raise ValueError('每个角色需要独立的应用身份和本地角色 ID')
     ids = {'owner':[cfg['owner_id'],cfg['project'],steward['tenant_key'],steward['open_id'],apps[0],agents[0]]}
     ids.update({'role:'+name:[r['app_id'],r['agent_id'],r['chat_id']] for name,r in roles.items()})
+    for name, role in roles.items():
+        if role.get('owner_open_id'):
+            if not role['owner_open_id'].startswith('ou_'):
+                raise ValueError('专业机器人必须配置该应用下老板的 open_id')
+            ids['enquiry:'+name] = [role['app_id'],steward['tenant_key'],role['owner_open_id']]
     with db:
         db.execute('create table if not exists identities(name text primary key, binding text)')
         for key,value in ids.items():

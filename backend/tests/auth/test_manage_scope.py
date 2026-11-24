@@ -76,10 +76,12 @@ def test_everything_else_about_agents_stays_admin_only(method, path):
     assert required_scope(method, path) == "admin"
 
 
-def test_every_manage_route_is_a_write_except_team_setup_reads():
-    # Reading a proposed team setup is part of reviewing it, so those reads need manage too.
-    reads = [pattern.pattern for methods, pattern in MANAGE_ROUTES if "GET" in methods]
-    assert reads and all("/team/setup" in pattern for pattern in reads)
+def test_manage_reads_are_limited_to_reviewing_setup_and_steward_suggestions():
+    reads = {pattern.pattern for methods, pattern in MANAGE_ROUTES if "GET" in methods}
+    assert reads == {
+        "^/api/v1/team/setup$", "^/api/v1/team/setup/[^/]+$",
+        "^/api/v1/steward/suggestions$", "^/api/v1/steward/suggestions/[0-9]+$",
+    }
 
 
 def test_the_only_manage_delete_is_a_room():

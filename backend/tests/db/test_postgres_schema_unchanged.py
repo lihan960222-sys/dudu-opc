@@ -24,6 +24,8 @@ AGENT_TABLES = {"agent"}
 AGENT_REVISION_TABLES = {"agent_revision"}
 COMPUTER_TABLES = {"computer"}
 AUTH_TABLES = {"auth_owner", "auth_session", "auth_pairing_code"}
+STEWARDSHIP_TABLES = {"feature_message", "feature_scope", "feature_session", "steward_direct_turn", "steward_suggestion"}
+MUAPI_TABLES = {"muapi_tool_grant"}
 TEAM_TABLES = {"team", "team_event", "agent_job", "agent_job_event", "agent_job_inbox", "team_setup_request"}
 ROOM_TABLES = {"room", "room_member", "room_dispatch", "room_webhook_receipt"}
 ROUTINE_TABLES = {"routine", "routine_run", "routine_app_action", "notification", "routine_webhook_receipt"}
@@ -85,6 +87,8 @@ def test_every_table_is_covered_by_one_of_the_snapshots():
         | COMPUTER_TABLES
         | AUTH_TABLES
         | ROUTINE_TABLES
+        | STEWARDSHIP_TABLES
+        | MUAPI_TABLES
         | TEAM_TABLES
         | ROOM_TABLES
         | NEEDS_YOU_TABLES
@@ -179,3 +183,11 @@ def test_people_tables_compile_to_their_reviewed_postgres_schema():
 
 def test_spend_table_compiles_to_its_reviewed_postgres_schema():
     assert postgres_ddl(SPEND_TABLES) == snapshot_text(HERE / "postgres_schema_spend.sql")
+
+
+def test_steward_tables_compile_to_their_reviewed_postgres_schema():
+    assert postgres_ddl(STEWARDSHIP_TABLES) == snapshot_text(HERE / "postgres_schema_steward.sql")
+
+
+def test_muapi_grants_compile_to_their_reviewed_postgres_schema():
+    assert postgres_ddl(MUAPI_TABLES) == snapshot_text(HERE / "postgres_schema_muapi.sql")

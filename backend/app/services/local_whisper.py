@@ -4,6 +4,7 @@ import importlib.util
 import logging
 import math
 import os
+from pathlib import Path
 import tempfile
 import threading
 from typing import Any
@@ -16,8 +17,16 @@ _LOADED_MODEL_SIZE: str | None = None
 _DEVICE_INFO_CACHE: tuple[str, str] | None = None
 
 
+def installed_model() -> str | None:
+    return os.environ.get("STEWARD_WHISPER_MODEL_DIR") or None
+
+
 def is_available() -> bool:
     """Return True if faster-whisper is installed and importable."""
+    folder = installed_model()
+    if folder and not all((Path(folder)/name).is_file() for name in
+                          ("model.bin","config.json","tokenizer.json","vocabulary.txt")):
+        return False
     return importlib.util.find_spec("faster_whisper") is not None
 
 
@@ -27,6 +36,8 @@ def get_device_info() -> tuple[str, str]:
     Returns (device, compute_type), e.g. ('cuda', 'float16') or ('cpu', 'int8').
     """
     global _DEVICE_INFO_CACHE
+    if installed_model():
+        return ("cpu", "int8")
     if _DEVICE_INFO_CACHE is not None:
         return _DEVICE_INFO_CACHE
     if importlib.util.find_spec("ctranslate2") is not None:
@@ -44,8 +55,10 @@ def get_device_info() -> tuple[str, str]:
 def get_model(model_size: str = "tiny"):
     """Get or lazily initialize the singleton WhisperModel."""
     global _LOADED_MODEL, _LOADED_MODEL_SIZE
+    folder = installed_model()
+    model_name = folder or model_size
     with _MODEL_LOCK:
-        if _LOADED_MODEL is not None and _LOADED_MODEL_SIZE == model_size:
+        if _LOADED_MODEL is not None and _LOADED_MODEL_SIZE == model_name:
             return _LOADED_MODEL
 
         from faster_whisper import WhisperModel
@@ -57,8 +70,13 @@ def get_model(model_size: str = "tiny"):
             device,
             compute_type,
         )
-        _LOADED_MODEL = WhisperModel(model_size, device=device, compute_type=compute_type)
-        _LOADED_MODEL_SIZE = model_size
+        if folder:
+            if not is_available():
+                raise RuntimeError("The private local Whisper model is not installed")
+            _LOADED_MODEL = WhisperModel(folder, device=device, compute_type=compute_type, cpu_threads=4, local_files_only=True)
+        else:
+            _LOADED_MODEL = WhisperModel(model_size, device=device, compute_type=compute_type)
+        _LOADED_MODEL_SIZE = model_name
         return _LOADED_MODEL
 
 

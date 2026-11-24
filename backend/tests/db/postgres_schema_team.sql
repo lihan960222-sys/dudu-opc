@@ -7,6 +7,8 @@ CREATE TABLE agent_job (
 	origin_kind VARCHAR DEFAULT 'person' NOT NULL, 
 	origin_ref VARCHAR, 
 	origin_quote TEXT, 
+	task_id BIGINT,
+	project VARCHAR,
 	requester_agent_id BIGINT NOT NULL, 
 	requester_thread_id BIGINT NOT NULL, 
 	requester_turn_id BIGINT NOT NULL, 
@@ -46,6 +48,8 @@ CREATE INDEX ix_agent_job_parent ON agent_job (parent_id);
 CREATE INDEX ix_agent_job_requester_turn ON agent_job (requester_turn_id);
 
 CREATE INDEX ix_agent_job_status ON agent_job (owner_id, status);
+
+CREATE INDEX ix_agent_job_task ON agent_job (owner_id, task_id);
 
 CREATE TABLE agent_job_inbox (
 	id BIGINT GENERATED ALWAYS AS IDENTITY, 

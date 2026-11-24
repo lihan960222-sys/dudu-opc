@@ -20,6 +20,7 @@ from app.schemas.thread import (
     ApprovalAnswerResponse,
     ApprovalResponse,
     EventsPageResponse,
+    DirectTurnRequest,
     FeatureTurnRequest,
     StopResponse,
     ThreadBranchRequest,
@@ -217,6 +218,12 @@ async def delete_thread(thread_id: int, rt: ThreadRuntime = Depends(get_runtime)
 # --- turns --------------------------------------------------------------------------------
 
 
+@router.post("/{thread_id}/direct-turns", response_model=TurnResponse, status_code=202)
+async def send_direct_turn(thread_id: int, payload: DirectTurnRequest, request: Request,
+                           rt: ThreadRuntime = Depends(get_runtime)):
+    return await send_turn(thread_id, payload, request, rt)
+
+
 @router.post("/{thread_id}/feature-turns", response_model=TurnResponse, status_code=202)
 async def send_feature_turn(thread_id: int, payload: FeatureTurnRequest, request: Request,
                             rt: ThreadRuntime = Depends(get_runtime)):
@@ -237,6 +244,7 @@ async def send_turn(
         principal = principal_of(request.scope)
         return await rt.send_turn(
             thread_id, payload.prompt_text, attachment_ids=payload.attachment_ids, skills=payload.skills,
+            **({"direct_event_key":payload.direct_event_key} if isinstance(payload, DirectTurnRequest) else {}),
             **({"feature_event_key":payload.feature_event_key} if isinstance(payload, FeatureTurnRequest) else {}),
             configuration_allowed=principal is None or principal.is_admin,
             setup_allowed=_setup_allowed(principal),
