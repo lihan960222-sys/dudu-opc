@@ -12,6 +12,7 @@ from sqlalchemy import delete, select
 from app.core.config import settings
 from app.db.models import Agent, Approval, Event, CommunityMcpConnection, CommunityMcpToolGrant, SpendLedger, Thread, Turn
 from app.db.models.routine import Routine, RoutineAppAction, RoutineRun
+from app.db.session import get_db
 from app.routers.agents import get_runtime as agents_runtime
 from app.routers.spend import router as spend_router
 from app.services import routine_uninterrupted, spend, thread_store
@@ -226,6 +227,12 @@ async def api(world):
     app = FastAPI()
     app.include_router(spend_router, prefix="/api/v1")
     app.dependency_overrides[agents_runtime] = lambda: world.runtime
+
+    async def scoped_db():
+        async with world.sessions() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = scoped_db
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app, client=("127.0.0.1", 50000)), base_url="http://localhost") as client:
         yield client
 
@@ -296,7 +303,7 @@ def test_no_agent_facing_surface_can_reach_the_limits_or_the_switch():
     forbidden = ("SPEND_PER", "scheduled_paid_use", "services.spend", "import spend")
     for folder in ("team", "templates"):
         for path in (root / folder).rglob("*.py"):
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
             assert not any(word in text for word in forbidden), (path.name, "must not touch spending limits")
 
 
@@ -339,11 +346,13 @@ class Failing:
 
 async def test_a_call_that_clearly_never_ran_costs_nothing(world):
     from app.community_mcp import McpError
-    for error in (McpError("authentication_failed", "x", 502, not_run=True),
-                  McpError("remote_error", "x", 502, not_run=True),
-                  McpError("connect_failed", "x", 502)):
+    for error, expected_code in (
+        (McpError("authentication_failed", "x", 502, not_run=True), "authentication_failed"),
+        (McpError("remote_error", "x", 502, not_run=True), "remote_error"),
+        (McpError("connect_failed", "x", 502), "outcome_unknown"),
+    ):
         result = await paid_call(world, Failing(error), max_cost_usd=0.5, q=error.code)
-        assert result["code"] == "outcome_unknown"
+        assert result["code"] == expected_code
     rows = await ledger(world)
     assert [(r.status, r.settled_cents) for r in rows] == [("released", 0)] * 3
     assert [r.reason for r in rows] == ["not_run:authentication_failed", "not_run:remote_error", "not_run:connect_failed"]

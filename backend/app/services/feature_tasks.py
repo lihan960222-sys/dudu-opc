@@ -369,12 +369,19 @@ async def consult_scope(db, owner_id, team, caller, turn, thread):
     if row is None:
         raise TeamError("consult_scope", "No active steward dispatch was found for this task.")
     scope, job = row
-    peers = list(await db.scalars(select(Agent).join(WorkItem, WorkItem.agent_id == Agent.id)
-        .join(FeatureScope, FeatureScope.task_id == WorkItem.id).where(
-            Agent.owner_id == owner_id, Agent.team_id == team.id, Agent.archived_at.is_(None),
-            Agent.provider == "codex", Agent.role_path.is_not(None),
-            Agent.id.not_in([caller.id,team.lead_agent_id]), WorkItem.owner_id == owner_id,
-            WorkItem.archived.is_(False), WorkItem.completed_at.is_(None), FeatureScope.project == scope.project).distinct().order_by(Agent.id)))
+    assigned_agents = (
+        select(WorkItem.agent_id)
+        .join(FeatureScope, FeatureScope.task_id == WorkItem.id)
+        .where(WorkItem.owner_id == owner_id, WorkItem.archived.is_(False),
+               WorkItem.completed_at.is_(None), FeatureScope.project == scope.project)
+    )
+    peers = list(await db.scalars(
+        select(Agent).where(
+            Agent.id.in_(assigned_agents), Agent.owner_id == owner_id, Agent.team_id == team.id,
+            Agent.archived_at.is_(None), Agent.provider == "codex", Agent.role_path.is_not(None),
+            Agent.id.not_in([caller.id, team.lead_agent_id]),
+        ).order_by(Agent.id)
+    ))
     return job, peers
 
 

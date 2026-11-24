@@ -4,7 +4,7 @@ from contextlib import closing
 import httpx
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
+import asyncio
 
 from app.feishu.ingress import receive
 from app.feishu.publisher import Publisher
@@ -79,42 +79,53 @@ async def test_actual_backend_receives_bounded_video_stills_after_lost_reply(tmp
     msg={'message_type':'media','message_id':'om_clip','chat_type':'p2p','content':json.dumps({'file_key':'f','file_name':'clip.mp4'})}
     event={'header':{'event_id':'e','app_id':'app','tenant_key':'t'},'event':{'sender':{'sender_type':'user','sender_id':{'open_id':'ou_owner'}},'message':msg}}
     dbpath=tmp_path/'j'
-    with TestClient(app) as backend:
-        with closing(journal(dbpath)) as db:
-            pub=Publisher(cfg,db,tmp_path)
-            pub.headers=lambda _:{}
-            pub.http=httpx.Client(transport=httpx.MockTransport(lambda req:
-                httpx.Response(200,content=clip.read_bytes()) if req.method=='GET' else httpx.Response(200,json={'code':0,'data':{'message_id':'om_wait'}})))
-            worker=Worker(cfg,pub)
-            class LostResponse:
-                get=backend.get
-                def post(self,url,**kwargs):
-                    response=backend.post(url,**kwargs)
-                    if url.endswith('/direct-turns'):
-                        assert response.status_code==202,response.text
-                        raise httpx.ReadTimeout('backend committed, client lost reply')
-                    return response
-            worker.api=LostResponse()
-            receive(db,identity,event)
-            with pytest.raises(httpx.ReadTimeout):
-                await worker.process(db.execute('select * from inbox').fetchone())
-            assert db.execute('select state from inbox').fetchone()[0]=='direct_submitting'
-        with closing(journal(dbpath)) as db:
-            from app.feishu import direct_requests
-            worker=Worker(cfg,Publisher(cfg,db,tmp_path))
-            worker.api=backend
-            direct_requests.send(worker,db.execute('select * from inbox').fetchone())
-            assert db.execute('select state from inbox').fetchone()[0]=='direct_running'
-            await finished(sessions,thread.id)
-            assert len(adapter.seen)==1
-            ctx=adapter.seen[0]
-            assert 1<=len(ctx.images)<=3
-            assert all(image['name'].endswith('ms.png') for image in ctx.images)
-            assert ctx.codex_prompt.user_text=='请查看附件并回复。'
-            notes=ctx.codex_prompt.background['attached_files']
-            assert 'clip.mp4' in notes and '距开头' in notes and '不含连续动作' in notes
-            async with sessions() as sql:
-                assert await sql.scalar(select(func.count(Turn.id)).where(Turn.thread_id==thread.id))==1
+    loop=asyncio.get_running_loop()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test/') as client:
+        # Gateway HTTP calls are synchronous. Run its journal in its own thread,
+        # and schedule the ASGI backend on the loop that owns the database pool.
+        class Backend:
+            def get(self,url,**kwargs):
+                return asyncio.run_coroutine_threadsafe(client.get(url,**kwargs),loop).result(timeout=20)
+            def post(self,url,**kwargs):
+                return asyncio.run_coroutine_threadsafe(client.post(url,**kwargs),loop).result(timeout=20)
+
+        class LostResponse(Backend):
+            def post(self,url,**kwargs):
+                response=super().post(url,**kwargs)
+                if url.endswith('/direct-turns'):
+                    assert response.status_code==202,response.text
+                    raise httpx.ReadTimeout('backend committed, client lost reply')
+                return response
+
+        def gateway():
+            with closing(journal(dbpath)) as db:
+                pub=Publisher(cfg,db,tmp_path)
+                pub.headers=lambda _:{}
+                pub.http=httpx.Client(transport=httpx.MockTransport(lambda req:
+                    httpx.Response(200,content=clip.read_bytes()) if req.method=='GET' else httpx.Response(200,json={'code':0,'data':{'message_id':'om_wait'}})))
+                worker=Worker(cfg,pub)
+                worker.api=LostResponse()
+                receive(db,identity,event)
+                with pytest.raises(httpx.ReadTimeout):
+                    asyncio.run(worker.process(db.execute('select * from inbox').fetchone()))
+                assert db.execute('select state from inbox').fetchone()[0]=='direct_submitting'
+            with closing(journal(dbpath)) as db:
+                from app.feishu import direct_requests
+                worker=Worker(cfg,Publisher(cfg,db,tmp_path))
+                worker.api=Backend()
+                direct_requests.send(worker,db.execute('select * from inbox').fetchone())
+                assert db.execute('select state from inbox').fetchone()[0]=='direct_running'
+        await asyncio.to_thread(gateway)
+        await finished(sessions,thread.id)
+        assert len(adapter.seen)==1
+        ctx=adapter.seen[0]
+        assert 1<=len(ctx.images)<=3
+        assert all(image['name'].endswith('ms.png') for image in ctx.images)
+        assert ctx.codex_prompt.user_text=='请查看附件并回复。'
+        notes=ctx.codex_prompt.background['attached_files']
+        assert 'clip.mp4' in notes and '距开头' in notes and '不含连续动作' in notes
+        async with sessions() as sql:
+            assert await sql.scalar(select(func.count(Turn.id)).where(Turn.thread_id==thread.id))==1
 
 
 def test_preview_skips_invalid_video_nonvision_and_exhausted_slots(tmp_path):

@@ -46,17 +46,21 @@ async def test_task_followup_reuses_thread_after_bridge_restart(tmp_path,session
            'roles':{'焊接':{'agent_id':agent_id}}}
     calls = []
     turns = []
-    original = feature_tasks.bind_turn
-    async def bind_simulated_turn(db, owner_id, key, thread_id, turn_id):
-        db.add(Turn(id=turn_id, thread_id=thread_id, seq=len(turns), prompt_text="test",
-                    status="succeeded", result="ok"))
-        await db.flush()
-        await original(db, owner_id, key, thread_id, turn_id)
-    monkeypatch.setattr(feature_tasks, "bind_turn", bind_simulated_turn)
+    from app.feishu import submissions
+    send=submissions.send
+    async def submit_simulated_turn(worker,row):
+        request=worker.db.execute('select thread,body from submissions where event=?',(submissions.event_key(row),)).fetchone()
+        async with sessions() as db:
+            turn=Turn(thread_id=request['thread'],seq=len(turns)+1,prompt_text=json.loads(request['body'])['prompt_text'],
+                      status='succeeded',result='ok')
+            db.add(turn)
+            await db.commit()
+            turns.append(turn.id)
+        await send(worker,row)
+    monkeypatch.setattr(submissions,'send',submit_simulated_turn)
     def backend(req):
         calls.append(req.url.path)
         if req.method == 'POST':
-            turns.append(10000 + 100 * len(turns))
             return httpx.Response(202,json={'id':turns[-1]})
         report = json.dumps({'summary':'已核对','group_update':'已检查单位','artifacts':['产物/飞书/result.txt']})
         return httpx.Response(200,json={'turns':[{'id':turns[-1],'finished_at':'now','status':'succeeded','result':report}]})

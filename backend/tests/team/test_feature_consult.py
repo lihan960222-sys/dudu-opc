@@ -29,6 +29,9 @@ async def test_employee_project_consultation(sessions, owner, tmp_path):
             result = await feature_tasks.route(db,owner_id=owner,agent_id=member.id,project=project,
                 title="Review",text="review",event_key=member.name)
         task = result["task_id"]
+        extra = await feature_tasks.route(db,owner_id=owner,agent_id=analyst.id,project="p",
+            title="Second review",text="independent work",event_key="analyst-second",intent="independent")
+        assert extra["action"] == "created"
         thread,_ = await feature_tasks.session_for(db,owner,task,model="m",workspace_path=str(tmp_path))
         parent = await feature_tasks.dispatch(db,owner_id=owner,steward_id=lead.id,task_id=task,
             event_key=engineer.name,thread_id=thread.id)
