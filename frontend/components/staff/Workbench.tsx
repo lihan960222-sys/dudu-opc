@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "../AuthGate";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -332,6 +332,15 @@ function Projects({ staff }: { staff: Agent[] }) {
   const [protocol, setProtocol] = useState<Protocol | null>(null),
     [jobs, setJobs] = useState<TeamJob[]>([]),
     [detailError, setDetailError] = useState("");
+  const selectedId = useRef<number | null>(null);
+  function selectTask(task: WorkItem | null) {
+    if (selectedId.current === (task?.id ?? null)) return;
+    selectedId.current = task?.id ?? null;
+    setProtocol(null);
+    setJobs([]);
+    setDetailError("");
+    setActive(task);
+  }
   useEffect(() => {
     let live = true;
     planner
@@ -349,7 +358,7 @@ function Projects({ staff }: { staff: Agent[] }) {
           );
           setBoard(b);
           setItems(rows);
-          setActive(rows[0] ?? null);
+          selectTask(rows[0] ?? null);
         }
       })
       .catch((e) => {
@@ -362,22 +371,20 @@ function Projects({ staff }: { staff: Agent[] }) {
   useEffect(() => {
     if (!active) return;
     let live = true;
-    setProtocol(null);
-    setJobs([]);
-    setDetailError("");
+    const current = () => live && selectedId.current === active.id;
     request<Protocol>(`/team/tasks/${active.id}/protocol`)
       .then((p) => {
-        if (live) setProtocol(p);
+        if (current()) setProtocol(p);
       })
       .catch((e) => {
-        if (live && e.status !== 404) setDetailError(String(e));
+        if (current() && e.status !== 404) setDetailError(String(e));
       });
     request<TeamJob[]>(`/team/jobs?task_id=${active.id}`)
       .then((j) => {
-        if (live) setJobs(j);
+        if (current()) setJobs(j);
       })
       .catch((e) => {
-        if (live) setDetailError(String(e));
+        if (current()) setDetailError(String(e));
       });
     return () => {
       live = false;
@@ -402,7 +409,7 @@ function Projects({ staff }: { staff: Agent[] }) {
             aria-pressed={project === group}
             onClick={() => {
               setProject(group);
-              setActive(
+              selectTask(
                 items.find(
                   (i) => !group || (projects[i.id] || "未归入项目") === group,
                 ) ?? null,
@@ -423,7 +430,7 @@ function Projects({ staff }: { staff: Agent[] }) {
               <button
                 className="dp-listrow"
                 key={i.id}
-                onClick={() => setActive(i)}
+                onClick={() => selectTask(i)}
               >
                 <div>
                   <strong>{i.title}</strong>
@@ -550,8 +557,19 @@ export function Workbench() {
   return canManage ? <ManagementPortal /> : <Link href="/chat/">进入对话</Link>;
 }
 
+function loadPortal() {
+  return Promise.allSettled([
+    api.listAgents(),
+    collaboration.team(),
+    api.getEngines(),
+    request<Pending[]>("/staff/pending"),
+    collaboration.activity(),
+  ]);
+}
+
 function ManagementPortal() {
-  const [page, setPage] = useState<string>("people"),
+  const params = useSearchParams();
+  const [page, setPage] = useState<string>(() => params.get("section") === "host" ? "host" : "people"),
     [agents, setAgents] = useState<Agent[]>([]),
     [engines, setEngines] = useState<Engine[]>([]),
     [team, setTeam] = useState<TeamState | null>(null);
@@ -563,17 +581,7 @@ function ManagementPortal() {
     [rev, setRev] = useState(0),
     [loaded, setLoaded] = useState(false),
     [errors, setErrors] = useState<string[]>([]);
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("section") === "host") setPage("host");
-  }, []);
-  const refresh = useCallback(async () => {
-    const [a, t, e, p, log] = await Promise.allSettled([
-      api.listAgents(),
-      collaboration.team(),
-      api.getEngines(),
-      request<Pending[]>("/staff/pending"),
-      collaboration.activity(),
-    ]);
+  const applyPortal = useCallback(([a, t, e, p, log]: Awaited<ReturnType<typeof loadPortal>>) => {
     if (a.status === "fulfilled") setAgents(a.value);
     if (t.status === "fulfilled") setTeam(t.value);
     if (e.status === "fulfilled") setEngines(e.value);
@@ -592,8 +600,17 @@ function ManagementPortal() {
     );
     setLoaded(true);
   }, []);
+  const sequence = useRef<symbol | null>(null);
+  const refresh = useCallback(() => {
+    const requestId = Symbol();
+    sequence.current = requestId;
+    return loadPortal().then(result => {
+      if (requestId === sequence.current) applyPortal(result);
+    });
+  }, [applyPortal]);
   useEffect(() => {
     void refresh();
+    return () => { sequence.current = null; };
   }, [refresh]);
   const lead = agents.find((a) => a.id === team?.team?.lead_agent_id) ?? null;
   const ordered = lead

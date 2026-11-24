@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { request } from "@/lib/api";
 import type { TeamAgent } from "@/lib/collaboration";
 
@@ -36,17 +36,24 @@ export function FeishuAccess({ team }: { team: TeamAgent[] }) {
     const target = next.document_target;
     setFolder(target.folder_token ? target.tenant_origin + "/drive/folder/" + target.folder_token : "");
   }, []);
-  const load = useCallback(async () => {
-    setError("");
-    const [policy, connection] = await Promise.allSettled([
+  const loadId = useRef<symbol | null>(null);
+  const load = useCallback(() => {
+    const current = Symbol();
+    loadId.current = current;
+    return Promise.allSettled([
       request<Access>(settings + "/access"), request<OAuth>(oauth + "/status")
-    ]);
-    if (policy.status === "fulfilled") accept(policy.value);
-    if (connection.status === "fulfilled") setAuth(connection.value);
-    const errors = [policy, connection].flatMap(r => r.status === "rejected" ? [String(r.reason)] : []);
-    if (errors.length) setError(errors.join("。"));
+    ]).then(([policy, connection]) => {
+      if (current !== loadId.current) return;
+      if (policy.status === "fulfilled") accept(policy.value);
+      if (connection.status === "fulfilled") setAuth(connection.value);
+      const errors = [policy, connection].flatMap(r => r.status === "rejected" ? [String(r.reason)] : []);
+      setError(errors.join("。"));
+    });
   }, [accept]);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    return () => { loadId.current = null; };
+  }, [load]);
 
   async function run(work: () => Promise<void>) {
     setBusy(true); setError(""); setNotice("");

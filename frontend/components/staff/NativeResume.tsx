@@ -16,9 +16,6 @@ export function NativeResume({ threadId }: { threadId: number }) {
   useEffect(() => {
     if (!open) return;
     let live = true;
-    setLoading(true);
-    setError("");
-    setHandoff(null);
     request<typeof handoff>(`/team/threads/${threadId}/native-handoff`)
       .then(
         (r) => {
@@ -42,7 +39,12 @@ export function NativeResume({ threadId }: { threadId: number }) {
         className="shrink-0 rounded-md p-1.5 text-muted hover:bg-hover"
         title="在 Codex 续接"
         aria-label="在 Codex 续接"
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          setLoading(true);
+          setError("");
+          setHandoff(null);
+          setOpen(true);
+        }}
       >
         <SquareTerminal size={17} />
       </button>
