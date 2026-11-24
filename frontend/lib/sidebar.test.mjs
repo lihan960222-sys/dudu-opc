@@ -4,20 +4,20 @@ import { agentTarget, employeeChatHref, recentVisible, rowStatus, showsUnreadDot
 
 const thread = (id, agent_id, updated_at, archived_at = null) => ({ id, agent_id, updated_at, archived_at });
 
-test("an employee profile reopens the same conversation, or the newest personal chat on a fresh visit", () => {
+test("an employee profile reopens the same conversation, or the newest conversation including dispatched work on a fresh visit", () => {
   const chats = [
     { ...thread(1, 7, "2026-10-01"), kind: "chat" },
     { ...thread(2, 7, "2026-10-02"), kind: "feature" },
     thread(3, 8, "2026-10-03"),
     thread(4, 7, "2026-10-04", "2026-10-05"),
   ];
-  assert.equal(employeeChatHref(chats, 7, null), "/chat?thread=1");
+  assert.equal(employeeChatHref(chats, 7, null), "/chat?thread=2");
   assert.equal(employeeChatHref(chats, 7, 2), "/chat?thread=2");
-  assert.equal(employeeChatHref(chats, 7, 3), "/chat?thread=1");
-  assert.equal(employeeChatHref(chats, 7, 4), "/chat?thread=1");
+  assert.equal(employeeChatHref(chats, 7, 3), "/chat?thread=2");
+  assert.equal(employeeChatHref(chats, 7, 4), "/chat?thread=2");
   assert.equal(employeeChatHref(chats, 8, null), "/chat?thread=3");
   assert.equal(employeeChatHref(chats, 9, null), "/chat?agent=9");
-  assert.equal(employeeChatHref(null, 7, null), "/chat/");
+  assert.equal(employeeChatHref(null, 7, null), "/chat?agent=7");
 });
 
 test("an agent leads to its newest conversation that is not archived", () => {

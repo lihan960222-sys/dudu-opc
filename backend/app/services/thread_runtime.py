@@ -900,7 +900,7 @@ class ThreadRuntime:
                     feature_event_key=feature_event_key,
                     direct_event_key=direct_event_key, direct_attachment_ids=attachment_ids, direct_skills=skills,
                     attachments=[a.public() for a, _ in attached] or None,
-                    origin=team_origin,
+                    origin=team_origin, internal=internal,
                     person_id=person_id,
                     person_label=person_label,
                 )
@@ -922,7 +922,11 @@ class ThreadRuntime:
 
         async def history() -> list[dict]:
             async with self.session() as db:
-                items = store.history_items(await store.list_all_events(db, thread_id))
+                events = await store.list_all_events(db, thread_id)
+                if run.engine_id == "codex" and (settings.STEWARD_STRICT_OWNER or (thread.provider_state or {}).get("service_history")):
+                    reset = next((i for i in range(len(events) - 1, -1, -1) if events[i].type == "session.reset"), -1)
+                    events = events[reset + 1:]
+                items = store.history_items(events)
             # An engine that replays the transcript gets it folded once it
             # outgrows the engine's budget (context_compaction.py).
             plan = context_compaction.plan(

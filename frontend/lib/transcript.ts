@@ -60,6 +60,7 @@ function teamSetupPlan(value: unknown): TeamSetupPlan | null {
 }
 
 export type TranscriptItem =
+  | { kind: "team_update"; key: string; turnId: number | null; ts?: string }
   | TeamJobItem
   | NeedsYouItem
   | { kind: "team_notice"; key: string; turnId: number | null; tone: "incident" | "escalation" | "refused" | "retried"; text: string; threadId: number | null }
@@ -227,6 +228,11 @@ export function applyEvent(state: Transcript, event: ThreadEvent): Transcript {
 
   switch (event.type) {
     case "turn.started":
+      // Older journals predate the server-side source marker.
+      if (data.team_generated === true || (data.team_generated === undefined &&
+          /^Harness (?:message|incident report|escalation notice), not from the person\. (?:Teammates you assigned work to have reported|The team lead asked for a retry|Every quoted field below|The gate and the quoted words)/.test(text(data.prompt_text)))) {
+        return { ...base, runningTurnId: id, typing: null, items: [...state.items, { kind: "team_update", key, turnId: id, ts: event.ts }] };
+      }
       return {
         ...base,
         runningTurnId: id,

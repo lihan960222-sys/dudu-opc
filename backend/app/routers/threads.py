@@ -132,14 +132,15 @@ async def create_thread(payload: ThreadCreateRequest, rt: ThreadRuntime = Depend
 @router.get("", response_model=list[ThreadResponse])
 async def list_threads(
     include_archived: bool = False,
-    kind: Literal["chat", "all", "job", "room", "room_member", "team_notices"] = "chat",
+    agent_id: int | None = None,
+    kind: Literal["employee", "chat", "all", "job", "room", "room_member", "team_notices"] = "chat",
     limit: int = Query(100, ge=1, le=500),
     rt: ThreadRuntime = Depends(get_runtime),
 ):
     """Newest activity first."""
     async with rt.session() as db:
         threads = await store.list_threads(
-            db, rt.owner_id, include_archived=include_archived, limit=limit, kind=kind
+            db, rt.owner_id, include_archived=include_archived, limit=limit, kind=kind, agent_id=agent_id
         )
     return await _with_computers(rt, threads)
 

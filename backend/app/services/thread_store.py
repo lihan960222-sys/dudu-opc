@@ -95,10 +95,14 @@ async def get_thread(db: AsyncSession, thread_id: int) -> Thread | None:
 
 
 async def list_threads(
-    db: AsyncSession, owner_id: str, *, include_archived: bool = False, limit: int = 100, kind: str = "chat"
+    db: AsyncSession, owner_id: str, *, include_archived: bool = False, limit: int = 100, kind: str = "chat", agent_id: int | None = None
 ) -> list[Thread]:
     query = select(Thread).where(Thread.owner_id == owner_id)
-    if kind == "chat":
+    if agent_id is not None:
+        query = query.where(Thread.agent_id == agent_id)
+    if kind == "employee":
+        query = query.where(Thread.kind.in_(("chat", "job", "feature", "feature_consult", "team_notices")))
+    elif kind == "chat":
         # The lead's report threads ("Team incidents") sit with the person's chats.
         query = query.where(Thread.kind.in_(("chat", "team_notices")))
     elif kind != "all":
@@ -548,6 +552,7 @@ async def start_turn(
     origin: str | None = None,
     person_id: int | None = None,
     person_label: str | None = None,
+    internal: bool = False,
 ) -> Turn:
     """Start the thread's next turn and store its `turn.started` event.
 
@@ -600,6 +605,8 @@ async def start_turn(
     if thread.title is None:
         thread.title = make_title(prompt_text) or None
     started = {"prompt_text": prompt_text}
+    if prompt_text.startswith(("Harness message, not from the person.", "Harness incident report, not from the person.", "Harness escalation notice, not from the person.")):
+        started["team_generated"] = internal
     if attachments:
         started["attachments"] = attachments
     if person_label:

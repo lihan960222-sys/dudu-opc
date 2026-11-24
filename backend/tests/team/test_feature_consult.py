@@ -160,17 +160,11 @@ async def test_lead_native_delegate_runs_scoped_work_and_resumes(crt,sessions,ow
         protocol=await feature_tasks.protocol(db,owner,job.task_id,owner_handoff=True)
         assert protocol["from"]==lead.id and protocol["to"]==worker.id
         assert (protocol["status"],protocol["priority"],protocol["deliverables"])==("review","high",["validation note"])
-        assert protocol["native_handoff"]["cwd"]==str(folder/"任务"/str(job.task_id))
-        assert protocol["native_handoff"]["resume_command"].startswith("codex resume ")
+        assert protocol["native_handoff"] == {"mode": "workbench", "thread_id": job.assignee_thread_id}
         assert not (await feature_tasks.protocol(db,owner,job.task_id))["native_handoff"]
         assert (await db.get(Thread,job.assignee_thread_id)).kind=="feature"
-        dudu = await db.get(Thread,lead_thread.id)
-        local_checkpoint = dudu.provider_state["last_backend_turn_id"]
-        handoff = await feature_tasks.thread_handoff(db,owner,dudu.id)
-        assert handoff["session_id"] == dudu.provider_state["codex_thread_id"]
-        assert handoff["cwd"]
+        assert await feature_tasks.thread_handoff(db,owner,lead_thread.id) == {"mode": "workbench", "thread_id": lead_thread.id}
     first_job,task_id,worker_chat = job.id, job.task_id, job.assignee_thread_id
-    native_worker = protocol["native_handoff"]["session_id"]
     followup = {"agent_ids":[worker.id],"brief":"Check the revised units.", "task_id":task_id,
                 "project":"weld","done_when":"Check revised units"}
     codex.plan(*([{"type":"chat","text":"old"}]*3), {"type":"team","tool":"delegate","arguments":followup},
@@ -183,28 +177,9 @@ async def test_lead_native_delegate_runs_scoped_work_and_resumes(crt,sessions,ow
         assert len(jobs)==2 and jobs[0].id == first_job
         assert jobs[0].assignee_turn_id != jobs[1].assignee_turn_id
         assert jobs[1].assignee_thread_id == worker_chat and jobs[1].result == "Rechecked Pa."
-        assert (await feature_tasks.thread_handoff(db,owner,worker_chat))["session_id"] == native_worker
-        local_checkpoint = (await db.get(Thread,lead_thread.id)).provider_state["last_backend_turn_id"]
-    starts = len(codex.received("turn/start"))
-    codex.plan(active_writer=True)
-    await crt.send_turn(lead_thread.id,"Is the native session available?")
-    await finished(sessions,lead_thread.id,count=5)
-    async with sessions() as db:
-        assert (await feature_tasks.thread_handoff(db,owner,lead_thread.id))["session_id"] == handoff["session_id"]
-    assert len(codex.received("turn/start")) == starts
-    codex.plan(native_turns=[{"id":"external","status":"inProgress"},{"id":local_checkpoint,"status":"completed"}])
-    await crt.send_turn(lead_thread.id,"Please continue.")
-    await finished(sessions,lead_thread.id,count=6)
-    assert len(codex.received("turn/start")) == starts
-    assert codex.received("thread/turns/list")[-1]["params"]["itemsView"] == "notLoaded"
-    codex.plan(native_turns=[{"id":"external","status":"completed"},{"id":local_checkpoint,"status":"completed"}])
-    await crt.send_turn(lead_thread.id,"Please continue now.")
-    await finished(sessions,lead_thread.id,count=7)
-    async with sessions() as db:
-        refreshed = await feature_tasks.thread_handoff(db,owner,lead_thread.id)
-        assert refreshed["session_id"] == handoff["session_id"]
-        assert refreshed["last_native_activity"]["count"] == 1
-
+        assert await feature_tasks.thread_handoff(db,owner,worker_chat) == {"mode": "workbench", "thread_id": worker_chat}
+    assert not codex.received("thread/resume")
+    assert all(call["params"]["ephemeral"] for call in codex.received("thread/start"))
 
 
 def test_native_metadata_requires_exact_checkpoint_and_strips_contents():

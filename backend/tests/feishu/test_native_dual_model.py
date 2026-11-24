@@ -216,6 +216,8 @@ async def test_feishu_deepseek_lead_delegates_to_gpt_and_receives_report(tmp_pat
             child=await db.scalar(select(AgentJob).where(AgentJob.owner_id==owner,AgentJob.assignee_agent_id==staff.id))
             assert child.status=='completed' and child.task_id and 'EMPLOYEE_PROOF_7' in child.result
             specialist=await db.get(Thread,child.assignee_thread_id)
+            assert specialist.provider_state.get("service_history")
+            assert not list((home/"sessions").rglob("rollout-*.jsonl"))
             assert specialist.agent_id==staff.id and specialist.model=='gpt-6.2-sol'
             inbox=await db.scalar(select(AgentJobInbox).where(AgentJobInbox.job_id==child.id))
             assert inbox and inbox.delivered_at

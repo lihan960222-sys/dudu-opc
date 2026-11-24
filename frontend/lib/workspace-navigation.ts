@@ -5,6 +5,12 @@ function chatUrl(params: URLSearchParams) {
   return query ? `/chat/?${query}` : "/chat/";
 }
 
+export function isStewardChatEntry(search: string) {
+  const params = new URLSearchParams(search);
+  if (params.get("section") === "chat") params.delete("section");
+  return params.size === 0;
+}
+
 export function workspaceSection(search: string, canManage: boolean): WorkspaceSection {
   if (!canManage) return "chat";
   const params = new URLSearchParams(search);
@@ -17,7 +23,7 @@ export function workspaceSection(search: string, canManage: boolean): WorkspaceS
 export function workspaceHref(search: string, section: WorkspaceSection, employee?: string | number | null, advanced = false) {
   const current = new URLSearchParams(search);
   const next = new URLSearchParams();
-  for (const key of ["thread", "agent", "room"]) {
+  for (const key of ["thread", "agent", "room", "plain"]) {
     const value = current.get(key);
     if (value) next.set(key, value);
   }
@@ -46,6 +52,7 @@ export function homeDestination(search: string, hash: string, canManage: boolean
 export function createdThreadHref(search: string, id: number) {
   const params = new URLSearchParams(search);
   params.delete("agent");
+  params.delete("plain");
   params.set("thread", String(id));
   return chatUrl(params);
 }

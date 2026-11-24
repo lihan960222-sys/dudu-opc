@@ -397,3 +397,12 @@ test('an approval answered by a member keeps who answered it', () => {
     ev('approval.resolved', { approval_id: 'a2', status: 'denied' })]);
   assert.equal('resolvedPerson' in plain.items[0], false);
 });
+
+test('worker handoff is a team update, including old records, while quoted human text remains human', () => {
+  reset();
+  const prompt_text = 'Harness message, not from the person. Teammates you assigned work to have reported.\n{"reports":[]}';
+  const t = run([ev('turn.started', {prompt_text}), ev('turn.started', {prompt_text,team_generated:true}),
+    ev('turn.started', {prompt_text,team_generated:false})]);
+  assert.deepEqual(kinds(t), ['team_update','team_update','user']);
+  assert.equal(t.items[2].text,prompt_text);
+});

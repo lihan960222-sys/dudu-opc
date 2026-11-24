@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { homeDestination, workspaceHref, workspaceSection, createdThreadHref } from "./workspace-navigation.ts";
+import { homeDestination, workspaceHref, workspaceSection, createdThreadHref, isStewardChatEntry } from "./workspace-navigation.ts";
 
 test("old bookmarks and Feishu callbacks open the right workspace view", () => {
   assert.equal(homeDestination("", "", true), "/chat/?section=people");
@@ -25,4 +25,13 @@ test("the same chat or room survives section changes without inheriting an emplo
 test("a first reply arriving while looking at an employee preserves that open profile", () => {
   assert.equal(createdThreadHref("agent=4&section=people&employee=7&tools=1", 31), "/chat/?section=people&employee=7&tools=1&thread=31");
   assert.equal(createdThreadHref("agent=4", 31), "/chat/?thread=31");
+});
+
+test("only an unaddressed owner chat defaults to the steward", () => {
+  assert.equal(isStewardChatEntry(""), true);
+  assert.equal(isStewardChatEntry("section=chat"), true);
+  for (const search of ["thread=31", "room=2", "agent=8", "plain=1", "engine=codex", "panel=skills", "view=team", "section=people"]) {
+    assert.equal(isStewardChatEntry(search), false, search);
+  }
+  assert.equal(workspaceHref("plain=1&section=people&employee=7", "chat"), "/chat/?plain=1");
 });

@@ -467,6 +467,9 @@ async def thread_handoff(db, owner_id, thread_id, *, task_id=None):
         cwd = state.get("native_cwd") or thread.workspace_path
     else:
         return None
+    from app.core.config import settings
+    if state.get("service_history") or settings.STEWARD_STRICT_OWNER == owner_id:
+        return {"mode": "workbench", "thread_id": thread.id}
     native = state.get("codex_thread_id")
     try:
         uuid = str(UUID(native)) if isinstance(native,str) else None
@@ -517,6 +520,15 @@ async def attach_command(db, job, args):
         priority=args.get("priority","normal"))
     if not result["task_id"]:
         raise ValueError("Several task cards match. Supply the intended task_id.")
+    previous = await db.scalar(select(AgentJob).where(AgentJob.owner_id == job.owner_id,
+        AgentJob.task_id == result["task_id"], AgentJob.assignee_agent_id == job.assignee_agent_id,
+        AgentJob.kind == "job", AgentJob.mode == "work", AgentJob.id != job.id)
+        .order_by(AgentJob.id.desc()).limit(1))
+    if previous and previous.status == "needs_input":
+        if previous.question and previous.requester_thread_id == job.requester_thread_id:
+            raise ValueError(f"Job {previous.id} is awaiting clarification. Use answer_job_question with "
+                             f"job_id={previous.id}, question_turn_id={previous.assignee_turn_id}.")
+        raise ValueError(f"Job {previous.id} is already waiting for a decision on this task.")
     message = await db.get(FeatureMessage,(job.owner_id,key))
     message.result = {**result,"job_id":job.id}
     job.origin_ref,job.task_id,job.project = key,result["task_id"],message.project

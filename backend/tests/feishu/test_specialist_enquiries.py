@@ -87,3 +87,22 @@ async def test_specialist_replies_only_to_bound_owner_message_with_scoped_eviden
         await worker.tick()
         assert store.execute("select task from outbox where remote='om_discussion_reply'").fetchone()[0]==task
         assert store.execute('select count(*) from submissions').fetchone()[0]==0
+
+@pytest.mark.asyncio
+async def test_employee_can_show_own_dispatch_conversation_in_owner_dm(sessions, owner):
+    from app.db.models import AgentJob
+    from app.feishu.enquiries import employee_updates
+    from app.team.service import change_member
+    async with sessions() as db:
+        lead = await agent_store.create_agent(db, owner_id=owner, name="Lead", make_lead=True)
+        worker = await agent_store.create_agent(db, owner_id=owner, name="Jensen")
+        await change_member(db, owner, worker.id)
+        job = AgentJob(owner_id=owner, requester_agent_id=lead.id, requester_thread_id=10,
+                       requester_turn_id=20, assignee_agent_id=worker.id, brief="核对项目日志",
+                       brief_hash="example", status="completed", result="已经核对完毕")
+        db.add(job)
+        await db.commit()
+        assert "已完成" in await employee_updates(db, owner, worker.id, lead.id, "执行状态")
+        record = await employee_updates(db, owner, worker.id, lead.id, f"派工 #{job.id}")
+        assert job.brief in record and job.result in record
+        assert job.result not in await employee_updates(db, owner, lead.id, lead.id, f"派工 #{job.id}")

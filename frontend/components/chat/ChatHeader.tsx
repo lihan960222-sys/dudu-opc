@@ -100,6 +100,7 @@ export function ChatHeader({
                 <option key={a.id} value={a.id}>{a.name}</option>
               ))}
             </Select>
+            {agent && title !== agent.name && <span className="min-w-0 truncate text-xs text-muted">{title}</span>}
           </>
         ) : (
           <>

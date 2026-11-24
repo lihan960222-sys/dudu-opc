@@ -62,3 +62,34 @@ async def test_decision_requires_exact_live_lease(sessions, owner, tmp_path):
             assert not await store.decide_approval(db,aid,"allowed",**{**args,**override})
         assert await store.decide_approval(db,aid,"allowed",**args)
         assert not await store.decide_approval(db,aid,"denied",**args)
+
+@pytest.mark.asyncio
+async def test_active_delegated_approval_reaches_steward_once(sessions, owner, tmp_path, monkeypatch):
+    from app.db import session
+    from app.db.models import AgentJob
+    from app.services import agent_store
+    from app.team.service import change_member
+    monkeypatch.setattr(session, "AsyncSessionLocal", sessions)
+    async with sessions() as db:
+        lead = await agent_store.create_agent(db, owner_id=owner, name="Lead", make_lead=True)
+        staff = await agent_store.create_agent(db, owner_id=owner, name="Employee")
+        await change_member(db, owner, staff.id)
+        thread = await store.create_thread(db, owner_id=owner, agent_id=staff.id, provider="codex", workspace_path=str(tmp_path))
+        turn = await store.start_turn(db, thread.id, "work")
+        await store.create_approval(db, thread_id=thread.id, turn_id=turn.id, request_id="a",
+            tool="feature_files.write_text", input={"path":"report.txt","text":"draft"})
+        db.add(AgentJob(owner_id=owner, requester_agent_id=lead.id, requester_thread_id=1,
+                        requester_turn_id=1, assignee_agent_id=staff.id, assignee_thread_id=thread.id,
+                        assignee_turn_id=turn.id, brief="report", brief_hash="x", status="running"))
+        await db.commit()
+        channel = journal(tmp_path / "journal")
+        try:
+            approvals.initialize(channel)
+            worker = SimpleNamespace(db=channel, cfg={"owner_id":owner,"steward":{"agent_id":lead.id}})
+            await approvals.collect_team_requests(worker)
+            await approvals.collect_team_requests(worker)
+            messages = channel.execute("select role,body from outbox").fetchall()
+            assert len(messages) == 1 and messages[0]["role"] == "steward"
+            assert "Employee" in messages[0]["body"] and "report.txt" in messages[0]["body"]
+        finally:
+            channel.close()

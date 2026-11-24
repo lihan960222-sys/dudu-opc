@@ -1395,8 +1395,13 @@ export const api = {
   // --- Durable threads (/threads) ---
 
   // Newest activity first. Archived conversations are left out unless asked for.
-  listThreads: (includeArchived = false) =>
-    request<Thread[]>(`/threads${includeArchived ? "?include_archived=true" : ""}`),
+  listThreads: (includeArchived = false, employeeHistory = false, agentId?: number) => {
+    const query = new URLSearchParams();
+    if (includeArchived) query.set("include_archived", "true");
+    if (employeeHistory) query.set("kind", "employee");
+    if (agentId != null) query.set("agent_id", String(agentId));
+    return request<Thread[]>(`/threads${query.size ? "?" + query : ""}`);
+  },
 
   getThread: (threadId: number) => request<ThreadDetail>(`/threads/${threadId}`),
 

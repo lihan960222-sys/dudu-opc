@@ -75,6 +75,8 @@ async def poll(worker):
         return
     worker.next_team_poll = now + 15
     try:
+        from .approvals import collect_team_requests
+        await collect_team_requests(worker)
         await refresh(worker)
     except SQLAlchemyError as error:
         logging.getLogger(__name__).warning('Team work status unavailable: %s',type(error).__name__)

@@ -526,3 +526,21 @@ async def test_steward_deepseek_overrides_only_its_own_session(crt,sessions,owne
         await db.commit()
     with pytest.raises(ProviderUnavailable,match="新会话"):
         await crt.send_turn(thread.id,"switch provider")
+
+
+async def test_steward_gpt_turns_use_backend_history_without_desktop_sessions(crt, sessions, owner, codex, monkeypatch):
+    thread = await codex_thread(crt, sessions, owner)
+    monkeypatch.setattr(settings, "STEWARD_STRICT_OWNER", owner)
+    await crt.send_turn(thread.id, "first question")
+    await finished(sessions, thread.id)
+    await crt.send_turn(thread.id, "continue")
+    await finished(sessions, thread.id, count=2)
+    assert not codex.received("thread/resume")
+    starts = [r["params"] for r in codex.received("thread/start")]
+    assert len(starts) == 2 and all(r["ephemeral"] for r in starts)
+    assert all(r["config"]["features.multi_agent"] is False for r in starts)
+    state = (await reload(sessions, Thread, thread.id)).provider_state
+    assert state["service_history"] and "codex_thread_id" not in state
+    context = codex.received("turn/start")[-1]["params"]["additionalContext"]["prior_conversation"]
+    assert context["kind"] == "untrusted"
+    assert [r["text"] for r in json.loads(context["value"])] == ["first question", "hello there"]

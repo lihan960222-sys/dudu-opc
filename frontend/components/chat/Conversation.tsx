@@ -213,6 +213,9 @@ export function Conversation({
                 case "team_job":
                   node = <DelegationCard key={item.key} item={item} />;
                   break;
+                case "team_update":
+                  node = <p key={item.key} className="text-center text-xs text-muted">{t("workspace.teamUpdate")}</p>;
+                  break;
                 case "team_notice":
                   node = <TeamNoticeCard key={item.key} item={item} />;
                   break;

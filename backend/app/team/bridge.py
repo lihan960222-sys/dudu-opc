@@ -142,6 +142,11 @@ class TeamBridge:
             return await rt.team_jobs.ask(run, args)
         if name == 'delegate':
             return await rt.team_jobs.delegate(run, args)
+        if name == 'review_employee_write':
+            from app.team import steward_review
+            return await steward_review.decide(rt,run,args)
+        if name == 'answer_job_question':
+            return await rt.team_jobs.answer_question(run, args)
         if name == 'job_status':
             return await rt.team_jobs.job_status(run, args)
         if name == 'retry_thread':

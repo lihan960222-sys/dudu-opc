@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Check, FileText, MessageSquare, Pencil, UserRound } from "lucide-react";
-import { api, request, type Agent, type Engine } from "@/lib/api";
+import { api, request, type Agent, type ApprovalMode, type Engine } from "@/lib/api";
 import { teamActionsFor, type ProfileTeamAction } from "@/lib/staff-team";
 import { canOpenWorkbench } from "@/lib/session";
 import { useT } from "@/lib/use-i18n";
@@ -50,6 +50,7 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
   const [provider, setProvider] = useState(agent?.provider ?? "codex"),
     [model, setModel] = useState<string | null>(agent?.model ?? null);
   const [effort,setEffort] = useState<string | null>(agent?.effort ?? null);
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(agent?.approval_mode ?? "ask");
   const [confirm,setConfirm] = useState<ProfileTeamAction | null>(null);
   const [teamError,setTeamError] = useState("");
   const [path, setPath] = useState(
@@ -148,7 +149,7 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
         title: title.trim() || null,
         description: summary.trim() || null,
         provider,
-        model, effort,
+        model, effort, ...(ownsHost ? { approval_mode: approvalMode } : {}),
       };
       const before = persisted.current;
       if (agent?.role_path && !rules) throw Error("请先重新读取工作指令");
@@ -306,6 +307,16 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
                   setModel(m);
                 }}
               />
+              {ownsHost && <label className="dp-field">
+                <span>岗位操作权限</span>
+                <select className="dp-input" value={approvalMode} onChange={e => setApprovalMode(e.target.value as ApprovalMode)}>
+                  <option value="ask">按次审批</option>
+                  <option value="plan">只读计划</option>
+                  <option value="accept_edits">允许编辑（管家可代审任务文件）</option>
+                  {approvalMode === "approve_for_me" && <option value="approve_for_me">引擎自动审查</option>}
+                  {approvalMode === "full_access" && <option value="full_access">完全访问</option>}
+                </select>
+              </label>}
               {isLead && ownsHost && provider === "codex" && (model === "deepseek-flash" || model === "deepseek-v4-pro") && (
                 <DeepSeekKey />
               )}

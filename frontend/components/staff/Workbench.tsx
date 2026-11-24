@@ -163,12 +163,6 @@ function Suggestions() {
   );
 }
 type Protocol = {
-  native_handoff?: {
-    session_id: string;
-    cwd: string;
-    resume_command: string;
-    last_native_activity?: { count: number } | null;
-  } | null;
   project: string;
   task_id: number;
   revision: number;
@@ -488,6 +482,7 @@ function Projects({ staff }: { staff: Agent[] }) {
                     · {j.mode} · {j.status}
                     <br />
                     {j.brief}
+                    {j.assignee_thread_id && <Link className="dp-link" href={`/chat/?thread=${j.assignee_thread_id}`}>查看执行会话</Link>}
                     {j.result && (
                       <>
                         <br />
@@ -496,37 +491,6 @@ function Projects({ staff }: { staff: Agent[] }) {
                     )}
                   </p>
                 ))}
-              </>
-            )}
-            {protocol?.native_handoff && (
-              <>
-                <hr />
-                <h3>在 Codex 续接</h3>
-                <label className="dp-field">
-                  主机目录
-                  <input
-                    className="dp-input dp-mono"
-                    readOnly
-                    value={protocol.native_handoff.cwd}
-                    onFocus={(e) => e.target.select()}
-                  />
-                </label>
-                <label className="dp-field">
-                  在此目录运行
-                  <input
-                    className="dp-input dp-mono"
-                    readOnly
-                    value={protocol.native_handoff.resume_command}
-                    onFocus={(e) => e.target.select()}
-                  />
-                </label>
-                {protocol.native_handoff.last_native_activity && (
-                  <small>
-                    上次恢复时，此会话有{" "}
-                    {protocol.native_handoff.last_native_activity.count}{" "}
-                    轮原生更新。
-                  </small>
-                )}
               </>
             )}
             {detailError && <p className="dp-error">{detailError}</p>}
@@ -551,7 +515,7 @@ function loadPortal(page: ManagementSection) {
     people || page === "host" ? api.getEngines() : Promise.resolve<Engine[]>([]),
     people ? request<Pending[]>("/staff/pending") : Promise.resolve<Pending[]>([]),
     page === "activity" ? collaboration.activity() : Promise.resolve([]),
-    people ? api.listThreads() : Promise.resolve<Thread[]>([]),
+    people ? api.listThreads(false, true) : Promise.resolve<Thread[]>([]),
   ]);
 }
 

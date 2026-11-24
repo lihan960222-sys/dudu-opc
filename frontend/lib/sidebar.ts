@@ -15,11 +15,10 @@ export function agentTarget(threads: readonly ThreadLike[] | null, agentId: numb
 }
 
 export function employeeChatHref(threads: readonly ThreadLike[] | null, agentId: number, returnThread: number | null) {
-  if (!threads) return "/chat/";
+  if (!threads) return `/chat?agent=${agentId}`;
   const previous = threads.find(item => item.id === returnThread && item.agent_id === agentId && item.archived_at === null);
   if (previous) return `/chat?thread=${previous.id}`;
-  // Only enter a project-specific conversation when the person explicitly came from it.
-  const recent = agentTarget(threads.filter(item => !item.kind || item.kind === "chat"), agentId);
+  const recent = agentTarget(threads, agentId);
   return recent.kind === "thread" ? `/chat?thread=${recent.id}` : `/chat?agent=${agentId}`;
 }
 

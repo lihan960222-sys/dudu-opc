@@ -24,7 +24,7 @@ class FakeEngine(Engine):
             if 'FAIL' in ctx.prompt:
                 self.contexts.append(ctx)
                 return TurnOutcome('failed', error='boom', error_code='provider_error')
-            if 'ASK' in ctx.prompt:
+            if 'ASK' in ctx.prompt and 'Clarification from the assigning steward' not in ctx.prompt:
                 self.contexts.append(ctx)
                 await sink.emit('assistant.message', {'text': 'partial'})
                 return TurnOutcome('succeeded', result='partial work\nNEEDS INPUT: which environment?')
@@ -195,6 +195,35 @@ async def test_question_parks_then_the_persons_answer_runs_the_job_again(team, s
         done = await db.get(AgentJob, job.id)
         assert done.status == 'completed' and done.answer == 'staging'
 
+
+
+async def test_lead_clarifies_question_in_place(team, sessions):
+    rt, engine, lead, employee, _ = team
+    thread = await rt.create_thread(agent_id=lead.id)
+    receipts = []
+    async def handler(ctx, sink, gate):
+        run = rt._runs[ctx.turn_id]
+        if not receipts:
+            assigned = await rt.team_jobs.delegate(run, {'agent_ids':[employee.id], 'brief':'ASK about scope'})
+            receipts.append(assigned['receipts'][0]['job_id'])
+        elif 'which environment?' in ctx.prompt:
+            question = json.loads(ctx.prompt.split('\n')[-1])['questions'][0]
+            args = {'job_id':receipts[0], 'question_turn_id':question['question_turn_id'], 'answer':'staging'}
+            receipts.append(await rt.team_jobs.answer_question(run, args))
+            with pytest.raises(service.TeamError, match='no longer open'):
+                await rt.team_jobs.answer_question(run, args)
+        return TurnOutcome('succeeded', result='Noted')
+    engine.handlers[thread.id] = handler
+    await rt.send_turn(thread.id, 'review staging')
+    async def completed():
+        root = await root_of(sessions, thread.id)
+        return root and root.status == 'completed'
+    await wait_until(completed)
+    async with sessions() as db:
+        job = await db.get(AgentJob, receipts[0])
+        assert job.status == 'completed' and job.answer == 'staging' and job.approval_mode == 'ask'
+        assert len(await turns_of(sessions, job.assignee_thread_id)) == 2
+    assert receipts[1]['status'] == 'queued'
 
 async def test_stop_while_waiting_cancels_and_never_resumes(team, sessions):
     rt, engine, lead, one, two = team

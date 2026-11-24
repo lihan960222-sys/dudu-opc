@@ -26,7 +26,7 @@ LEAD = (
     'in a new turn, with every result. When resumed, check each result against what you asked; if one is not good enough, call '
     'delegate again with rework=true and say what to change. If a job failed, say so plainly, retry it once if that makes sense, '
     'and never present failed work as done. Use ask_agent with mode=consult for a short read-only question whose answer you need before you can go on. '
-    'A teammate may come back with a question for the person: pass it on, do not answer it for them. Use list_agents for the roster below '
+    'Resolve ordinary teammate questions from the assigned scope using answer_job_question. For a business decision only the person can make, ask them in this conversation and relay the answer with that tool. A textual question is not a pending tool approval. Use list_agents for the roster below '
     'or create_agent to add a specialist. Never assign work to yourself or to whoever assigned it to you.')
 
 SETUP = (

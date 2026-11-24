@@ -733,3 +733,14 @@ async def test_model_editing_respects_role_file_feature_and_feishu_binding(api, 
     (folder / "AGENTS.md").unlink()
     view = (await api.get(f"/api/v1/threads/{role.id}")).json()
     assert view["model_policy"] == "role" and view["policy_model"] is None and view["policy_model_unavailable"]
+
+@pytest.mark.asyncio
+async def test_employee_history_includes_dispatched_work_before_limiting(api, sessions, owner, tmp_path):
+    from app.services import agent_store
+    async with sessions() as db:
+        employee = await agent_store.create_agent(db, owner_id=owner, name="Employee", provider="codex")
+        delegated = await store.create_thread(db, owner_id=owner, provider="codex", agent_id=employee.id, kind="job", workspace_path=str(tmp_path))
+        await store.create_thread(db, owner_id=owner, provider="codex", workspace_path=str(tmp_path))
+    history = await api.get("/api/v1/threads", params={"kind":"employee", "agent_id":employee.id, "limit":1})
+    assert history.status_code == 200
+    assert [row["id"] for row in history.json()] == [delegated.id]

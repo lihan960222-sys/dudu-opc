@@ -8,7 +8,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { api, ApiError, isLaunchTokenMissing, type Agent, type Engine, type LocalStatus, type NotificationPreferences, type Thread } from "@/lib/api";
 import { notifyApprovalNeeded, notifyTurnCompletion } from "@/lib/desktop-notifications";
 import { activeAgents, chatModelLabel, modelChoice } from "@/lib/agents";
-import { createdThreadHref, workspaceHref } from "@/lib/workspace-navigation";
+import { createdThreadHref, isStewardChatEntry, workspaceHref } from "@/lib/workspace-navigation";
+import { employeeChatHref } from "@/lib/sidebar";
 import { pendingApprovals, type NeedsYouItem } from "@/lib/transcript";
 import { attachmentProblem, conversationUsage, formatCost, formatTokens, MAX_ATTACHMENTS } from "@/lib/everyday";
 import { FilesPanel } from "./FilesPanel";
@@ -30,7 +31,6 @@ import { Composer } from "./Composer";
 import { Conversation } from "./Conversation";
 import { WaitingRoutineQuestions } from "./WaitingRoutineQuestions";
 import { NeedsYouCard } from "./NeedsYouCard";
-import { NativeResume } from "../staff/NativeResume";
 import { ChatHeader } from "./ChatHeader";
 import { CommandPalette } from "@/components/shell/CommandPalette";
 import { Sidebar } from "@/components/shell/Sidebar";
@@ -146,7 +146,7 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
     if (roomId === null) return;
     setRoomTitle(current => current?.id === roomId && current.name === name ? current : { id: roomId, name });
   }, [roomId]);
-  const [teamState, setTeamState] = useState<TeamState | null>(null);
+  const [teamState, setTeamState] = useState<TeamState | null>();
   const [editAgent, setEditAgent] = useState<Agent | null>(null);
   const { session } = useSession();
   // Notifications, "needs you", setup progress and audio settings belong to the workspace's admins: a member's
@@ -394,7 +394,7 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
       if (document.visibilityState === "hidden") return;
       reportPresence()
         .then((result) => {
-          if (!cancelled && result.open && !window.location.search.match(/[?&](thread|room|view|panel)=/)) router.push(`/chat?thread=${result.open.thread_id}`);
+          if (!cancelled && !unified && result.open && isStewardChatEntry(window.location.search)) router.push(`/chat?thread=${result.open.thread_id}`);
         })
         .catch(() => {
           // Not the owner, or an older backend: nothing to show.
@@ -406,28 +406,30 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
       cancelled = true;
       document.removeEventListener("visibilitychange", ping);
     };
-  }, [ready, router, fullAccess]);
+  }, [ready, router, fullAccess, unified]);
 
   const checkAgain = () => {
     setGate({ phase: "loading" });
     setStatusTick((n) => n + 1);
   };
 
+  const historyAgent = unified ? (threadId === null ? newAgentId : openedThread?.id === threadId ? openedThread.agent_id : null) : null;
   // The list is read whenever the tick changes, and again when a turn starts or
   // ends (that changes the order, the title and the session state).
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
     api
-      .listThreads(showArchived)
+      .listThreads(showArchived, unified, historyAgent ?? undefined)
       .then((list) => !cancelled && setThreads(list))
       .catch(() => {
-        // keep what is shown; the next refresh tries again
+        // Keep recent history if we have it. A first failed read can still address the right employee.
+        if (!cancelled) setThreads(previous => previous ?? []);
       });
     return () => {
       cancelled = true;
     };
-  }, [ready, listTick, showArchived, transcript.runningTurnId]);
+  }, [ready, unified, historyAgent, listTick, showArchived, transcript.runningTurnId]);
 
   // A bookmarked archived conversation may be absent from the sidebar. Its
   // engine and model still come from the conversation, never new-chat defaults.
@@ -481,7 +483,7 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
   useEffect(() => {
     if (!ready) return;
     let live = true;
-    collaboration.team().then(value => { if (live) setTeamState(value); }).catch(() => {});
+    collaboration.team().then(value => { if (live) setTeamState(value); }).catch(() => { if (live) setTeamState(previous => previous ?? null); });
     return () => { live = false; };
   }, [ready, agentTick, profileRevision, transcript.runningTurnId]);
 
@@ -647,6 +649,12 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
   // The chosen agent may have been archived since: then the chat starts plain.
   const startingAgentId = choosable.some((a) => a.id === newAgentId) ? newAgentId : null;
   const startingAgent = choosable.find((agent) => agent.id === startingAgentId);
+  const stewardEntry = unified && foreground && isStewardChatEntry(params.toString()) && !draft && !attached.length && !audioUrl.trim() && !sending;
+  const leadId = teamState?.team?.lead_agent_id;
+  const stewardHref = stewardEntry && leadId && threads ? employeeChatHref(threads, leadId, null) : null;
+  useEffect(() => {
+    if (stewardHref && isStewardChatEntry(window.location.search)) router.replace(stewardHref, { scroll: false });
+  }, [stewardHref, router]);
   const selectedProvider = thread?.provider ?? (startingAgent ? newProviderOverride ?? startingAgent.provider : newProviderOverride ?? newProvider);
   const selectedEngine = engines?.find((engine) => engine.id === selectedProvider);
   const selectedAgent = threadId === null
@@ -1105,6 +1113,19 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
   useEffect(() => {
     if (foreground && (roomId !== null || threadId === null || thread)) onEmployeeChange?.(roomId === null ? employee ?? null : null);
   }, [foreground, roomId, threadId, thread, employee, onEmployeeChange]);
+  const choiceRequest = useRef(0);
+  const selectEmployeeChat = async (id: number | null) => {
+    const ticket = ++choiceRequest.current;
+    const origin = window.location.href;
+    let href = id === null ? (unified ? "/chat/?plain=1" : "/chat") : `/chat?agent=${id}`;
+    if (unified && id !== null) {
+      try { href = employeeChatHref(await api.listThreads(false, true, id), id, null); }
+      catch { setManageError(t("portal.retry")); return; }
+    }
+    if (ticket !== choiceRequest.current || window.location.href !== origin) return;
+    setNewProviderOverride(null); setNewModel(null); setNewEffort(null); setModelDraft(null);
+    router.push(href, { scroll: false });
+  };
   const header = (
     <ChatHeader
       unified={unified}
@@ -1114,8 +1135,8 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
       agent={threadAgent ? { id: threadAgent.id, name: threadAgent.name } : null}
       onOpenSidebar={ready && !sidebarInline ? () => setDrawerOpen(true) : undefined}
       agentChoice={
-        roomId === null && agents !== null && threadId === null
-          ? { agents: choosable, value: startingAgentId, onChange: (id) => { router.replace(id !== null ? `/chat?agent=${id}` : "/chat"); setNewProviderOverride(null); setNewModel(null); setNewEffort(null); setModelDraft(null); } }
+        roomId === null && agents !== null && (threadId === null || (unified && thread != null))
+          ? { agents: choosable, value: employee ?? null, onChange: selectEmployeeChat }
           : undefined
       }
       engine={
@@ -1153,7 +1174,6 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
       usageHint={conversationTotal}
       trailing={
         <>
-          {roomId===null && thread?.provider==="codex" && threadId!==null && session?.scopes.includes("admin") && session.kind!=="device" && (!session.person_id || session.role==="owner") && (thread.kind==="feature" || thread.agent_id===teamState?.team?.lead_agent_id) && <NativeResume key={threadId} threadId={threadId}/>}
           {ready && fullAccess ? (
             <NotificationBell
               elevated={routinesOpen || panel === "usage"}
@@ -1177,18 +1197,18 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
 
   // Start a conversation: with the given agent, or (no argument) with whatever is chosen now.
   const startChat = (agentId?: number) => {
-    if (agentId !== undefined) { setNewModel(null); setNewEffort(null); }
+    const target = agentId ?? newAgentId ?? (unified ? threadAgent?.id ?? (params.has("plain") ? null : leadId) ?? null : null);
+    if (target !== null) { setNewProviderOverride(null); setNewModel(null); setNewEffort(null); }
     setModelDraft(null);
     setFocusComposer(true);
-    const target = agentId ?? newAgentId;
-    router.push(target !== null ? `/chat?agent=${target}` : "/chat");
+    router.push(target !== null ? `/chat?agent=${target}` : unified ? "/chat/?plain=1" : "/chat");
   };
 
   const sidebar = (
     <Sidebar
       historyOnly={unified}
       agents={agents}
-      threads={threads}
+      threads={historyAgent == null ? threads : threads?.filter(item => item.agent_id === historyAgent) ?? null}
       selectedThreadId={threadId}
       selectedAgentId={roomId !== null ? null : thread?.agent_id ?? (threadId === null ? startingAgentId : null)}
       live={{ threadId, agentId: thread?.agent_id ?? null, working: transcript.runningTurnId !== null, waiting }}
@@ -1217,6 +1237,9 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
   );
 
   if (!foreground) return null;
+  if (ready && stewardEntry && (teamState === undefined || (leadId && (!threads || stewardHref)))) {
+    return <p role="status" className="p-6 text-center text-sm text-muted">{t("common.loading")}</p>;
+  }
   if (gate.phase === "loading") {
     return (
       <div className="opc-chat-gate flex h-dvh flex-col">
