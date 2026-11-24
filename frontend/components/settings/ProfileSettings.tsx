@@ -667,57 +667,63 @@ function ProfileHeatmap({ days }: { days: ProfileDay[] }) {
   }
 
   return (
-    <div className="relative overflow-x-auto pb-1">
-      {/* Month labels */}
-      <div
-        className="grid text-[11px] text-muted mb-1"
-        style={{
-          gridTemplateColumns: `repeat(${columns.length}, 13px)`,
-          gap: "3px",
-        }}
-      >
-        {months.map((m) => (
-          <span
-            key={`${m.col}-${m.label}`}
-            style={{ gridColumn: `${m.col + 1} / span 4` }}
-            className="truncate font-medium"
-          >
-            {m.label}
-          </span>
-        ))}
+    <div>
+      <div className="overflow-x-auto pb-1">
+        {/* Month labels */}
+        <div
+          className="grid text-[11px] text-muted mb-1"
+          style={{
+            gridTemplateColumns: `repeat(${columns.length}, 13px)`,
+            gap: "3px",
+          }}
+        >
+          {months.map((m) => (
+            <span
+              key={`${m.col}-${m.label}`}
+              style={{ gridColumn: `${m.col + 1} / span 4` }}
+              className="truncate font-medium"
+            >
+              {m.label}
+            </span>
+          ))}
+        </div>
+
+        {/* Heatmap Grid */}
+        <div
+          className="grid"
+          style={{
+            gridTemplateColumns: `repeat(${columns.length}, 13px)`,
+            gridTemplateRows: "repeat(7, 13px)",
+            gridAutoFlow: "column",
+            gap: "3px",
+          }}
+        >
+          {columns.map((col, cIdx) =>
+            col.map((day, rIdx) => (
+              <div
+                key={`${cIdx}-${rIdx}`}
+                onPointerEnter={(event) => { if (event.pointerType === "mouse" && day) setHovered(day); }}
+                onPointerLeave={(event) => { if (event.pointerType === "mouse") setHovered(null); }}
+                onClick={() => day && setHovered(day)}
+                className={`size-[13px] rounded-xs cursor-pointer transition-colors duration-150 ${getHeatClass(day)}`}
+              />
+            ))
+          )}
+        </div>
+
       </div>
 
-      {/* Heatmap Grid */}
-      <div
-        className="grid"
-        style={{
-          gridTemplateColumns: `repeat(${columns.length}, 13px)`,
-          gridTemplateRows: "repeat(7, 13px)",
-          gridAutoFlow: "column",
-          gap: "3px",
-        }}
-      >
-        {columns.map((col, cIdx) =>
-          col.map((day, rIdx) => (
-            <div
-              key={`${cIdx}-${rIdx}`}
-              onMouseEnter={() => day && setHovered(day)}
-              onMouseLeave={() => setHovered(null)}
-              className={`size-[13px] rounded-xs cursor-pointer transition-colors duration-150 ${getHeatClass(day)}`}
-            />
-          ))
+      {/* Reserve the detail row so interacting with a day never moves the page. */}
+      <div className="mt-2 min-h-12 sm:min-h-7">
+        {hovered && (
+          <div className="inline-flex flex-col gap-x-2 rounded-md border border-line bg-surface px-2.5 py-1 text-xs text-ink shadow-sm sm:flex-row sm:items-center">
+            <strong>{formatDateLong(hovered.date, locale)}</strong>
+            <span className="text-muted">
+              {formatCompact(hovered.tokens)} {t("personalSettings.units")} · {hovered.messages} {hovered.messages === 1 ? t("personalSettings.turn") : t("personalSettings.turns")}
+            </span>
+          </div>
         )}
       </div>
-
-      {/* Floating Tooltip */}
-      {hovered && (
-        <div className="mt-2 text-xs text-ink bg-surface border border-line px-2.5 py-1 rounded-md shadow-sm inline-flex items-center gap-2">
-          <strong>{formatDateLong(hovered.date, locale)}</strong>
-          <span className="text-muted">
-            {formatCompact(hovered.tokens)} {t("personalSettings.units")} · {hovered.messages} {hovered.messages === 1 ? t("personalSettings.turn") : t("personalSettings.turns")}
-          </span>
-        </div>
-      )}
 
       {/* Legend */}
       <div className="mt-3 flex items-center justify-end gap-1.5 text-xs text-muted">
