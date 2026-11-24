@@ -91,13 +91,20 @@ async def register_report(worker,row,turn):
         root=await db.scalar(select(AgentJob).where(AgentJob.owner_id==cfg['owner_id'],AgentJob.kind=='root',
             AgentJob.requester_agent_id==actor,AgentJob.assignee_agent_id==actor,AgentJob.requester_thread_id==row['thread'],
             AgentJob.requester_turn_id==row['turn']))
-    if not root:
-        return False
+        if not root:
+            return False
+        names = list(await db.scalars(select(Agent.name).join(AgentJob,AgentJob.assignee_agent_id==Agent.id)
+            .where(AgentJob.parent_id==root.id, AgentJob.owner_id==cfg['owner_id'], Agent.owner_id==cfg['owner_id'],
+                   AgentJob.kind=='job').order_by(AgentJob.id)))
+        if not names:
+            return False
     key=row['app'],row['event']
     with worker.db:
         registered=worker.db.execute('insert or ignore into direct_team_reports(app,event,job) values(?,?,?)',(*key,root.id))
         if registered.rowcount and root.status not in ('completed','cancelled','failed'):
-            enqueue(worker.db,None,'steward',{'text':turn.get('result') or '已派工，收到员工报告后会在这里汇总。',
+            # An acknowledgement is a receipt, not a request for owner input.
+            assignees = '、'.join(dict.fromkeys(names))
+            enqueue(worker.db,None,'steward',{'text':f'已交给 {assignees}，有结果我在这里回复。',
                                              'reply_to':row['message']})
         worker.db.execute("update inbox set state='done' where app=? and event=?",key)
     return True

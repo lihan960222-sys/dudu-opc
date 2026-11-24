@@ -66,3 +66,30 @@ def test_existing_steward_turn_survives_model_binding_migration(tmp_path):
             assert bool(present)==(revision=='head')
             if present:
                 assert db.execute('select count(*) from feishu_lead_chat').fetchone()==(0,)
+
+
+@pytest.mark.asyncio
+async def test_assignment_receipt_cannot_forward_invented_approval(tmp_path, sessions, owner, monkeypatch):
+    from contextlib import closing
+    from types import SimpleNamespace
+    import json
+    from app.feishu.lead_chat import register_report
+    from app.feishu.routing import journal
+    monkeypatch.setattr(session, 'AsyncSessionLocal', sessions)
+    async with sessions() as db:
+        lead = await agent_store.create_agent(db, owner_id=owner, name='大嘴')
+        staff = await agent_store.create_agent(db, owner_id=owner, name='Jensen')
+        fields = dict(owner_id=owner, requester_agent_id=lead.id, requester_thread_id=7,
+                      requester_turn_id=20, brief='列出两个目录名', brief_hash='demo', status='running')
+        root = AgentJob(**fields, assignee_agent_id=lead.id, kind='root')
+        db.add(root)
+        await db.flush()
+        db.add(AgentJob(**fields, assignee_agent_id=staff.id, kind='job', parent_id=root.id, root_id=root.id))
+        await db.commit()
+    with closing(journal(tmp_path/'channel')) as channel:
+        worker = SimpleNamespace(cfg={'owner_id':owner,'steward':{'agent_id':lead.id}}, db=channel)
+        row = dict(thread=7, turn=20, app='test', event='e', message='om_test')
+        for _ in range(2):
+            assert await register_report(worker, row, {'result':'你得去他的会话批准，否则会超时。'})
+        bodies = [json.loads(r[0]) for r in channel.execute('select body from outbox')]
+        assert bodies == [{'text':'已交给 Jensen，有结果我在这里回复。','reply_to':'om_test'}]
