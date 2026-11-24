@@ -1,5 +1,6 @@
 // Words and schedule drafts for routines. Pure: no React, no network.
 import type { Routine, RoutineRun, RoutineRunState, ScheduleKind } from "./api";
+import { API_BASE } from "./api-base.ts";
 
 export const SCHEDULE_KINDS: { value: ScheduleKind; label: string }[] = [
   { value: "weekdays", label: "On chosen days at a time" },
@@ -219,7 +220,7 @@ export function nextRunText(
 // address (the server was given SUPARAGENT_WEBHOOK_BASE) is returned as it is.
 export function webhookUrl(
   path: string,
-  apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1",
+  apiBase = API_BASE,
   origin = typeof window === "undefined" ? "" : window.location.origin,
 ): string {
   if (/^https?:\/\//.test(path)) return path;

@@ -119,6 +119,7 @@ test('webhook url, curl and badge', () => {
   assert.equal(webhookUrl('/hooks/4', 'http://127.0.0.1:8000/api/v1'), 'http://127.0.0.1:8000/hooks/4');
   // A page served by the backend itself uses a relative API path: its own address is the backend's.
   assert.equal(webhookUrl('/hooks/4', '/api/v1', 'https://dots.example.com'), 'https://dots.example.com/hooks/4');
+  assert.equal(webhookUrl('/hooks/4', undefined, 'https://dots.example.com'), 'https://dots.example.com/hooks/4');
   assert.equal(webhookUrl('/hooks/4', '/api/v1', 'http://127.0.0.1:8000'), 'http://127.0.0.1:8000/hooks/4');
   // A full backend address is still used as given, whatever page the browser is on.
   assert.equal(webhookUrl('/hooks/4', 'https://api.example.com/api/v1', 'https://dots.example.com'), 'https://api.example.com/hooks/4');
@@ -137,7 +138,7 @@ test('routine calls use the routine routes', async () => {
   await api.enableRoutineWebhook(3);
   await api.unreadNotifications();
   await api.readAllNotifications();
-  assert.deepEqual(calls.map((c) => [c.options?.method ?? 'GET', new URL(c.url).pathname]), [
+  assert.deepEqual(calls.map((c) => [c.options?.method ?? 'GET', new URL(c.url, 'https://ui.example').pathname]), [
     ['GET', '/api/v1/routines'],
     ['POST', '/api/v1/routines/preview'],
     ['POST', '/api/v1/routines/3/run'],

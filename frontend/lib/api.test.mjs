@@ -15,7 +15,7 @@ test('engine sign-out uses the explicit authenticated logout endpoints', async (
   try {
     await api.logoutClaudeEngine();
     await api.logoutCodexEngine();
-    assert.deepEqual(requests.map(({ url }) => new URL(url).pathname), [
+    assert.deepEqual(requests.map(({ url }) => new URL(url, 'https://ui.example').pathname), [
       '/api/v1/engines/claude/logout', '/api/v1/engines/codex/logout',
     ]);
     for (const { init } of requests) {
@@ -88,7 +88,7 @@ test('routine create and update preserve the per-routine uninterrupted-access ch
   };
   await api.createRoutine(input);
   await api.updateRoutine(17, { agent_id: 4, uninterrupted_access: true });
-  assert.deepEqual(requests.map(({ url }) => new URL(url).pathname), ['/api/v1/routines', '/api/v1/routines/17']);
+  assert.deepEqual(requests.map(({ url }) => new URL(url, 'https://ui.example').pathname), ['/api/v1/routines', '/api/v1/routines/17']);
   assert.equal(JSON.parse(requests[0].init.body).uninterrupted_access, false);
   assert.deepEqual(JSON.parse(requests[1].init.body), { agent_id: 4, uninterrupted_access: true });
 });
@@ -132,7 +132,7 @@ test('getProviders reads /providers and returns the boat status', async () => {
 test('the app catalog is asked for with only the filters that are set, encoded', async () => {
   const urls = [];
   globalThis.fetch = async (url) => {
-    urls.push(new URL(String(url)));
+    urls.push(new URL(String(url), 'https://ui.example'));
     return new Response(JSON.stringify({ source: 'starter', apps: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
   await api.getComposioCatalog();

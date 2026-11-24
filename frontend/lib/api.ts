@@ -5,12 +5,12 @@ import type { ComposioAccount, ComposioApp, ComposioLink } from "./connected-app
 import type { MarketplaceCatalog, MarketplaceConnection, MarketplaceSection, MarketplaceTool } from "./marketplace";
 import type { CustomMcpConnection, CustomMcpDraft, CustomMcpTool } from "./custom-mcp";
 import type { ServiceAudit, ServiceCandidate, ServiceKind, ServicePreset, ServiceProvider, ServiceResource } from "./agent-services";
-export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
+import { API_BASE } from "./api-base.ts";
+export { API_BASE };
 
 export function isLocalApiEndpoint(): boolean {
   try {
-    const hostname = new URL(API_BASE).hostname.toLowerCase();
+    const hostname = new URL(API_BASE, typeof window !== "undefined" ? window.location.href : undefined).hostname.toLowerCase();
     return hostname === "localhost" || hostname.endsWith(".localhost") || hostname.startsWith("127.") || hostname === "[::1]";
   } catch {
     return false;

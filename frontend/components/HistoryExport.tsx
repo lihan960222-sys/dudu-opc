@@ -4,9 +4,7 @@ import { useState } from "react";
 import { Banner } from "@/components/ui/Banner";
 import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
-
-// Same base as lib/api.ts; the export is a ZIP, which request() cannot read.
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
+import { API_BASE } from "@/lib/api-base";
 
 export function HistoryExport() {
   const [busy, setBusy] = useState(false);

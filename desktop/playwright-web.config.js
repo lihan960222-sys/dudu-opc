@@ -5,7 +5,7 @@ const { defineConfig } = require("@playwright/test");
 
 module.exports = defineConfig({
   testDir: "playwright",
-  testMatch: ["agent-services.spec.js", "agent-services-lookup.spec.js"],
+  testMatch: ["agent-services.spec.js", "agent-services-lookup.spec.js", "portal-login-origin.spec.js"],
   workers: 1,
   fullyParallel: false,
   timeout: 90_000,
