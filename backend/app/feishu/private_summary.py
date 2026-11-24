@@ -64,9 +64,15 @@ def args(exe,model,endpoint):
     return argv+['--output-schema','schema.json','--output-last-message','result.json','-']
 
 
-def environment():
-    # Intentionally exclude proxy, CA, alternate providers, custom executables and account redirect variables.
-    return {k:v for k,v in os.environ.items() if k.upper() in SYSTEM_VARS}
+def environment(*, model_request=False):
+    # The offline preflight never uses a proxy. Never inherit CA or provider/endpoint overrides.
+    env = {k:v for k,v in os.environ.items() if k.upper() in SYSTEM_VARS}
+    proxy = os.getenv("SUPARAGENT_CODEX_HTTPS_PROXY", "").strip()
+    if model_request and os.name == "nt" and proxy:
+        from app.services.codex_adapter import validated_loopback_proxy
+        env["HTTPS_PROXY"] = validated_loopback_proxy(proxy)
+        env["NO_PROXY"] = "localhost,127.0.0.1,::1"
+    return env
 
 
 def empty_tools(request,model):
@@ -126,7 +132,7 @@ async def analyze(profile,entries,authorized):
         raise ValueError('此 Codex 版本未通过空工具列表检查。')
     if not await authorized():
         raise ValueError('联系人或摘要授权已变更。')
-    env=environment()
+    env=environment(model_request=True)
     endpoint='https://chatgpt.com/backend-api/codex'
     if os.getenv('OPENAI_API_KEY'):
         env['OPENAI_API_KEY']=os.environ['OPENAI_API_KEY']

@@ -20,6 +20,8 @@ def journal(path):
         outgoing text unique,sent real,primary key(app,event));
     create table if not exists owner_readwrite_requests(
         app text,event text,message text,owner text,tenant text,primary key(app,event));
+    create table if not exists private_voice(
+        outgoing text primary key,app text,event text,duration integer,unique(app,event));
     create table if not exists private_history_jobs(
         id integer primary key,app text,event text,alias text,chat text,peer text,assignee integer,
         start integer,end integer,cap integer,state text default 'assigned',matched integer,

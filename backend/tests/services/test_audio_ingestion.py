@@ -209,6 +209,10 @@ def test_audio_settings_load_from_dotenv_without_exposing_key(monkeypatch, tmp_p
 
 
 async def test_local_whisper_fallback(monkeypatch):
+    # Exercise provider selection and propagation independently of host ffmpeg/model installation.
+    monkeypatch.setattr(audio.shutil, 'which', lambda name: '/fixtures/' + name)
+    monkeypatch.setattr(audio.local_whisper, 'is_available', lambda: True)
+    monkeypatch.setattr(audio, 'validate', lambda *args: ('audio/wav', 1.0))
     monkeypatch.setattr(audio.settings, 'AUDIO_TRANSCRIPTION_API_KEY', '')
     monkeypatch.setattr(audio.settings, 'AUDIO_TRANSCRIPTION_MODEL', 'gpt-transcribe')
     caps = audio.capabilities()

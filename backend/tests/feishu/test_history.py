@@ -250,3 +250,20 @@ def test_responses_empty_tools_encodings_and_denied_tool_declarations():
                    {'tool_choice':{'type':'function','name':'shell'}},{'previous_response_id':'prior'},
                    {'functions':[]},{'conversation':'shared'}):
         assert not empty_tools({**request,**fields},request['model'])
+
+
+def test_summary_network_only_uses_the_explicit_windows_loopback_proxy(monkeypatch):
+    from app.feishu.private_summary import environment
+    import os
+    if os.name != "nt":
+        pytest.skip("Windows network profile")
+    monkeypatch.setenv("HTTPS_PROXY","http://untrusted.example:9000")
+    monkeypatch.setenv("SSL_CERT_FILE","untrusted.pem")
+    monkeypatch.setenv("SUPARAGENT_CODEX_HTTPS_PROXY","http://127.0.0.1:8118")
+    assert "HTTPS_PROXY" not in environment()
+    live = environment(model_request=True)
+    assert live["HTTPS_PROXY"] == "http://127.0.0.1:8118"
+    assert "SSL_CERT_FILE" not in live and "127.0.0.1" in live["NO_PROXY"]
+    monkeypatch.setenv("SUPARAGENT_CODEX_HTTPS_PROXY","http://another.example:8118")
+    with pytest.raises(ValueError):
+        environment(model_request=True)

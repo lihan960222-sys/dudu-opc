@@ -74,6 +74,14 @@ from app.services.turn_clock import TurnClock
 logger = get_logger(__name__)
 
 
+def validated_loopback_proxy(value: str) -> str:
+    """Accept an HTTP proxy on this computer, with an explicit port and no credentials."""
+    match = re.fullmatch(r"http://(?:127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})/?", value, re.I)
+    if not match or not 1 <= int(match[1]) <= 65535:
+        raise ValueError("SUPARAGENT_CODEX_HTTPS_PROXY needs an uncredentialed HTTP loopback URL with a port.")
+    return value.rstrip("/")
+
+
 def _codex_turn_env(*, platform: str | None = None) -> dict[str, str] | None:
     """Optional Windows proxy for this standalone Codex process. None uses the normal engine env."""
     local_proxy = os.environ.get("SUPARAGENT_CODEX_HTTPS_PROXY", "").strip()
@@ -82,15 +90,11 @@ def _codex_turn_env(*, platform: str | None = None) -> dict[str, str] | None:
     env = local_claude_runner.child_env()
     if any(key.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"} for key in env):
         return None
-    # Require an explicit local port and a loopback host. No remote host, credentials or URL path.
-    match = re.fullmatch(r"http://(?:127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})/?", local_proxy, re.I)
-    if not match or not 1 <= int(match[1]) <= 65535:
-        raise ValueError("SUPARAGENT_CODEX_HTTPS_PROXY needs an uncredentialed HTTP loopback URL with a port.")
     bypass = []
     for name in ("NO_PROXY", "no_proxy"):
         bypass.extend(part.strip() for part in env.pop(name, "").split(",") if part.strip())
     env["NO_PROXY"] = ",".join(dict.fromkeys([*bypass, "localhost", "127.0.0.1", "::1"]))
-    env["HTTPS_PROXY"] = local_proxy.rstrip("/")
+    env["HTTPS_PROXY"] = validated_loopback_proxy(local_proxy)
     return env
 
 

@@ -50,12 +50,12 @@ def receive(db, identity, event):
             db.execute('insert into delivery_timing(app,event,received) values(?,?,?)',
                        (header['app_id'],header['event_id'],time.time()))
             if message['chat_type']=='p2p' and not identity.get('enquiry_role') and message.get('message_type')=='text':
-                from . import documents, history
+                from . import documents, history, voice
                 try:
                     text=json.loads(message['content']).get('text','')
                 except (ValueError,AttributeError):
                     text=''
-                if isinstance(text,str) and (history.is_command(text) or documents.is_command(text)):
+                if isinstance(text,str) and (history.is_command(text) or documents.is_command(text) or voice.is_command(text)):
                     db.execute('insert into owner_readwrite_requests values(?,?,?,?,?)',
                                (header['app_id'],header['event_id'],message['message_id'],identity['open_id'],identity['tenant_key']))
         if change.rowcount and topic:

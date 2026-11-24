@@ -57,6 +57,6 @@ Tailscale Serve 只给已获准访问的私网设备提供入口。[Tailscale Se
 
 ## 本机语音转写
 
-在仓库根目录运行 `backend\.venv\Scripts\python.exe scripts\windows\install-local-whisper.py`，安装约 78.2 MB 的多语言 Whisper Tiny 模型。安装程序从固定版本下载四个文件并逐一校验 SHA-256，保存在当前 Windows 账户的 `%LOCALAPPDATA%\SuparagentSteward\modelsaster-whisper-tiny`。再次运行会校验已有文件。模型使用 MIT 许可。[模型来源](https://huggingface.co/Systran/faster-whisper-tiny/tree/d90ca5fe260221311c53c58e660288d3deb8d356)
+在仓库根目录运行 `backend\.venv\Scripts\python.exe scripts\windows\install-local-whisper.py`，安装约 78.2 MB 的多语言 Whisper Tiny 模型。安装程序从固定版本下载四个文件并逐一校验 SHA-256，保存在当前 Windows 账户的 `%LOCALAPPDATA%\SuparagentSteward\models\faster-whisper-tiny`。再次运行会校验已有文件。模型使用 MIT 许可。[模型来源](https://huggingface.co/Systran/faster-whisper-tiny/tree/d90ca5fe260221311c53c58e660288d3deb8d356)
 
 通过 Windows 启动器运行管家后，管理页和飞书语音都使用本机模型。首次转写会将模型载入内存。PyAV 在本机解码音频，转写使用 CPU，无需安装 CUDA、ffmpeg 或 ffprobe 命令行工具。转写文字会交给当前聊天使用，可能出现人名、数字或方言识别错误。视频的抽帧处理独立于语音转写。

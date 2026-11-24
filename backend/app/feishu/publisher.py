@@ -74,7 +74,7 @@ class Publisher:
             raise
         return target
 
-    def upload(self, identity, path, kind):
+    def upload(self, identity, path, kind, *, duration=None):
         limit = (10 if kind == 'image' else 30)*1024*1024
         if path.stat().st_size > limit:
             raise ValueError(f'文件超过发送上限 {limit//1024//1024} MiB')
@@ -88,6 +88,8 @@ class Publisher:
             image = kind == 'image'
             field = 'image' if image else 'file'
             fields = {'image_type':'message'} if image else {'file_type':{'audio':'opus','media':'mp4'}.get(kind,'stream'),'file_name':path.name}
+            if duration is not None:
+                fields['duration']=str(duration)
             result = checked(self.http.post(API + '/im/v1/' + field + 's',
                     headers=self.headers(identity),data=fields,files={field:(path.name,stream)}))
             key = result['data'][field+'_key']
@@ -113,6 +115,10 @@ class Publisher:
         kind = body.get('kind','text')
         if kind == 'text':
             content = {'text':body['text']}
+        elif body.get('private_voice'):
+            from .voice import resource
+            path,ms=resource(self,row,body)
+            content={'file_key':self.upload(role,path,kind,duration=ms)}
         else:
             snapshot = 'snapshot' in body
             root = self.directory/'outgoing' if snapshot else Path(self.config['artifact_root'])

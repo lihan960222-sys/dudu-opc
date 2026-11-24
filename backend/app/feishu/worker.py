@@ -89,7 +89,9 @@ class Worker:
                 with self.db:
                     self.db.execute("update inbox set state='ignored' where app=? and event=?",(row['app'],row['event']))
             return
-        from . import documents
+        from . import documents,voice
+        if await voice.handle(self,row,msg,text):
+            return
         if await documents.handle(self,row,msg,text):
             return
         if suggestions.answer(self,row,msg,text) or approvals.answer(self, row, msg, text):
