@@ -504,7 +504,7 @@ async def resolve_workspace(session, config, task, cfg):
     if not agent or agent.owner_id != config['owner_id'] or not agent.role_path:
         raise ValueError('请先配置本用户的角色目录')
     role_dir = role_workspace.checked_root(Path(agent.role_path))
-    model = role_workspace.load(role_dir).model
+    model = role_workspace.load(role_dir, agent.model).model
     folder = role_dir / '任务' / str(int(task))
     if folder.resolve() != folder:
         raise ValueError('任务目录不能经过链接')

@@ -826,7 +826,7 @@ class ThreadRuntime:
         if agent is not None and getattr(agent, "role_path", None):
             from app.services.role_workspace import load, validate_model
             try:
-                role = load(Path(agent.role_path))
+                role = load(Path(agent.role_path), agent.model)
                 selected=managed.model if managed else role.model
                 if selected:
                     await validate_model(self,thread.provider,selected)

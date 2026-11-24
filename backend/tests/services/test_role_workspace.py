@@ -2,6 +2,21 @@ import pytest
 from app.services.role_workspace import initialize, inventory, load
 
 
+def test_plain_project_rules_use_employee_model_without_changing_file(tmp_path):
+    tmp_path = tmp_path / "employee"
+    tmp_path.mkdir()
+    rules = tmp_path / "AGENTS.md"
+    original = "# 开发说明\r\n保留项目指令。\r\n".encode("utf-8-sig")
+    rules.write_bytes(original)
+    initialize(tmp_path, "gpt-test", "岗位职责")
+    assert load(tmp_path, "gpt-test").model == "gpt-test"
+    assert load(tmp_path, "gpt-test").instructions.startswith("# 开发说明")
+    assert rules.read_bytes() == original
+    rules.write_text("---\nwrong: setting\n---\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="default_model"):
+        load(tmp_path, "gpt-test")
+
+
 def test_role_reload_and_preserve(tmp_path):
     tmp_path = tmp_path / 'role'
     tmp_path.mkdir()

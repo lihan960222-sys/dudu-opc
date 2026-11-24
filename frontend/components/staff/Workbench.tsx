@@ -671,7 +671,7 @@ export function Workbench({ page, onChanged }: { page: ManagementSection; onChan
           )}
           {page === "people" && (
             <>
-              <ReportingBoard currentTeam={team} openProfile={id => { setActive(id); void refresh(); }} />
+              <ReportingBoard openProfile={id => { setActive(id); void refresh(); }} />
               <div className="dp-directory">
               <nav className="dp-roster" aria-label="员工名册">
                 {ordered.map((a) => (

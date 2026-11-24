@@ -33,7 +33,7 @@ async def select_thread(cfg,*,with_model=False):
                 and lead.owner_id==base.owner_id==owner and not lead.archived_at and base.kind=='chat'
                 and not base.archived_at and not base.job_id and not base.room_id):
             raise ValueError('绑定的管家、老板或原会话已变更，请重新核对。')
-        model=role_workspace.load(Path(lead.role_path)).model if lead.role_path else lead.model
+        model=role_workspace.load(Path(lead.role_path), lead.model).model if lead.role_path else lead.model
         desired=signature(lead.provider,model)
         original=await db.get(FeishuLeadChat,anchor)
         if not original:

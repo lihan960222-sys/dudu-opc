@@ -408,7 +408,7 @@ async def consult_thread(db, owner_id, job):
     from app.services.role_workspace import checked_root, load
     target = await consult_parties(db, owner_id, job)
     root = checked_root(Path(target.role_path))
-    role = load(root)
+    role = load(root, target.model)
     return await thread_store.create_thread(db, owner_id=owner_id, agent_id=target.id, provider="codex",
         model=role.model, workspace_path=str(root), kind="feature_consult", job_id=job.id,
         title=f"咨询 #{job.id} · {job.brief[:60]}")
@@ -546,7 +546,7 @@ async def command_thread(db, owner_id, job):
         raise ValueError("The current steward no longer owns this dispatch.")
     agent = await service.member(db,owner_id,job.assignee_agent_id,team_id=team.id)
     root=checked_root(Path(agent.role_path))
-    model=load(root).model
+    model=load(root, agent.model).model
     folder=root/"任务"/str(job.task_id)
     if folder.resolve() != folder:
         raise ValueError("Linked task directory refused.")

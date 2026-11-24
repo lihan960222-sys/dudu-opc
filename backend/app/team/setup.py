@@ -334,7 +334,7 @@ def _initialize_reviewed_role(agent, cleanup):
             pass
         if path.stat().st_nlink != 1:
             raise ValueError("AGENTS.md linked")
-        role = role_workspace.load(folder)
+        role = role_workspace.load(folder, agent.model)
         if (role.model, role.instructions) != expected:
             raise ValueError("已有 AGENTS.md 与审批内容不同，请选择独立目录或核对文件")
         agent.workspace_path = agent.role_path = str(folder)

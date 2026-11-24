@@ -7,8 +7,7 @@ import { collaboration, type TeamState } from "@/lib/collaboration";
 import { useT } from "@/lib/use-i18n";
 import { Face } from "./ProfileControls";
 
-export function ReportingBoard({ currentTeam, openProfile }: {
-  currentTeam: TeamState | null;
+export function ReportingBoard({ openProfile }: {
   openProfile: (id: string) => void;
 }) {
   const t = useT();
@@ -19,30 +18,12 @@ export function ReportingBoard({ currentTeam, openProfile }: {
   useEffect(() => {
     if (!open) return;
     let active = true;
-    let pending = false;
-    async function sync() {
-      if (document.hidden || pending) return;
-      pending = true;
-      try {
-        const [team, staff] = await Promise.all([collaboration.team(), api.listAgents()]);
-        if (active) { setSnapshot({ team, staff }); setFailed(false); }
-      } catch {
-        if (active) setFailed(true);
-      } finally {
-        pending = false;
-      }
-    }
-    void sync();
-    const timer = window.setInterval(sync, 15000);
-    document.addEventListener("visibilitychange", sync);
-    window.addEventListener("focus", sync);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", sync);
-      window.removeEventListener("focus", sync);
-    };
-  }, [open, currentTeam]);
+    Promise.all([collaboration.team(), api.listAgents()]).then(
+      ([team, staff]) => { if (active) setSnapshot({ team, staff }); },
+      () => { if (active) setFailed(true); },
+    );
+    return () => { active = false; };
+  }, [open]);
 
   const members = snapshot?.team.agents.filter(a => !a.archived_at && a.state !== "outside") ?? [];
   const lead = members.find(a => a.id === snapshot?.team.team?.lead_agent_id);
@@ -55,7 +36,10 @@ export function ReportingBoard({ currentTeam, openProfile }: {
     </button>
   );
 
-  return <details className="dp-org" onToggle={e => setOpen(e.currentTarget.open)}>
+  return <details className="dp-org" onToggle={e => {
+    setOpen(e.currentTarget.open);
+    if (!e.currentTarget.open) { setSnapshot(null); setFailed(false); }
+  }}>
     <summary><Network size={17} />{t("org.title")}</summary>
     {open && <div className="dp-org-body">
       {failed && <p role="status">{t("org.failed")}</p>}

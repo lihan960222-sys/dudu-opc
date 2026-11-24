@@ -448,7 +448,7 @@ async def configure_role(agent_id: int, payload: RoleFolderRequest, request: Req
             if any(folder.is_relative_to(Path(p)) or Path(p).is_relative_to(folder) for p in paths):
                 raise ValueError("Choose a folder separate from every other role folder.")
             role_workspace.initialize(folder, agent.model, agent.instructions)
-            config = role_workspace.load(folder)
+            config = role_workspace.load(folder, agent.model)
             await role_workspace.validate_model(rt, agent.provider, config.model)
         except (ValueError, OSError, EngineModelInvalid) as exc:
             raise _error(422, "role_folder", f"{agent.name}: {exc}") from None

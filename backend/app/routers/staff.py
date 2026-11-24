@@ -99,15 +99,15 @@ class EditRules(BaseModel):
     instructions: str = Field(max_length=65536)
 
 
-def read_rules(root):
-    role = role_workspace.load(root)
+def read_rules(root, fallback_model=None):
+    role = role_workspace.load(root, fallback_model)
     if (root / "AGENTS.md").stat().st_nlink != 1:
         raise ValueError("工作指令文件不能使用硬链接")
     return {"path": str(root), "digest": role.digest, "model": role.model, "instructions": role.instructions}
 
 
-def write_rules(root, edit):
-    current = read_rules(root)
+def write_rules(root, edit, fallback_model=None):
+    current = read_rules(root, fallback_model)
     if str(root) != edit.path or current["digest"] != edit.digest:
         raise HTTPException(409, "档案已被修改，请重新打开后编辑")
     path = root / "AGENTS.md"
@@ -116,9 +116,10 @@ def write_rules(root, edit):
         raise HTTPException(409, "文件已被修改")
     text = raw.decode("utf-8-sig")
     end = re.search(r"(?m)^---\r?$", text[3:])
-    if not end:
-        raise ValueError("无法读取模型配置")
-    head = text[:3 + end.end()].rstrip("\r")
+    if re.match(r"^---\r?\n", text) and end:
+        head = text[:3 + end.end()].rstrip("\r")
+    else:
+        head = f"---\ndefault_model: {edit.model}\n---"
     head = re.sub(r"(?m)^([ \t]*default_model:[ \t]+)\S+", lambda m: m[1] + edit.model, head)
     newline = "\r\n" if "\r\n" in text else "\n"
     body = edit.instructions.replace("\r\n", "\n").replace("\n", newline)
@@ -134,13 +135,13 @@ def write_rules(root, edit):
             temp.unlink(missing_ok=True)
             raise
     try:
-        if read_rules(root)["digest"] != edit.digest:
+        if read_rules(root, fallback_model)["digest"] != edit.digest:
             raise HTTPException(409, "文件已被修改")
         os.chmod(temp, path.stat().st_mode)
         os.replace(temp, path)
     finally:
         temp.unlink(missing_ok=True)
-    return read_rules(root)
+    return read_rules(root, fallback_model)
 
 
 @router.get("/{agent_id}/rules")
@@ -149,7 +150,7 @@ async def rules(agent_id: int, rt: ThreadRuntime = Depends(get_runtime)):
     if not agent.role_path:
         raise HTTPException(409, "请先设置工作目录")
     try:
-        return read_rules(Path(agent.role_path))
+        return read_rules(Path(agent.role_path), agent.model)
     except (OSError, ValueError) as exc:
         raise HTTPException(422, str(exc)) from None
 
@@ -166,7 +167,7 @@ async def update_rules(agent_id: int, edit: EditRules, rt: ThreadRuntime = Depen
             raise HTTPException(409, "工作目录已更改")
         _check_engine(rt, agent.provider, edit.model)
         try:
-            result = write_rules(Path(agent.role_path), edit)
+            result = write_rules(Path(agent.role_path), edit, agent.model)
         except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc)) from None
         agent.model = edit.model

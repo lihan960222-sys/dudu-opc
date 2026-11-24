@@ -84,7 +84,7 @@ async def classify(cfg, store, event_key, message):
         lead = await agent_store.get_agent(db,team.lead_agent_id)
         if not lead or lead.owner_id != cfg['owner_id'] or not lead.role_path:
             return None
-        role = role_workspace.load(Path(lead.role_path))
+        role = role_workspace.load(Path(lead.role_path), lead.model)
         roster = {}
         for label, entry in cfg['roles'].items():
             member = await agent_store.get_agent(db, entry['agent_id'])

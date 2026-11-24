@@ -156,7 +156,7 @@ async def get_thread(thread_id: int, rt: ThreadRuntime = Depends(get_runtime)):
         from starlette.concurrency import run_in_threadpool
         from app.services import role_workspace
         try:
-            policy_model = (await run_in_threadpool(role_workspace.load, Path(role_path))).model
+            policy_model = (await run_in_threadpool(role_workspace.load, Path(role_path), policy_model)).model
         except (ValueError, OSError):
             policy_model = None
             policy_model_unavailable = True

@@ -214,7 +214,9 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
       setNotice("已保存");
       onSaved(employee.id);
     } catch (e) {
-      setError(`${step}失败。${String(e)}`);
+      const detail = e instanceof Error ? e.message : String(e);
+      const saved = !agent && persisted.current ? "员工档案已建立。请在此页重试，可继续使用同一份档案。" : "";
+      setError(`${step}失败。${detail} ${saved}`.trim());
     } finally {
       setBusy(false);
     }

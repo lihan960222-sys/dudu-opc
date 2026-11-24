@@ -61,10 +61,10 @@ def initialize(root: Path, model: str, instructions: str) -> None:
             stream.write(f"---\ndefault_model: {model}\n---\n\n{instructions.strip()}\n")
     except FileExistsError:
         pass
-    load(root)
+    load(root, model)
 
 
-def load(root: Path) -> RoleConfig:
+def load(root: Path, fallback_model: str | None = None) -> RoleConfig:
     validate_configured_location(root)
     path = checked_root(root) / "AGENTS.md"
     if linked(path) or not path.is_file():
@@ -76,7 +76,9 @@ def load(root: Path) -> RoleConfig:
     content = raw.decode("utf-8-sig").replace("\r\n", "\n")
     match = re.fullmatch(r"---\n[ \t]*default_model:[ \t]+([\w./:@+\[\]-]+)[ \t]*\n---(?:\n(.*))?", content, re.S)
     if not match:
-        raise ValueError(f"{path} needs a front matter block containing only default_model: MODEL")
+        if fallback_model and not re.match(r"^---[ \t]*(?:\n|$)", content):
+            return RoleConfig(fallback_model, content.strip(), hashlib.sha256(raw).hexdigest())
+        raise ValueError("AGENTS.md 的模型配置格式有误。普通 Markdown 可直接使用岗位默认模型；如使用配置头，请只填写 default_model。")
     return RoleConfig(match[1], (match[2] or "").strip(), hashlib.sha256(raw).hexdigest())
 
 

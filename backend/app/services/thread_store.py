@@ -170,7 +170,7 @@ async def model_policy(db, thread):
     if thread.job_id or thread.kind in {"feature", "feature_consult", "steward_ledger"}:
         return "task", thread.model, role_path
     if role_path:
-        return "role", None, role_path
+        return "role", agent.model, role_path
     return "conversation", None, None
 
 

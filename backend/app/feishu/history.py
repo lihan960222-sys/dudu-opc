@@ -119,7 +119,7 @@ async def reviewer(cfg,source,name):
             raise ValueError('所点员工与该联系人的授权员工不符。')
         model=agent.model
         if agent.role_path:
-            role=role_workspace.load(Path(agent.role_path))
+            role=role_workspace.load(Path(agent.role_path), agent.model)
             model=role.model
         return agent.id,agent.name,agent.provider,model,agent.title or ''
 
