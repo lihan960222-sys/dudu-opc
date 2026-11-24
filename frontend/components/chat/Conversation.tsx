@@ -4,8 +4,9 @@ import { ArrowDown } from "lucide-react";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { formatReactionReply, isLatestAssistantMessage, loadThreadReactions, saveThreadReaction, type ReactionKind, type ReactionsMap } from "@/lib/reactions";
 import type { Transcript, TranscriptItem } from "@/lib/transcript";
-import { announcement, groupToolRuns } from "@/lib/transcript-view";
-import { Avatar } from "@/components/ui/Avatar";
+import { announcement, groupToolRuns, usageByMessage } from "@/lib/transcript-view";
+import "./conversation.css";
+import { AgentPortrait, useAgentImage } from "./AgentImage";
 import { Button } from "@/components/ui/Button";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useT } from "@/lib/use-i18n";
@@ -103,7 +104,7 @@ export function Conversation({
   // Shown under the hint, e.g. a button that opens the engine sign-in.
   emptyAction?: { label: string; onClick: () => void };
   // Who the conversation is with, for the empty state; null for a plain chat.
-  agent?: { id: number; name: string } | null;
+  agent?: { id: number; name: string; title?: string | null; description?: string | null } | null;
   // The conversation is still being fetched: show placeholders instead of the empty state.
   loading?: boolean;
   transcript: Transcript;
@@ -163,13 +164,16 @@ export function Conversation({
   const waitingOnYou = transcript.items.some((i) => i.kind === "approval" && i.status === "pending");
   const empty = transcript.items.length === 0 && transcript.typing === null && !loading;
   const showSkeleton = loading && transcript.items.length === 0 && transcript.typing === null;
+  const picture = useAgentImage(agent?.id ?? null);
+  const speaker = agent ? <AgentPortrait src={picture} agentId={agent.id} name={agent.name} size="sm" /> : undefined;
   const groupedItems = groupToolRuns(transcript.items);
+  const usage = usageByMessage(transcript.items);
   const dividerKeys = findDateDividerItemKeys(groupedItems);
   return (
-    <div className="relative min-h-0 flex-1">
+    <div className="conversation-pane relative min-h-0 min-w-0 flex-1">
       <Announcer items={transcript.items} />
-      <div ref={scroller} onScroll={onScroll} className="h-full overflow-y-auto">
-        <div role="log" aria-live="off" aria-label={t("chat.conversation")} className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6 sm:px-6">
+      <div ref={scroller} onScroll={onScroll} className="conversation-scroll h-full overflow-y-auto">
+        <div role="log" aria-live="off" aria-label={t("chat.conversation")} className="conversation-reading" data-empty={empty || undefined}>
           {showSkeleton && (
             <div role="status" aria-busy="true" className="flex flex-col gap-5 py-2">
               <span className="sr-only">{t("chat.loading")}</span>
@@ -183,14 +187,15 @@ export function Conversation({
             </div>
           )}
           {empty && (
-            <div className="flex flex-col items-center gap-3 py-16 text-center">
-              <Avatar agentId={agent?.id ?? null} name={agent?.name} size="lg" />
-              <p className="text-lg font-semibold">{agent ? t("chat.emptyPromptWithAgent", { name: agent.name }) : t("chat.emptyPrompt")}</p>
-              {emptyHint && <p className="max-w-md text-sm text-muted">{emptyHint}</p>}
+            <div className="conversation-welcome">
+              <div className="conversation-portrait">
+                <AgentPortrait src={picture} agentId={agent?.id ?? null} name={agent?.name} size="lg" />
+              </div>
+              <h2>{agent?.name ?? t("chat.emptyPrompt")}</h2>
+              {agent?.title && <p className="conversation-role">{agent.title}</p>}
+              {agent?.description && <p className="conversation-description">{agent.description}</p>}
+              {emptyHint && <p className="conversation-description">{emptyHint}</p>}
               {emptyAction && <Button variant="primary" onClick={emptyAction.onClick}>{emptyAction.label}</Button>}
-              <p className="max-w-md text-xs text-faint">
-                {t("chat.historyHint")}
-              </p>
             </div>
           )}
 
@@ -232,8 +237,10 @@ export function Conversation({
                     <AssistantMessage
                       key={item.key}
                       text={item.text}
+                      speaker={agent?.name} portrait={speaker}
                       threadId={threadId}
                       workspacePath={workspacePath}
+                      usage={usage.get(item.key)}
                       incomplete={item.incomplete}
                       ts={item.ts}
                       reaction={reactions[item.key] ?? null}
@@ -261,7 +268,7 @@ export function Conversation({
                   );
                   break;
                 case "turn_end":
-                  node = <TurnEnd key={item.key} item={item} />;
+                  node = <TurnEnd key={item.key} item={item} usage={usage.get(item.key)} />;
                   break;
                 case "session_reset":
                   node = <SessionReset key={item.key} item={item} />;
@@ -288,7 +295,7 @@ export function Conversation({
               return node;
             })}
 
-          {transcript.typing !== null && transcript.typing !== "" && <AssistantMessage text={transcript.typing} live />}
+          {transcript.typing !== null && transcript.typing !== "" && <AssistantMessage text={transcript.typing} speaker={agent?.name} portrait={speaker} live />}
 
           {transcript.runningTurnId !== null && (working || waitingOnYou) && (
             <WorkingStatus key={transcript.runningTurnId} phase={workingPhase(transcript.items)} turnId={transcript.runningTurnId} />

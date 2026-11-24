@@ -2,13 +2,13 @@
 
 import {
   Archive,
-  BookOpen,
   CalendarClock,
   ChevronDown,
   ChevronRight,
   Columns3,
   GitBranch,
   LayoutGrid,
+  MessagesSquare,
   Plus,
   Settings,
   SlidersHorizontal,
@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/Button";
 import { IconButton } from "@/components/ui/IconButton";
 import { SkeletonList } from "@/components/ui/Skeleton";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
+import { LanguageSelect } from "@/components/settings/LanguageSelect";
 import { AgentRow } from "./AgentRow";
 import { ThreadRow, type RowActions } from "./ThreadRow";
 import { useUnread } from "./useUnread";
@@ -131,7 +132,6 @@ export function Sidebar({
 }) {
   const t = useT();
   const { updateAvailable, latestVersion } = useVersionUpdate();
-  const [searching, setSearching] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [showAllAgents, setShowAllAgents] = useState(false);
   const [recentCollapsed, setRecentCollapsed] = useState(false);
@@ -166,14 +166,18 @@ export function Sidebar({
   };
 
   return (
-    <nav aria-label={t("shell.conversations")} className="flex h-full min-h-0 flex-col bg-surface text-ink">
+    <nav aria-label={t("shell.conversations")} className="opc-chat-sidebar flex h-full min-h-0 flex-col text-ink">
+      <div className="opc-chat-brand">
+        <span className="opc-chat-brand-icon"><MessagesSquare size={20} aria-hidden="true" /></span>
+        <span>{t("shell.conversations")}</span>
+      </div>
       {workspaces}
-      <div className="space-y-2 p-3 pb-1">
+      <div className="opc-chat-compose-action">
         <Button className="w-full" icon={<Plus size={16} aria-hidden="true" />} onClick={() => newChat()}>
           {t("shell.newChat")}
         </Button>
       </div>
-      <ConversationSearch agentNames={names} onActive={setSearching} onNavigate={onNavigate}>
+      <ConversationSearch agentNames={names} onNavigate={onNavigate}>
         {/* 1. Recent Conversations - Front and Center */}
         <section aria-label={t("sidebar.recent")}>
           <CollapsibleSectionHeader
@@ -308,7 +312,7 @@ export function Sidebar({
                         key={agent.id}
                         agent={agent}
                         href={target.kind === "thread" ? `/chat?thread=${target.id}` : null}
-                        selected={selectedAgentId === agent.id}
+                        selected={selectedAgentId === agent.id && live.threadId === null}
                         status={
                           live.agentId === agent.id
                             ? rowStatus({ working: live.working, waiting: live.waiting })
@@ -350,7 +354,7 @@ export function Sidebar({
       {error && <p role="alert" className="px-4 pb-2 text-xs text-danger">{error}</p>}
 
       {/* Navigation Tools & Footer */}
-      <div className="mt-auto shrink-0 border-t border-line p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+      <div className="opc-chat-sidebar-footer mt-auto shrink-0 border-t border-line p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
         <div className="space-y-0.5">
           {onOpenPlanner && (
             <button
@@ -388,7 +392,7 @@ export function Sidebar({
               className={cn(ROW, "hover:bg-hover/60")}
             >
               <GitBranch size={16} aria-hidden="true" className="shrink-0 text-muted" />
-              <span className="font-medium">Workflows</span>
+              <span className="font-medium">{t("portal.workflows")}</span>
             </button>
           )}
           {showApps && (
@@ -400,7 +404,7 @@ export function Sidebar({
         </div>
 
         {/* Bottom bar with Settings and Theme Toggle */}
-        <div className="mt-1.5 flex items-center justify-between border-t border-line/60 pt-1.5">
+        <div className="opc-chat-preferences mt-1.5 border-t border-line/60 pt-1.5">
           <Link
             href="/settings/"
             onClick={onNavigate}
@@ -418,7 +422,8 @@ export function Sidebar({
               </span>
             )}
           </Link>
-          <div className="pr-1">
+          <div className="opc-chat-appearance">
+            <LanguageSelect compact />
             <ThemeToggle iconOnly />
           </div>
         </div>

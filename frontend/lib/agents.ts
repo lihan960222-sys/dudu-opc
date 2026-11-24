@@ -1,4 +1,4 @@
-import type { Agent, AgentMemory, ApprovalMode } from "./api";
+import type { Agent, AgentMemory, ApprovalMode, Engine } from "./api";
 
 // Suggestions for the model box; any text the Claude CLI accepts also works.
 export const MODEL_SUGGESTIONS = ["default", "sonnet", "opus", "haiku"] as const;
@@ -46,8 +46,20 @@ export function modelFromInput(text: string): string | null {
   return model === "" || model.toLowerCase() === "default" ? null : model;
 }
 
+export const STEWARD_MODELS = [
+  { id: "deepseek-flash", label: "DeepSeek Flash" },
+  { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
+] as const;
+
 export function modelLabel(model: string | null): string {
-  return model ?? "default";
+  return STEWARD_MODELS.find(item => item.id === model)?.label ?? model ?? "default";
+}
+
+export function chatModelLabel(engine: Engine | undefined, model: string | null, fallback: string): string {
+  const id = model ?? engine?.default_model ?? engine?.models.find(item => item.default)?.id;
+  if (!id) return fallback;
+  const label = engine?.models.find(item => item.id === id)?.label;
+  return label && label !== id ? label : modelLabel(id);
 }
 
 // Names by id, for lists that show which agent a conversation uses.

@@ -9,6 +9,34 @@ from app.feishu.routing import journal
 from app.feishu.worker import Worker
 
 
+def test_restarting_does_not_send_another_batch_until_two_hours_after_delivery(tmp_path):
+    cfg={'proactive_suggestions':True,'steward':{'app_id':'boss'}}
+    reads=[]
+    def pending(req):
+        reads.append(req.url.path)
+        return httpx.Response(200,json={'items':[dict(id=n,revision=1,state='pending',title=str(n),
+            detail='example') for n in range(5)]})
+    def check(at):
+        with closing(journal(tmp_path/'j')) as db:
+            worker=Worker(cfg,Publisher(cfg,db,tmp_path))
+            with httpx.Client(base_url='http://local/',transport=httpx.MockTransport(pending)) as api:
+                worker.api=api
+                suggestions.poll(worker,wall_now=at)
+            return db.execute('select count(*) from suggestion_offers').fetchone()[0]
+    assert check(0)==3
+    with closing(journal(tmp_path/'j')) as db:
+        created=db.execute('select max(created) from outbox').fetchone()[0]
+    assert check(created+7500)==3  # Network outage: those offers still await delivery.
+    with closing(journal(tmp_path/'j')) as db, db:
+        db.execute("update outbox set state='sent'")
+        suggestions.delivered(db,db.execute('select outgoing from suggestion_offers limit 1').fetchone()[0])
+        # Force a delayed acknowledgement from Feishu using the test clock.
+        db.execute('update suggestion_delivery_clock set sent=?',(created+7500,))
+    assert check(created+7500+7199)==3
+    assert check(created+7500+7200)==5
+    assert len(reads)==2
+
+
 def test_bound_suggestion_and_idempotent_decision(tmp_path):
     cfg={'proactive_suggestions':True,'steward':{'app_id':'boss'}}
     with closing(journal(tmp_path/'j')) as db:

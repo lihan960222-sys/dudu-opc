@@ -29,8 +29,11 @@ export function Avatar({
   return (
     <span
       aria-hidden="true"
-      style={{ backgroundColor: identityVar(agentId) }}
-      className={cn(base, "text-white", SIZES[size], className)}
+      style={{
+        backgroundColor: `color-mix(in srgb, ${identityVar(agentId)} 17%, var(--bg-raised))`,
+        color: `color-mix(in srgb, var(--ink) 72%, ${identityVar(agentId)})`,
+      }}
+      className={cn(base, SIZES[size], className)}
     >
       {initialOf(name)}
     </span>

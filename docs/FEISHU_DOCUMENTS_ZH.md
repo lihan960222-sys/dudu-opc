@@ -17,8 +17,8 @@
 ## 首次设置
 
 1. 在飞书开放平台给嘟嘟的应用开通用户身份权限 `docx:document:create` 和 `docx:document:write_only`，发布应用的新版本。第一个权限允许建档，第二个权限允许写入正文。还需开通 `offline_access`，方便嘟嘟在授权有效期内继续使用。[创建文档](https://open.feishu.cn/document/server-docs/docs/docs/docx-v1/document/create.md) · [创建文档块](https://open.feishu.cn/document/ukTMukTMukTM/uUDN04SN0QjL1QDN/document-docx/docx-v1/document-block-children/create.md)
-2. 在本机管理页打开「家庭主机 → 飞书个人授权」，展开「在飞书开放平台开通权限」，把页面显示的回调地址填入应用的「安全设置 → 重定向 URL」。发布配置后，点「授权新建文档」，用你自己的飞书账号登录。用同一账号打开目标文件夹，确认能在里面新建文档，也确认已有协作者适合看这些内容。链接按文件夹和飞书现有权限打开，嘟嘟不会替你更改分享设置。
-3. 在管理页打开「家庭主机 → 飞书个人授权」，把完整的云盘文件夹链接粘贴到「新建飞书文档」，点击「保存文件夹」。清空后保存即可停用。手动预配时，例如链接 `https://example.feishu.cn/drive/folder/AbC123` 对应以下字段。
+2. 在工作台打开「员工」，选择管家，点「能力 → 配置飞书能力」。展开「在飞书开放平台开通权限」，把回调地址填入应用的「安全设置 → 重定向 URL」。发布配置后，点「授权新建文档」，用自己的飞书账号登录。用同一账号打开目标文件夹，确认可以新建文档，现有协作者也适合查看这些内容。新文档沿用文件夹的分享设置。
+3. 在同一面板的「新建飞书文档」里粘贴完整的云盘文件夹链接，点「保存文件夹」。清空后保存即可停用。手动预配时，链接 `https://example.feishu.cn/drive/folder/AbC123` 对应以下字段。
 
 ```json
 {

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { collaboration } from "@/lib/collaboration";
-import { loadDraft, saveDraft } from "@/lib/drafts";
+import { chatDraftKey, loadDraft, saveDraft } from "@/lib/drafts";
 import { BusinessProfileForm } from "./BusinessProfileForm";
 import { WorkerGrants } from "./WorkerGrants";
 import { EmptyPanel, ErrorState, LoadingState } from "./PanelState";
@@ -148,8 +148,9 @@ export function ChooseTeam({
       setChatBaseline(latest?.created_at ?? Date.now() / 1000);
       setLeadSuggestion(null);
       // Keep an unsent message the person already typed; otherwise start the interview for them.
-      const keptDraft = loadDraft("new").trim() !== "";
-      if (!keptDraft) saveDraft("new", LEAD_INTERVIEW_PROMPT);
+      const key = chatDraftKey(null, lead);
+      const keptDraft = loadDraft(key).trim() !== "";
+      if (!keptDraft) saveDraft(key, LEAD_INTERVIEW_PROMPT);
       window.open(`/chat/?agent=${lead}`, "_blank", "noopener");
       setChatNote(
         keptDraft

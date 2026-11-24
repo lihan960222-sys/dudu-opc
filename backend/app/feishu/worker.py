@@ -322,6 +322,7 @@ class Worker:
                 continue
             with self.db:
                 self.db.execute("update outbox set state='sent',remote=? where id=?",(remote,row['id']))
+                suggestions.delivered(self.db,row['id'])
 
                 self.db.execute("update delivery_timing set sent=unixepoch('subsec') where outgoing=?",(row['id'],))
                 self.db.execute('update notice_recalls set remote=? where outgoing=?',(remote,row['id']))

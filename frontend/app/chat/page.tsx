@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import { AuthGate } from "@/components/AuthGate";
 import { ChatApp } from "@/components/chat/ChatApp";
+import "@/components/chat/chat-shell.css";
 
 export const metadata = {
   title: "Chat · Suparagent",

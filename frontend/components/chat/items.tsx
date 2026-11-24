@@ -54,7 +54,7 @@ export function DateDivider({ ts }: { ts: string }) {
   const label = formatDateDivider(ts, t);
   if (!label) return null;
   return (
-    <div className="relative my-3 flex items-center justify-center select-none" role="separator" aria-label={label}>
+    <div className="conversation-day relative my-3 flex items-center justify-center select-none" role="separator" aria-label={label}>
       <div className="absolute inset-0 flex items-center" aria-hidden="true">
         <div className="w-full border-t border-line/60" />
       </div>
@@ -141,7 +141,8 @@ export function UserMessage({
     );
   }
   return (
-    <div className="group/msg flex flex-col items-end gap-1">
+    <div className="conversation-user group/msg flex flex-col items-end gap-1">
+      <div className="conversation-byline">{item.person || t("search.kindYou")}</div>
       <MessageAttachments threadId={threadId} items={item.attachments ?? []} />
       <div className="flex max-w-[88%] items-end gap-1.5 sm:max-w-[80%]">
         {item.text && <CopyButton text={item.text} />}
@@ -160,13 +161,13 @@ export function UserMessage({
           {item.text}
         </p>
       </div>
-      {(timeStr || item.person) && (
+      {timeStr && (
         <time
           dateTime={item.ts ?? undefined}
           title={item.ts ? new Date(item.ts).toLocaleString() : undefined}
           className="select-none px-1 text-[11px] text-muted/70 font-normal"
         >
-          {[item.person, timeStr].filter(Boolean).join(" · ")}
+          {timeStr}
         </time>
       )}
       {item.skills && item.skills.length > 0 && (
@@ -180,6 +181,9 @@ export function UserMessage({
 
 export function AssistantMessage({
   text,
+  speaker,
+  portrait,
+  usage,
   incomplete = false,
   live = false,
   ts = null,
@@ -190,6 +194,9 @@ export function AssistantMessage({
   workspacePath = null,
 }: {
   text: string;
+  speaker?: string;
+  portrait?: React.ReactNode;
+  usage?: Record<string, unknown>;
   incomplete?: boolean;
   live?: boolean;
   ts?: string | null;
@@ -201,8 +208,10 @@ export function AssistantMessage({
 }) {
   const t = useT();
   const timeStr = formatMessageTime(ts, t);
+  const usageSummary = turnUsageText(usage, t);
   return (
-    <div className="group/msg max-w-full text-[15px] leading-relaxed">
+    <div className="conversation-answer group/msg max-w-full">
+      <div className="conversation-byline">{portrait ?? <span aria-hidden="true" className="conversation-speaker-mark" />}{speaker || t("search.kindAgent")}</div>
       <Markdown text={text} threadId={live ? null : threadId} workspacePath={live ? null : workspacePath} />
       {live && <span aria-hidden="true" className="animate-pulse text-muted motion-reduce:animate-none">▍</span>}
       {!live && text && (
@@ -253,6 +262,7 @@ export function AssistantMessage({
               {timeStr}
             </time>
           )}
+          {usageSummary && <span className="text-[11px] text-faint">{usageSummary}</span>}
         </div>
       )}
       {incomplete && <p className="mt-1 text-xs text-muted">This message stopped before it was finished.</p>}
@@ -506,9 +516,10 @@ const END_TEXT: Record<Item<"turn_end">["status"], (item: Item<"turn_end">) => s
   interrupted: (i) => interruptedText(i.reason, i.replay),
 };
 
-export function TurnEnd({ item }: { item: Item<"turn_end"> }) {
+export function TurnEnd({ item, usage }: { item: Item<"turn_end">; usage?: Record<string, unknown> }) {
+  const t = useT();
   const message = END_TEXT[item.status](item);
-  const usage = item.status === "completed" || item.usage ? turnUsageText(item.usage) : null;
+  const summary = turnUsageText(usage, t);
   const next = item.status === "failed" ? failureNextStep(item.errorCode) : null;
   const bad = item.status === "failed";
   return (
@@ -522,9 +533,9 @@ export function TurnEnd({ item }: { item: Item<"turn_end"> }) {
           {next && <p className="mt-1 text-xs text-muted">{next}</p>}
         </div>
       )}
-      {usage && (
-        <p className="text-right text-[11px] text-faint" title="As reported by the engine">
-          {usage}
+      {summary && (
+        <p className="text-[11px] text-faint">
+          {summary}
         </p>
       )}
     </>

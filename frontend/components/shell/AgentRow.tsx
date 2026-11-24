@@ -7,7 +7,7 @@ import type { Agent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useT } from "@/lib/use-i18n";
 import type { RowStatus } from "@/lib/sidebar";
-import { Avatar } from "@/components/ui/Avatar";
+import { AgentImage } from "@/components/chat/AgentImage";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { StatusDot } from "./StatusDot";
 
@@ -44,10 +44,10 @@ export function AgentRow({
   const hasMenu = Boolean(onEdit || onChangeLead || onDelete);
   const body = (
     <>
-      <Avatar agentId={agent.id} name={agent.name} size="md" />
+      <AgentImage agentId={agent.id} name={agent.name} />
       <span className="min-w-0 flex-1">
-        <span className="block truncate font-medium">{agent.name}{isLead ? " · Lead" : ""}</span>
-        {agent.title ? <span className="block truncate text-xs text-muted">{agent.title}</span> : null}
+        <span className="block truncate font-medium">{agent.name}</span>
+        {(isLead || agent.title) && <span className="block truncate text-xs text-muted">{isLead ? t("portal.lead") : agent.title}</span>}
       </span>
       <StatusDot status={status} />
     </>

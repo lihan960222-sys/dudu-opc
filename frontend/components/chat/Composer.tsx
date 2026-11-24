@@ -1,6 +1,7 @@
 "use client";
 
-import { ArrowUp, Check, FileText, Image as ImageIcon, Loader2, Mic, Music, Plus, Sparkles, Square, Video as VideoIcon, X } from "lucide-react";
+import "./conversation.css";
+import { ArrowUp, Check, FileText, Image as ImageIcon, Loader2, Mic, Music, Link2, ListPlus, Paperclip, Sparkles, Square, Video as VideoIcon, X } from "lucide-react";
 import { useEffect, useId, useRef, useState, useDeferredValue } from "react";
 import { cn } from "@/lib/cn";
 import { api } from "@/lib/api";
@@ -16,25 +17,25 @@ const MAX_HEIGHT_PX = 200;
 const UPLOAD_CATEGORIES = [
   {
     id: "documents",
-    label: "Document",
+    label: "composer.control.document",
     icon: FileText,
     accept: ".pdf,.docx,.doc,.xlsx,.xls,.pptx,.txt,.md,.csv,.tsv,.json,.log,.yaml,.yml,.xml,.html,.css,.js,.ts,.tsx,.py,.sh,.sql,.toml,.ini,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/msword,application/vnd.ms-excel",
   },
   {
     id: "images",
-    label: "Image",
+    label: "composer.control.images",
     icon: ImageIcon,
     accept: "image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp",
   },
   {
     id: "videos",
-    label: "Video",
+    label: "composer.control.video",
     icon: VideoIcon,
     accept: "video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov,.mkv",
   },
   {
     id: "audio",
-    label: "Audio",
+    label: "composer.control.audio",
     icon: Music,
     accept: "audio/*,.wav,.mp3,.m4a,.ogg,.flac,.webm",
   },
@@ -44,6 +45,7 @@ const UPLOAD_CATEGORIES = [
 // Enter sends, Shift+Enter adds a line, and Enter during IME composition does neither.
 export function Composer({
   value,
+  recipient,
   onChange,
   onSend,
   sending,
@@ -56,6 +58,7 @@ export function Composer({
   onStop,
   files = [],
   onAddFiles,
+  onOpenAudioLink,
   onRemoveFile,
   attachNotice = null,
   focusRequested = false,
@@ -67,6 +70,7 @@ export function Composer({
   draftKey = null,
 }: {
   value: string;
+  recipient?: string;
   onChange: (value: string) => void;
   onSend: () => void;
   sending: boolean;
@@ -87,6 +91,7 @@ export function Composer({
   // the composer offers no attachments.
   files?: File[];
   onAddFiles?: (files: File[]) => void;
+  onOpenAudioLink?: () => void;
   onRemoveFile?: (index: number) => void;
   // Why an attachment was refused or cannot be sent, if anything.
   attachNotice?: string | null;
@@ -159,6 +164,7 @@ export function Composer({
 
   useEffect(() => {
     if (!attachMenuOpen) return;
+    attachMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
     function onPointerDown(e: MouseEvent | TouchEvent) {
       if (
         attachMenuRef.current &&
@@ -170,7 +176,10 @@ export function Composer({
       }
     }
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setAttachMenuOpen(false);
+      if (e.key === "Escape") {
+        setAttachMenuOpen(false);
+        attachButtonRef.current?.focus();
+      }
     }
     document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("touchstart", onPointerDown);
@@ -208,6 +217,7 @@ export function Composer({
   const startRecording = async () => {
     try {
       if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+        setDictationError(t("composer.control.micError"));
         return;
       }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -250,7 +260,7 @@ export function Composer({
           }
         } catch (err) {
           console.error("Dictation failed:", err);
-          setDictationError("Voice dictation is unavailable right now.");
+          setDictationError(t("composer.control.voiceError"));
         } finally {
           setTranscribing(false);
           setRecording(false);
@@ -266,6 +276,7 @@ export function Composer({
       }, 1000);
     } catch (err) {
       console.error("Failed to access microphone:", err);
+      setDictationError(t("composer.control.micError"));
       setRecording(false);
     }
   };
@@ -305,7 +316,7 @@ export function Composer({
 
   return (
     <div
-      className="shrink-0 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2 sm:px-6"
+      className="conversation-dock shrink-0"
       onDragOver={(e) => {
         if (!onAddFiles || !carriesFiles(Array.from(e.dataTransfer.types))) return;
         e.preventDefault();
@@ -319,12 +330,12 @@ export function Composer({
         onAddFiles(Array.from(e.dataTransfer.files));
       }}
     >
-      <div className="mx-auto max-w-3xl">
+      <div className="conversation-input-column">
         {error && <p role="alert" className="mb-2 text-sm text-danger">{error}</p>}
         {attachNotice && <p role="status" className="mb-2 text-sm text-warning">{attachNotice}</p>}
         <div
           className={cn(
-            "flex flex-col rounded-2xl border bg-raised p-2 shadow-sm transition-colors duration-(--dur-fast) focus-within:border-accent/60",
+            "conversation-input flex flex-col rounded-2xl border bg-raised p-2 shadow-sm transition-colors duration-(--dur-fast) focus-within:border-accent/60",
             dragging ? "border-accent bg-accent/10" : "border-line",
           )}
         >
@@ -416,6 +427,12 @@ export function Composer({
                 })
               )}
               {enabledSkills.length > 0 && <p className="px-3 py-1 text-xs text-faint">{t("composer.skillsLimit", { max: MAX_SKILLS_PER_MESSAGE })}</p>}
+              {onSaveAsSkill && (
+                <button type="button" onClick={() => { setPickerOpen(false); onSaveAsSkill(); }}
+                  className="flex w-full cursor-pointer items-center gap-2 border-t border-line px-3 py-2 text-left text-xs font-medium text-accent hover:bg-hover">
+                  <Sparkles size={14} aria-hidden="true" />{t("composer.saveSkill")}
+                </button>
+              )}
             </div>
           )}
           {dragging && <p className="px-3 pb-1 text-xs text-accent">{t("composer.dropAttach")}</p>}
@@ -485,16 +502,16 @@ export function Composer({
                 }
               }}
               rows={1}
-              placeholder={blockedReason ?? (workingMode === "steer" ? t("composer.steerPlaceholder") : workingMode === "queue" ? t("composer.queuePlaceholder") : t("composer.placeholder"))}
+              placeholder={blockedReason ?? (workingMode === "steer" ? t("composer.steerPlaceholder") : workingMode === "queue" ? t("composer.queuePlaceholder") : recipient ? t("portal.messageTo", { name: recipient }) : t("composer.placeholder"))}
               aria-label={t("composer.label")}
               className="block w-full max-h-52 min-h-11 resize-none bg-transparent px-2.5 pt-1.5 pb-1 text-[15px] leading-relaxed text-ink outline-none placeholder:text-faint focus-visible:outline-none"
             />
           </div>
 
           {/* Action Toolbar */}
-          <div className="flex items-center justify-between gap-2 px-1 pt-1">
+          <div className="conversation-tools flex items-center justify-between gap-2 px-1 pt-1">
             <div className="flex items-center gap-1">
-              {onAddFiles && (
+              {(onAddFiles || onOpenAudioLink) && (
                 <div className="relative">
                   <input
                     ref={picker}
@@ -505,11 +522,11 @@ export function Composer({
                     tabIndex={-1}
                     accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.wav,.mp3,.m4a,.ogg,.flac,.webm,image/png,image/jpeg,image/gif,image/webp,.mp4,.mov,.txt,.md,.csv,.tsv,.json,.log,.yaml,.yml,.xml,.html,.css,.js,.ts,.tsx,.py,.sh,.sql,.toml,.ini"
                     onChange={(e) => {
-                      onAddFiles(Array.from(e.target.files ?? []));
+                      onAddFiles?.(Array.from(e.target.files ?? []));
                       e.target.value = "";
                     }}
                   />
-                  <Tooltip content={attachMenuOpen ? "Close menu" : t("composer.attach")}>
+                  <Tooltip content={attachMenuOpen ? t("common.close") : t("composer.attach")}>
                     <button
                       ref={attachButtonRef}
                       type="button"
@@ -527,14 +544,15 @@ export function Composer({
                         attachMenuOpen && "bg-hover text-ink shadow-xs"
                       )}
                     >
-                      <Plus
+                      <Paperclip
                         size={19}
                         className={cn(
                           "transition-transform duration-(--dur-base) ease-[var(--ease-ui)]",
-                          attachMenuOpen && "rotate-45 text-accent"
+                          attachMenuOpen && "text-accent"
                         )}
                         aria-hidden="true"
                       />
+                      <span className="conversation-control-label">{t("composer.control.attach")}</span>
                     </button>
                   </Tooltip>
 
@@ -542,7 +560,19 @@ export function Composer({
                   <div
                     ref={attachMenuRef}
                     role="menu"
-                    aria-label="Upload options"
+                    hidden={!attachMenuOpen}
+                    onKeyDown={(event) => {
+                      const moves = ["ArrowDown", "ArrowUp", "Home", "End"];
+                      if (!moves.includes(event.key)) return;
+                      const options = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+                      if (!options.length) return;
+                      event.preventDefault();
+                      const current = options.indexOf(document.activeElement as HTMLButtonElement);
+                      const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 :
+                        (current + (event.key === "ArrowUp" ? -1 : 1) + options.length) % options.length;
+                      options[next].focus();
+                    }}
+                    aria-label={t("composer.attach")}
                     className={cn(
                       "absolute bottom-full left-0 mb-2 w-40 origin-bottom-left rounded-xl border border-line bg-raised/95 p-1 shadow-lg backdrop-blur-md transition-all duration-(--dur-base) ease-[var(--ease-ui)] z-50",
                       attachMenuOpen
@@ -551,7 +581,7 @@ export function Composer({
                     )}
                   >
                     <div className="flex flex-col gap-0.5">
-                      {UPLOAD_CATEGORIES.map((cat) => {
+                      {onAddFiles && UPLOAD_CATEGORIES.map((cat) => {
                         const Icon = cat.icon;
                         return (
                           <button
@@ -562,10 +592,17 @@ export function Composer({
                             className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-ink transition-colors duration-(--dur-fast) hover:bg-hover hover:text-accent cursor-pointer"
                           >
                             <Icon size={15} className="shrink-0 text-muted transition-colors group-hover:text-accent" aria-hidden="true" />
-                            <span>{cat.label}</span>
+                            <span>{t(cat.label)}</span>
                           </button>
                         );
                       })}
+                      {onOpenAudioLink && (
+                        <button type="button" role="menuitem" onClick={() => { setAttachMenuOpen(false); onOpenAudioLink(); }}
+                          className="flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-ink hover:bg-hover hover:text-accent">
+                          <Link2 size={15} className="shrink-0 text-muted" aria-hidden="true" />
+                          {t("composer.control.audioLink")}
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -587,7 +624,7 @@ export function Composer({
                       (pickerOpen || chosenSkills.length > 0) && "text-accent bg-accent/10"
                     )}
                   >
-                    <Sparkles size={18} aria-hidden="true" />
+                    <Sparkles size={17} aria-hidden="true" /><span className="conversation-control-label">{t("composer.skills")}</span>
                   </button>
                 </Tooltip>
               )}
@@ -604,8 +641,8 @@ export function Composer({
                     type="button"
                     onClick={stopRecording}
                     className="ml-1 inline-flex size-5 items-center justify-center rounded-full bg-danger text-white hover:opacity-90 cursor-pointer"
-                    title="Finish and transcribe"
-                    aria-label="Finish and transcribe"
+                    title={t("composer.control.finishVoice")}
+                    aria-label={t("composer.control.finishVoice")}
                   >
                     <Check size={12} />
                   </button>
@@ -613,8 +650,8 @@ export function Composer({
                     type="button"
                     onClick={cancelRecording}
                     className="inline-flex size-5 items-center justify-center rounded-full bg-danger/20 text-danger hover:bg-danger/30 cursor-pointer"
-                    title="Cancel recording"
-                    aria-label="Cancel recording"
+                    title={t("composer.control.cancelVoice")}
+                    aria-label={t("composer.control.cancelVoice")}
                   >
                     <X size={12} />
                   </button>
@@ -622,16 +659,16 @@ export function Composer({
               ) : transcribing ? (
                 <div className="flex items-center gap-2 rounded-full border border-line bg-raised px-3 py-1.5 text-xs text-muted shadow-xs">
                   <Loader2 size={13} className="animate-spin text-accent" />
-                  <span>Transcribing with local Whisper…</span>
+                  <span>{t("composer.control.transcribing")}</span>
                 </div>
               ) : (
                 !running && (
-                  <Tooltip content="Dictate with local Whisper">
+                  <Tooltip content={t("composer.control.dictate")}>
                     <button
                       type="button"
                       onClick={startRecording}
                       disabled={sending}
-                      aria-label="Dictate message"
+                      aria-label={t("composer.control.dictate")}
                       className="inline-flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted transition-colors duration-(--dur-fast) hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 touch:size-10"
                     >
                       <Mic size={18} aria-hidden="true" />
@@ -652,7 +689,8 @@ export function Composer({
                           aria-label={workingMode === "steer" ? t("composer.steerHint") : t("composer.queueHint")}
                           className="inline-flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-full bg-accent text-accent-fg shadow-xs transition-all duration-(--dur-fast) hover:opacity-90 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100 touch:size-10"
                         >
-                          <ArrowUp size={16} aria-hidden="true" />
+                          {workingMode === "queue" ? <ListPlus size={18} aria-hidden="true" /> : <ArrowUp size={18} aria-hidden="true" />}
+                          <span className="conversation-mode-label">{t(workingMode === "queue" ? "composer.control.queue" : "composer.control.steer")}</span>
                         </button>
                       </span>
                     </Tooltip>
@@ -679,7 +717,7 @@ export function Composer({
                       aria-label={t("composer.sendMessage")}
                       className="inline-flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-full bg-accent text-accent-fg shadow-xs transition-all duration-(--dur-fast) hover:opacity-90 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100 touch:size-10"
                     >
-                      <ArrowUp size={16} aria-hidden="true" />
+                      <ArrowUp size={16} aria-hidden="true" /><span className="conversation-control-label">{t("composer.control.send")}</span>
                     </button>
                   </span>
                 </Tooltip>
@@ -687,13 +725,6 @@ export function Composer({
             </div>
           </div>
         </div>
-        {onSaveAsSkill && (
-          <div className="mt-1 flex justify-end px-3">
-            <button type="button" onClick={onSaveAsSkill} className="cursor-pointer text-xs text-muted underline-offset-2 hover:text-ink hover:underline">
-              {t("composer.saveSkill")}
-            </button>
-          </div>
-        )}
         {blockedAction && blockedReason && (
           <div className="mt-2 px-3">
             <Button variant="primary" size="sm" onClick={blockedAction.onClick}>{blockedAction.label}</Button>

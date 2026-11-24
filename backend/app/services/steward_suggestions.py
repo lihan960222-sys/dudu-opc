@@ -6,9 +6,10 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException
-from sqlalchemy import exists, or_, select
+from sqlalchemy import exists, func, or_, select
 
-from app.db.models import Agent, FeatureScope, StewardSuggestion, WorkColumn, WorkItem
+from app.core.steward_timing import PATROL_SECONDS
+from app.db.models import Agent, AppSetting, FeatureScope, StewardSuggestion, WorkColumn, WorkItem
 from app.db.transactions import begin_write
 from app.services import work_events, work_planner
 from app.team import service as teams
@@ -72,14 +73,31 @@ def _past_due(item, now):
     return False
 
 
-async def scan(db, owner):
-    """Touches the suggestion inbox only. No model, filesystem, employee runs or outbound messages."""
+async def scan(db, owner, *, now=None):
+    """Run one due local review atomically; return the seconds until the next check."""
     await begin_write(db)
     team = await teams.team_for(db, owner, lock=True)
     if not team or not team.lead_agent_id:
         await db.commit()
-        return
-    now = datetime.now(UTC)
+        return 120  # The owner may still be setting up the team.
+    now = now or datetime.now(UTC)
+    key = f"internal.steward.patrol.{owner}"
+    checkpoint = await db.get(AppSetting, key)
+    if checkpoint is None:
+        # Older installs recorded suggestions, but not empty patrols.
+        latest = await db.scalar(select(func.max(StewardSuggestion.created_at)).where(
+            StewardSuggestion.owner_id == owner))
+        previous = latest.timestamp() if latest else None
+        checkpoint = AppSetting(key=key, value_json=previous, version=1, updated_by="steward")
+        db.add(checkpoint)
+    else:
+        previous = checkpoint.value_json
+    if previous is not None:
+        remaining = previous + PATROL_SECONDS - now.timestamp()
+        if remaining > 0:
+            await db.commit()
+            return remaining
+    checkpoint.value_json = now.timestamp()
     pending = {r.task_id: r for r in await db.scalars(select(StewardSuggestion).where(
         StewardSuggestion.owner_id == owner, StewardSuggestion.state == "pending"))}
     is_followup = exists().where(StewardSuggestion.followup_task_id == WorkItem.id,
@@ -103,6 +121,7 @@ async def scan(db, owner):
         old.state = "expired"
         old.revision += 1
     await db.commit()
+    return PATROL_SECONDS
 
 
 def public(row):

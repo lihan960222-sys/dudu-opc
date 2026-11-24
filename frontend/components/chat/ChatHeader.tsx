@@ -1,24 +1,22 @@
 "use client";
 
-import { BarChart3, CalendarDays, Folder, Link2, Menu as MenuIcon, MoreHorizontal, ShieldCheck, Undo2 } from "lucide-react";
+import { ArrowLeft, BarChart3, CalendarDays, ChevronDown, Folder, Link2, PanelLeftOpen, MoreHorizontal, ShieldCheck, Undo2 } from "lucide-react";
 import Link from "next/link";
-import { Layers3 } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Agent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useT } from "@/lib/use-i18n";
 import { Avatar } from "@/components/ui/Avatar";
+import { AgentImage } from "./AgentImage";
 import { IconButton } from "@/components/ui/IconButton";
 import { Menu, MenuItem } from "@/components/ui/Menu";
 import { Select } from "@/components/ui/Select";
-
-const CHIP =
-  "inline-flex h-8 max-w-20 shrink-0 cursor-pointer items-center sm:max-w-72 rounded-full border border-line bg-raised px-3 text-[13px] text-ink transition-colors duration-(--dur-fast) hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50 touch:h-10";
 
 // The strip above a conversation: what it is (agent and title), how it runs (engine and model,
 // approval mode, computer), and a few quiet icon buttons. Everything else lives in the sidebar
 // or opens in a panel. On a phone the secondary buttons fold into one menu.
 export function ChatHeader({
+  showWorkbench,
   title,
   agent,
   onOpenSidebar,
@@ -36,6 +34,7 @@ export function ChatHeader({
   trailing,
   status,
 }: {
+  showWorkbench: boolean;
   title: string;
   // The conversation's agent, for the avatar; null for a plain chat.
   agent: Pick<Agent, "id" | "name"> | null;
@@ -61,6 +60,7 @@ export function ChatHeader({
   status?: { text: string; warn?: boolean } | null;
 }) {
   const t = useT();
+  const visibleAgent = agentChoice ? agentChoice.agents.find(item => item.id === agentChoice.value) : agent;
   type Action = { key: string; label: string; icon: ReactNode; run: () => void; hint?: string };
   const secondary: Action[] = [];
   if (onApprovals) secondary.push({ key: "approvals", label: t("header.approvals"), icon: <ShieldCheck size={18} />, run: onApprovals });
@@ -72,18 +72,25 @@ export function ChatHeader({
   if (onUndo) secondary.push({ key: "undo", label: t("header.undo"), icon: <Undo2 size={18} />, run: onUndo });
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-2 border-b border-line bg-app px-3 pt-[env(safe-area-inset-top)] sm:px-4">
-      <Link href="/" aria-label="打开工作台" title="工作台" className="shrink-0 rounded-field p-1.5 text-muted hover:bg-hover"><Layers3 size={18}/></Link>
-      {onOpenSidebar && (
-        <IconButton label={t("shell.openSidebar")} onClick={onOpenSidebar} className="-ml-1">
-          <MenuIcon size={20} />
-        </IconButton>
-      )}
-
-      <div className="flex min-w-0 flex-1 items-center gap-2.5">
+    <header className="opc-chat-header">
+      <div className="opc-chat-navigation">
+        {showWorkbench && (
+          <Link href="/" className="opc-workbench-link">
+            <ArrowLeft size={16} aria-hidden="true" />{t("portal.workbench")}
+          </Link>
+        )}
+        {onOpenSidebar && (
+          <IconButton label={t("shell.openSidebar")} onClick={onOpenSidebar}>
+            <PanelLeftOpen size={18} />
+          </IconButton>
+        )}
+      </div>
+      <div className="opc-chat-identity flex min-w-0 items-center gap-2.5">
+        {visibleAgent
+          ? <AgentImage key={visibleAgent.id} agentId={visibleAgent.id} name={visibleAgent.name} />
+          : <Avatar agentId={null} />}
         {agentChoice ? (
           <>
-            <Avatar agentId={agentChoice.value} name={agentChoice.agents.find((a) => a.id === agentChoice.value)?.name} size="md" />
             <Select
               value={agentChoice.value ?? ""}
               onChange={(e) => agentChoice.onChange(e.target.value === "" ? null : Number(e.target.value))}
@@ -98,57 +105,43 @@ export function ChatHeader({
           </>
         ) : (
           <>
-            <Avatar agentId={agent?.id ?? null} name={agent?.name} size="md" />
             <h1 className="min-w-0 truncate text-[15px] font-semibold">
               {title}
-              {agent ? <span className="ml-2 hidden text-sm font-normal text-muted sm:inline">{agent.name}</span> : null}
+              {agent && agent.name !== title ? <span className="block truncate text-xs font-normal text-muted">{agent.name}</span> : null}
             </h1>
           </>
         )}
       </div>
 
-      {status ? <span className={cn("shrink-0 text-xs", status.warn ? "text-warning" : "hidden text-muted xl:inline")}>{status.text}</span> : null}
-
-      {computer && (
-        <button type="button" onClick={computer.onClick} title={computer.hint} className={cn(CHIP, "hidden border-accent/40 text-accent lg:inline-flex")}>
-          {computer.text}
-        </button>
-      )}
-      {approvalMode && (
-        <span title={approvalMode.hint} className="hidden h-8 shrink-0 items-center rounded-full bg-inset px-3 text-[13px] text-muted xl:inline-flex">
-          {approvalMode.label}
-        </span>
-      )}
       {engine && (
-        <button type="button" aria-label={t("header.engine")} disabled={engine.disabled} onClick={engine.onClick} title={engine.label} className={CHIP}>
-          <span className="truncate">{engine.label}</span>
+        <button type="button" aria-label={`${t("header.engine")} · ${engine.label}`} disabled={engine.disabled} onClick={engine.onClick} title={t("portal.modelSettings")} className="opc-chat-model">
+          <span className="truncate">{engine.label}</span><ChevronDown size={14} aria-hidden="true" />
         </button>
       )}
-
-      <div className="hidden items-center lg:flex">
-        {secondary.map((item) => (
-          <IconButton key={item.key} label={item.label} title={item.hint} onClick={item.run}>
-            {item.icon}
-          </IconButton>
-        ))}
-      </div>
-      {secondary.length > 0 || computer ? (
-        <div className="lg:hidden">
+      <div className="opc-chat-tools">
+        {status && <span role="status" className={cn("max-w-24 truncate text-xs", status.warn ? "text-warning" : "text-muted")}>{status.text}</span>}
+        <div className="hidden items-center lg:flex">
+          {secondary.filter(item => item.key === "approvals" || item.key === "usage").map(item => (
+            <IconButton key={item.key} label={item.label} title={item.hint} onClick={item.run}>{item.icon}</IconButton>
+          ))}
+        </div>
+        {trailing}
+        {secondary.length > 0 || computer || approvalMode ? (
           <Menu
             trigger={
               <IconButton label={t("header.more")}>
-                <MoreHorizontal size={18} />
+                <MoreHorizontal size={19} />
               </IconButton>
             }
           >
+            {approvalMode && <p title={approvalMode.hint} className="border-b border-line px-2 py-1.5 text-xs text-muted">{approvalMode.label}</p>}
             {computer && <MenuItem onSelect={computer.onClick}>{computer.text}</MenuItem>}
             {secondary.map((item) => (
               <MenuItem key={item.key} onSelect={item.run} icon={item.icon}>{item.label}</MenuItem>
             ))}
           </Menu>
-        </div>
-      ) : null}
-      {trailing}
+        ) : null}
+      </div>
     </header>
   );
 }

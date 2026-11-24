@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { LEGACY_IDENTITY_KEY, migrateLegacyIdentity, pairingCodeFromHash, safeNextPath } from './session.ts';
+import { canOpenWorkbench, LEGACY_IDENTITY_KEY, migrateLegacyIdentity, pairingCodeFromHash, safeNextPath } from './session.ts';
 
 function storage(initial) {
   const map = new Map(Object.entries(initial));
@@ -8,6 +8,14 @@ function storage(initial) {
 }
 
 const owner = { kind: 'browser', scopes: ['admin', 'chat'], user_id: null };
+
+test('chat offers its workbench link to the same people the workbench admits', () => {
+  assert.equal(canOpenWorkbench(owner), true);
+  assert.equal(canOpenWorkbench({ ...owner, person_id: 3, role: 'owner' }), true);
+  assert.equal(canOpenWorkbench({ ...owner, person_id: 4, role: 'member' }), false);
+  assert.equal(canOpenWorkbench({ ...owner, scopes: ['chat', 'files', 'manage'] }), false);
+  assert.equal(canOpenWorkbench(null), false);
+});
 
 test('an old browser identity moves to the server once and leaves the browser', async () => {
   const store = storage({ [LEGACY_IDENTITY_KEY]: 'web_abc' });

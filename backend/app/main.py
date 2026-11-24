@@ -31,8 +31,14 @@ THREAD_SWEEP_INTERVAL_SECONDS = 15
 
 async def _steward_scan():
     from app.services import steward_suggestions
-    async with thread_runtime.session() as db:
-        await steward_suggestions.scan(db, settings.STEWARD_STRICT_OWNER)
+    while True:
+        try:
+            async with thread_runtime.session() as db:
+                delay = await steward_suggestions.scan(db, settings.STEWARD_STRICT_OWNER)
+        except Exception:
+            logger.exception("steward project review failed")
+            delay = 120
+        await asyncio.sleep(delay)
 
 
 configure_logging()
@@ -150,7 +156,7 @@ async def _serving(app: FastAPI):
         asyncio.create_task(run_every(settings.ROUTINE_POLL_SECONDS, per_tenant(routines.tick))),
     ]
     if settings.STEWARD_STRICT_OWNER and not settings.TENANT_SCHEMAS_ENABLED:
-        jobs.append(asyncio.create_task(run_every(120, _steward_scan)))
+        jobs.append(asyncio.create_task(_steward_scan()))
     yield
     # Stopping (SIGTERM, Ctrl+C, the desktop launcher going away). First the
     # background jobs, so no routine starts a new turn while we stop.

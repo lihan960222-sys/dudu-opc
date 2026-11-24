@@ -2,15 +2,18 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "../AuthGate";
+import { canOpenWorkbench } from "@/lib/session";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   ChevronRight,
   FolderKanban,
   Layers3,
+  ListTodo,
+  MessageSquare,
   Monitor,
   Plus,
-  UserRound,
+  Settings2,
   UsersRound,
 } from "lucide-react";
 import { api, request, type Agent, type Engine } from "@/lib/api";
@@ -24,7 +27,7 @@ import type { TeamSetupPlan } from "@/lib/transcript";
 import { TeamSetupCard } from "../chat/TeamCards";
 import { StaffEditor } from "./StaffEditor";
 import { Face } from "./ProfileControls";
-import { FeishuAccess } from "./FeishuAccess";
+import { FEISHU_RETURN_EMPLOYEE, feishuEntry } from "@/lib/feishu-employee";
 import "./workbench.css";
 
 const pages = [
@@ -50,22 +53,31 @@ type Suggestion = {
   options: { id: string; label: string }[];
 };
 function Suggestions() {
-  const [items, setItems] = useState<Suggestion[]>([]),
+  const [pendingItems, setPendingItems] = useState<Suggestion[]>([]),
+    [laterItems, setLaterItems] = useState<Suggestion[]>([]),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [report, setReport] = useState("");
   const [deferred, setDeferred] = useState(false);
-  const generation = useRef(0);
+  const items = deferred ? laterItems : pendingItems;
+  const generation = useRef<symbol | null>(null);
   const [followup, setFollowup] = useState<number | null>(null);
-  const load = useCallback(async () => {
-    const current = ++generation.current;
-    const data = await request<{ items: Suggestion[] }>(
-      "/steward/suggestions" + (deferred ? "?state=deferred" : ""),
-    );
-    if (generation.current === current) setItems(data.items);
-  }, [deferred]);
+  const load = useCallback(() => {
+    const current = Symbol();
+    generation.current = current;
+    return Promise.allSettled([
+      request<{items: Suggestion[]}>("/steward/suggestions"),
+      request<{items: Suggestion[]}>("/steward/suggestions?state=deferred"),
+    ]).then(([pending, later]) => {
+      if (generation.current !== current) return;
+      if (pending.status === "fulfilled") setPendingItems(pending.value.items);
+      if (later.status === "fulfilled") setLaterItems(later.value.items);
+      setError([pending, later].flatMap(result => result.status === "rejected" ? [String(result.reason)] : []).join("。"));
+    });
+  }, []);
   useEffect(() => {
-    void load().catch((e) => setError(String(e)));
+    void load();
+    return () => { generation.current = null; };
   }, [load]);
   async function decide(s: Suggestion, choice: string, option?: string) {
     setBusy(true);
@@ -89,19 +101,15 @@ function Suggestions() {
   }
   return (
     <>
-      <div className="dp-suggestions-head">
+      {(pendingItems.length > 0 || laterItems.length > 0 || deferred) && <div className="dp-suggestions-head">
         <span>{deferred ? "稍后处理" : items.length ? "待确认建议" : ""}</span>
-        <button
+        {(laterItems.length > 0 || deferred) && <button
           className="dp-link"
-          onClick={() => {
-            setItems([]);
-            setError("");
-            setDeferred((d) => !d);
-          }}
+          onClick={() => setDeferred((d) => !d)}
         >
           {deferred ? "返回待确认建议" : "查看稍后处理的建议"}
-        </button>
-      </div>
+        </button>}
+      </div>}
       {deferred && items.length === 0 && <small>暂无稍后处理的建议。</small>}
       {items.map((s) => (
         <article className="dp-feature" key={s.id}>
@@ -392,7 +400,7 @@ function Projects({ staff }: { staff: Agent[] }) {
   }, [active]);
   return (
     <>
-      <section className="dp-feature">
+      <section className="dp-boardhead">
         <h2>{board?.name ?? "任务板"}</h2>
         <p>{board ? `共 ${items.length} 项任务` : "正在读取任务…"}</p>
       </section>
@@ -420,8 +428,9 @@ function Projects({ staff }: { staff: Agent[] }) {
           </button>
         ))}
       </div>
-      <div className="dp-columns">
+      <div className="dp-columns dp-projects">
         <div className="dp-list">
+          {board && !items.length && <p className="dp-empty">暂无任务。<Link href="/chat?view=planner" className="dp-link">打开任务板</Link></p>}
           {items
             .filter(
               (i) => !project || (projects[i.id] || "未归入项目") === project,
@@ -430,6 +439,7 @@ function Projects({ staff }: { staff: Agent[] }) {
               <button
                 className="dp-listrow"
                 key={i.id}
+                aria-pressed={active?.id === i.id}
                 onClick={() => selectTask(i)}
               >
                 <div>
@@ -548,9 +558,7 @@ function Projects({ staff }: { staff: Agent[] }) {
 export function Workbench() {
   const { session } = useSession();
   const router = useRouter();
-  const canManage =
-    session?.scopes.includes("admin") &&
-    (!session.person_id || session.role === "owner");
+  const canManage = canOpenWorkbench(session);
   useEffect(() => {
     if (!canManage) router.replace("/chat/");
   }, [canManage, router]);
@@ -569,7 +577,14 @@ function loadPortal() {
 
 function ManagementPortal() {
   const params = useSearchParams();
-  const [page, setPage] = useState<string>(() => params.get("section") === "host" ? "host" : "people"),
+  const [entry] = useState(() => {
+    let employee = null;
+    if (typeof window !== "undefined" && params.has("feishu_oauth")) {
+      try { employee = sessionStorage.getItem(FEISHU_RETURN_EMPLOYEE); } catch { /* use lead */ }
+    }
+    return feishuEntry(params, typeof window === "undefined" ? "" : window.location.hash, employee);
+  });
+  const [page, setPage] = useState<string>(() => !entry.requested && params.get("section") === "host" ? "host" : "people"),
     [agents, setAgents] = useState<Agent[]>([]),
     [engines, setEngines] = useState<Engine[]>([]),
     [team, setTeam] = useState<TeamState | null>(null);
@@ -616,8 +631,11 @@ function ManagementPortal() {
   const ordered = lead
     ? [lead, ...agents.filter((a) => a.id !== lead.id)]
     : agents;
+  const members = team?.agents.filter(a => a.state !== "outside").map(a => a.id) ?? [];
+  const initialEmployee = members.includes(Number(entry.employee)) ? entry.employee : lead ? String(lead.id) : "";
   const key =
     active ||
+    (entry.requested && initialEmployee) ||
     (ordered[0] ? String(ordered[0].id) : (pending[0]?.requestId ?? "new"));
   const chosen = agents.find((a) => String(a.id) === key) ?? null,
     proposal = pending.find((p) => p.requestId === key);
@@ -635,7 +653,7 @@ function ManagementPortal() {
               <small>OPC 工作台</small>
             </span>
           </div>
-          <nav className="dp-navigation">
+          <nav className="dp-navigation" aria-label="工作台导航">
             {pages.map((p) => (
               <button
                 key={p.id}
@@ -647,39 +665,17 @@ function ManagementPortal() {
               </button>
             ))}
           </nav>
-          <div className="dp-owner">
-            <span className="dp-owner-mark">
-              <UserRound />
-            </span>
-            <div>
-              所有者<small>后台管理</small>
-            </div>
-          </div>
+          <nav className="dp-utilities" aria-label="工作区入口">
+            <Link href="/chat/"><MessageSquare />对话</Link>
+            <Link href="/chat?view=planner"><ListTodo />任务板</Link>
+            <Link href="/settings/"><Settings2 />设置</Link>
+          </nav>
         </aside>
         <main className="dp-main">
-          <div className="dp-context">
-            <span>
-              工作台 <b>/</b> {label}
-            </span>
-            <nav>
-              <Link href="/chat/">对话</Link>
-              <Link href="/chat?view=planner">任务板</Link>
-              <Link href="/settings/">设置</Link>
-            </nav>
-          </div>
           <header className="dp-pagehead">
             <div>
               <h1>{label}</h1>
-              <p className="dp-headnote">
-                {
-                  {
-                    people: "管理角色、模型与工作目录。",
-                    projects: "查看任务归属、协作和验收标准。",
-                    activity: "查看团队已记录的操作。",
-                    host: "查看主机上的执行引擎与工作目录。",
-                  }[page]
-                }
-              </p>
+              {loaded && page === "people" && <p className="dp-headnote">{agents.length} 位员工{pending.length > 0 && ` · ${pending.length} 份待审批档案`}</p>}
             </div>
             {page === "people" && (
               <button
@@ -702,7 +698,8 @@ function ManagementPortal() {
           {page === "people" && (
             <>
               <Suggestions />
-              <div className="dp-roster">
+              <div className="dp-directory">
+              <nav className="dp-roster" aria-label="员工名册">
                 {ordered.map((a) => (
                   <button
                     key={a.id}
@@ -710,7 +707,7 @@ function ManagementPortal() {
                     aria-pressed={key === String(a.id)}
                     onClick={() => setActive(String(a.id))}
                   >
-                    <Face id={a.id} rev={rev} />
+                    <Face id={a.id} name={a.name} rev={rev} />
                     <span>
                       <strong>{a.name}</strong>
                       <small>
@@ -735,7 +732,8 @@ function ManagementPortal() {
                     </span>
                   </button>
                 ))}
-              </div>
+              </nav>
+              <section className="dp-record" aria-label="员工档案">
               {!loaded ? (
                 <p role="status">正在读取员工档案…</p>
               ) : proposal ? (
@@ -768,6 +766,8 @@ function ManagementPortal() {
                     )
                   }
                   engines={engines}
+                  members={members}
+                  openFeishu={entry.requested && key === initialEmployee}
                   onSaved={async (id) => {
                     await refresh();
                     setActive(String(id));
@@ -775,6 +775,8 @@ function ManagementPortal() {
                   }}
                 />
               )}
+              </section>
+              </div>
             </>
           )}
           {page === "projects" && (
@@ -784,9 +786,9 @@ function ManagementPortal() {
             </>
           )}
           {page === "activity" && (
-            <div className="dp-list">
+            <div className="dp-list dp-timeline">
               {activity.length === 0 ? (
-                <p>暂无团队运行记录。</p>
+                <p className="dp-empty"><Activity />暂无团队运行记录。</p>
               ) : (
                 activity.map((a) => (
                   <div className="dp-listrow" key={a.id}>
@@ -812,31 +814,32 @@ function ManagementPortal() {
           )}
           {page === "host" && (
             <>
-              <section className="dp-feature">
+              <section className="dp-host-summary">
                 <div className="dp-legend">
                   <Monitor />
-                  执行设备
+                  管理地址
                 </div>
-                <h2>家庭主机</h2>
-                <p>
-                  管理地址 ·{" "}
-                  {typeof window !== "undefined" ? window.location.host : ""}
-                </p>
+                <strong className="dp-mono">{typeof window !== "undefined" ? window.location.host : ""}</strong>
               </section>
-              <FeishuAccess team={team?.agents ?? []} />
+              <div className="dp-inventory">
+              <section>
               <h3>执行引擎</h3>
+              {loaded && !engines.length && <p className="dp-empty">暂无已登记的执行引擎。</p>}
               {engines.map((e) => (
                 <div className="dp-listrow" key={e.id}>
                   <div>
                     <strong>{e.label}</strong>
                     <small>{e.version || e.reason}</small>
                   </div>
-                  <span className="dp-tag">
+                  <span className={`dp-status ${e.available ? "" : "pending"}`}>
                     {e.available ? "可用" : "待配置"}
                   </span>
                 </div>
               ))}
+              </section>
+              <section>
               <h3>员工工作目录</h3>
+              {loaded && !agents.length && <p className="dp-empty">暂无员工工作目录。</p>}
               {agents.map((a) => (
                 <div className="dp-listrow" key={a.id}>
                   <div>
@@ -847,6 +850,8 @@ function ManagementPortal() {
                   </div>
                 </div>
               ))}
+              </section>
+              </div>
             </>
           )}
         </main>

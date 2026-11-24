@@ -154,6 +154,8 @@ export const en = {
   "chat.cancelAudio": "Cancel audio processing",
   "chat.transcriptCaveat": "Machine transcripts may contain uncertain words or names. Review the transcript before requesting later actions.",
   "composer.placeholder": "Message your agent",
+  "composer.restoreOldDraft": "Restore previous draft",
+  "composer.dismissOldDraft": "Discard previous draft",
   "composer.steerPlaceholder": "Type to steer the running turn",
   "composer.queuePlaceholder": "Type a message to send after this turn",
   "composer.steerHint": "Send this into the running turn",
@@ -546,6 +548,8 @@ export type MessageKey = Exclude<keyof typeof en,
   | "chat.reaction.replyThumbsUp"
   | "chat.reaction.replyThumbsDown"
   | "chat.reaction.sent"
+  | "composer.restoreOldDraft"
+  | "composer.dismissOldDraft"
   | "composer.steerPlaceholder"
   | "composer.queuePlaceholder"
   | "composer.steerHint"
@@ -1055,7 +1059,7 @@ export const es: Partial<Record<EnglishKey, string>> = {
   "team.canDelegate": "Puede delegar",
 };
 
-const catalogs: Record<Locale, Partial<Record<MessageKey, string>>> = {
+const catalogs: Record<Locale, Partial<Record<EnglishKey, string>>> = {
   en,
   de,
   es,
@@ -1068,7 +1072,7 @@ const catalogs: Record<Locale, Partial<Record<MessageKey, string>>> = {
   pt,
   ru,
   tr,
-  zh,
+  zh: { ...zh, "composer.restoreOldDraft": "恢复旧草稿", "composer.dismissOldDraft": "丢弃旧草稿" },
 };
 
 type SupplementalCatalog = Record<Locale, Record<string, string>>;

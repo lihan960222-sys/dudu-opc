@@ -1,3 +1,5 @@
+import { translate } from "./i18n.ts";
+
 // Pure helpers for search, attachments, workspace files and usage
 // (docs/EVERYDAY.md). No React, no network.
 
@@ -52,18 +54,19 @@ function count(value: unknown): number | null {
 }
 
 // One line for a finished turn, from the usage its engine reported.
-export function turnUsageText(usage: Record<string, unknown> | null | undefined): string {
-  if (!usage || typeof usage !== "object") return "Usage not reported";
+export function turnUsageText(usage: Record<string, unknown> | null | undefined,
+  t: (key: string, params: { value: string }) => string = (key, params) => translate("en", key, params)): string {
+  if (!usage) return "";
   const input = count(usage.input_tokens);
   const output = count(usage.output_tokens);
-  const cached = (count(usage.cache_read_input_tokens) ?? 0) + (count(usage.cache_creation_input_tokens) ?? 0);
-  const cost = typeof usage.cost_usd === "number" && Number.isFinite(usage.cost_usd) ? usage.cost_usd : null;
+  const read = count(usage.cache_read_input_tokens);
+  const created = count(usage.cache_creation_input_tokens);
   const parts: string[] = [];
-  if (input !== null) parts.push(`${formatTokens(input)} in`);
-  if (output !== null) parts.push(`${formatTokens(output)} out`);
-  if (cached > 0) parts.push(`${formatTokens(cached)} cached`);
-  if (parts.length === 0 && cost === null) return "Usage not reported";
-  parts.push(cost === null ? "cost not reported" : formatCost(cost));
+  if (input !== null) parts.push(t("chat.usageInput", { value: formatTokens(input) }));
+  if (output !== null) parts.push(t("chat.usageOutput", { value: formatTokens(output) }));
+  if (read !== null || created !== null) parts.push(t("chat.usageCache", { value: formatTokens((read ?? 0) + (created ?? 0)) }));
+  if (typeof usage.cost_usd === "number" && Number.isFinite(usage.cost_usd) && usage.cost_usd >= 0)
+    parts.push(formatCost(usage.cost_usd));
   return parts.join(" · ");
 }
 

@@ -1,0 +1,89 @@
+.conversation-pane, .conversation-dock {
+  --conversation-width: 49rem;
+  --conversation-gutter: clamp(.875rem, 3vw, 2.25rem);
+}
+
+.conversation-scroll {
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+}
+
+.conversation-reading, .conversation-input-column {
+  width: min(100%, calc(var(--conversation-width) + 2 * var(--conversation-gutter)));
+  margin-inline: auto;
+  padding-inline: var(--conversation-gutter);
+}
+
+.conversation-reading {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-block: clamp(1.25rem, 3vh, 2.5rem) 2rem;
+}
+
+.conversation-reading > * { min-width: 0; }
+.conversation-reading[data-empty] { min-height: 100%; justify-content: center; }
+.conversation-welcome {
+  width: min(100%, 32rem);
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: .65rem;
+  padding-block: 1rem;
+  overflow-wrap: anywhere;
+}
+.conversation-portrait {
+  display: grid;
+  place-items: center;
+  padding: .375rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  box-shadow: 0 .4rem 1.3rem color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.conversation-portrait > * { width: 3.6rem; height: 3.6rem; font-size: 1.5rem; }
+.conversation-welcome h2 { margin-top: .45rem; font-size: clamp(1.5rem, 3.5vw, 2.25rem); line-height: 1.22; font-weight: 650; letter-spacing: -.035em; }
+.conversation-role { font-size: .93rem; font-weight: 550; color: var(--ink-muted); }
+.conversation-description { max-width: 42ch; white-space: pre-line; text-wrap: pretty; line-height: 1.65; color: var(--ink-muted); font-size: .9rem; }
+.conversation-day > span { border: 0; border-radius: 0; box-shadow: none; background: var(--bg-app); padding-inline: .8rem; color: var(--ink-muted); }
+.conversation-byline { display: flex; align-items: center; gap: .5rem; font-size: .78rem; line-height: 1.4; font-weight: 650; color: var(--ink-muted); overflow-wrap: anywhere; }
+.conversation-user .conversation-byline { margin-bottom: .2rem; }
+.conversation-user > div > p { border-radius: 1.05rem 1.05rem .35rem 1.05rem; background: color-mix(in srgb, var(--accent) 8%, var(--bg-raised)); line-height: 1.65; }
+.conversation-answer { margin-block: .45rem; min-width: 0; line-height: 1.72; font-size: .99rem; color: var(--ink); overflow-wrap: anywhere; }
+.conversation-answer .conversation-byline { color: var(--ink); margin-bottom: .65rem; }
+.conversation-speaker-mark { height: .88rem; width: .23rem; border-radius: 1rem; background: var(--accent); flex: none; }
+.conversation-answer [role=heading] { line-height: 1.4; margin-block: 1.3em .45em; }
+.conversation-answer li { padding-inline-start: .15rem; }
+.conversation-answer li::marker { color: var(--ink-muted); }
+.conversation-answer pre { line-height: 1.6; font-size: .83rem; overflow-wrap: normal; tab-size: 4; }
+.conversation-answer blockquote { border-color: color-mix(in srgb, var(--accent) 38%, var(--line)); }
+.conversation-answer th, .conversation-answer td { padding: .45rem .7rem; }
+
+.conversation-dock {
+  container-type: inline-size;
+  padding-top: .4rem;
+  padding-bottom: max(.85rem, env(safe-area-inset-bottom));
+}
+.conversation-input { border-radius: 1.25rem; padding: .6rem; box-shadow: 0 .35rem 1.4rem color-mix(in srgb, var(--ink) 7%, transparent); }
+.conversation-input:focus-within { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 14%, transparent); }
+.conversation-input textarea { font-size: 1rem; min-height: 3.05rem; max-height: min(12.5rem, 27dvh); padding: .55rem .65rem; line-height: 1.55; }
+.conversation-tools { margin-top: .25rem; }
+.conversation-control-label { display: none; font-size: .75rem; font-weight: 550; white-space: nowrap; }
+.conversation-tools button:has(.conversation-control-label) { gap: .4rem; }
+.conversation-tools button:has(.conversation-mode-label) { width: auto; padding-inline: .72rem; gap: .35rem; }
+.conversation-mode-label { font-size: .75rem; font-weight: 600; }
+.conversation-input [role=menu][hidden] { display: none; }
+@container (min-width: 35rem) {
+  .conversation-control-label { display: inline; }
+  .conversation-tools button:has(.conversation-control-label) { width: auto; padding-inline: .65rem; }
+}
+@media (max-width: 600px) {
+  .conversation-scroll { scrollbar-gutter: auto; }
+  .conversation-reading { gap: .85rem; padding-bottom: 1rem; }
+  .conversation-dock { padding-bottom: max(.55rem, env(safe-area-inset-bottom)); }
+  .conversation-input { padding: .4rem; border-radius: 1.05rem; }
+  .conversation-tools > div > button, .conversation-tools > div > span > button,
+  .conversation-tools > div > div > button[aria-haspopup=menu] { min-width: 2.75rem; min-height: 2.75rem; }
+}

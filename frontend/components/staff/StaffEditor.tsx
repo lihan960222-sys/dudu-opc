@@ -1,12 +1,13 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { Check, FileText, UserRound } from "lucide-react";
+import { Check, FileText, MessageSquare, Pencil, UserRound } from "lucide-react";
 import { api, request, type Agent, type Engine } from "@/lib/api";
 import { collaboration } from "@/lib/collaboration";
 import type { SkillSummary } from "@/lib/skills";
 import { StaffModelFields } from "./ProfileControls";
 import { DeepSeekKey } from "./DeepSeekKey";
+import { FeishuAccess } from "./FeishuAccess";
 import { useSession } from "../AuthGate";
 import {
   AvatarPicker,
@@ -26,9 +27,11 @@ type Props = {
   lead: Agent | null;
   member: boolean;
   engines: Engine[];
+  members: number[];
+  openFeishu: boolean;
   onSaved: (id: number) => void;
 };
-export function StaffEditor({ agent, lead, member, engines, onSaved }: Props) {
+export function StaffEditor({ agent, lead, member, engines, members, openFeishu, onSaved }: Props) {
   const { session } = useSession();
   const ownsHost = session?.kind === "browser" && !!session.session_id && session.scopes.includes("admin")
     && (session.role === "owner" || (!session.role && !session.person_id));
@@ -44,7 +47,8 @@ export function StaffEditor({ agent, lead, member, engines, onSaved }: Props) {
     [body, setBody] = useState(agent?.instructions ?? "");
   const [rules, setRules] = useState<Rules | null>(null),
     [ruleError, setRuleError] = useState("");
-  const [tab, setTab] = useState("basic"),
+  const [showFeishu, setShowFeishu] = useState(openFeishu && ownsHost);
+  const [tab, setTab] = useState(openFeishu && ownsHost ? "tools" : "basic"),
     [avatar, setAvatar] = useState(""),
     [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false),
@@ -183,14 +187,18 @@ export function StaffEditor({ agent, lead, member, engines, onSaved }: Props) {
     }
   }
   return (
-    <div>
+    <div className="dp-profile">
       <div className="dp-profilehead">
         <button
           type="button"
+          className="dp-avatar-control"
           aria-label="更换头像"
+          title="更换头像"
+          aria-expanded={picking}
           onClick={() => setPicking(!picking)}
         >
-          <Face id={agent?.id} big preview={avatar} />
+          <Face id={agent?.id} name={name} big preview={avatar} />
+          <Pencil aria-hidden="true" />
         </button>
         <div>
           <div className="dp-profilename">
@@ -201,16 +209,10 @@ export function StaffEditor({ agent, lead, member, engines, onSaved }: Props) {
           </div>
           <p>{title || role}</p>
         </div>
-        <button
-          className="dp-link"
-          style={{ marginLeft: "auto" }}
-          onClick={() => setPicking(!picking)}
-        >
-          更换头像
-        </button>
+        {agent && <Link className="dp-button dp-chat-link" aria-label={`与 ${agent.name} 对话`} href={`/chat?agent=${agent.id}`}><MessageSquare />对话</Link>}
       </div>
       {picking && <AvatarPicker onChange={setAvatar} />}
-      <div className="dp-tabs">
+      <div className="dp-tabs dp-profiletabs" aria-label="档案栏目">
         {[
           ["basic", "基本资料"],
           ["rules", "AGENTS.md"],
@@ -317,6 +319,15 @@ export function StaffEditor({ agent, lead, member, engines, onSaved }: Props) {
                 <small>暂无已登记技能。</small>
               )}
               {skillError && <small role="alert">{skillError}</small>}
+              {agent && (member || isLead) && ownsHost && (
+                <>
+                  <button type="button" className="dp-link" aria-expanded={showFeishu}
+                    onClick={() => setShowFeishu(!showFeishu)}>
+                    {showFeishu ? "收起飞书能力" : "配置飞书能力"}
+                  </button>
+                  {showFeishu && <FeishuAccess employee={agent.id} name={agent.name} isLead={isLead} members={members} />}
+                </>
+              )}
               <h3>执行权限</h3>
               <p>审批模式 · {agent?.approval_mode ?? "ask"}</p>
               <p>执行引擎 · {provider}</p>
@@ -339,8 +350,8 @@ export function StaffEditor({ agent, lead, member, engines, onSaved }: Props) {
             </p>
           )}
         </div>
-        <aside className="dp-aside">
-          <h3>汇报关系</h3>
+        <details className="dp-reporting">
+          <summary>汇报关系</summary>
           <div className="dp-chain">
             <div className="dp-chainrow">
               <span className="dp-face blue">
@@ -350,7 +361,7 @@ export function StaffEditor({ agent, lead, member, engines, onSaved }: Props) {
             </div>
             {lead && (member || agent?.id === lead.id) && (
               <div className="dp-chainrow">
-                <Face id={lead.id} />
+                <Face id={lead.id} name={lead.name} />
                 <span>
                   {lead.name}
                   <small>大管家</small>
@@ -359,7 +370,7 @@ export function StaffEditor({ agent, lead, member, engines, onSaved }: Props) {
             )}
             {agent?.id !== lead?.id && (
               <div className="dp-chainrow">
-                <Face id={agent?.id} />
+                <Face id={agent?.id} name={name} />
                 <span>
                   {name || "新员工"}
                   <small>{role}</small>
@@ -367,15 +378,7 @@ export function StaffEditor({ agent, lead, member, engines, onSaved }: Props) {
               </div>
             )}
           </div>
-          {agent && (
-            <>
-              <hr />
-              <Link className="dp-link" href={`/chat?agent=${agent.id}`}>
-                与 {agent.name} 对话
-              </Link>
-            </>
-          )}
-        </aside>
+        </details>
       </div>
       <div className="dp-actions">
         <button

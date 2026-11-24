@@ -1,8 +1,10 @@
 "use client";
+import { STEWARD_MODELS } from "@/lib/agents";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Bot, Box, Compass, Folder, FolderOpen, Scan } from "lucide-react";
-import { request, api, type Engine } from "@/lib/api";
+import { request, type Engine } from "@/lib/api";
+import { AgentPortrait, useAgentImage } from "../chat/AgentImage";
 
 export function FolderField({
   value,
@@ -54,7 +56,7 @@ export function FolderField({
       </label>
       <button
         type="button"
-        className="dp-link"
+        className="dp-link dp-browse"
         disabled={disabled}
         onClick={() => void browse(value)}
       >
@@ -151,38 +153,28 @@ const styles = [
 ];
 export function Face({
   id,
+  name,
   rev,
   big = false,
   preview,
 }: {
   id?: number;
+  name?: string;
   rev?: number;
   big?: boolean;
   preview?: string;
 }) {
-  const [url, setUrl] = useState("");
-  useEffect(() => {
-    let live = true;
-    let owned = "";
-    if (id)
-      api
-        .agentAvatarUrl(id)
-        .then((v) => {
-          owned = v;
-          if (live) setUrl(v);
-          else URL.revokeObjectURL(v);
-        })
-        .catch(() => {});
-    return () => {
-      live = false;
-      if (owned) URL.revokeObjectURL(owned);
-    };
-  }, [id, rev]);
+  const url = useAgentImage(id ?? null, rev);
+  if (id || preview) {
+    return <span className={`dp-face dp-portrait ${big ? "big" : ""}`}>
+      <AgentPortrait agentId={id ?? null} name={name} src={preview || url} size={big ? "lg" : "md"} />
+    </span>;
+  }
   const style = styles[(id ?? 1) % styles.length],
     Icon = style.icon;
   return (
     <span className={`dp-face ${style.color} ${big ? "big" : ""}`}>
-      {preview || url ? <img src={preview || url} alt="" /> : <Icon />}
+      <Icon />
     </span>
   );
 }
@@ -301,8 +293,8 @@ export function StaffModelFields({
   const [custom, setCustom] = useState(false);
   const models = [...(engine?.models ?? [])];
   if (stewardModels && provider === "codex") {
-    for (const [id, label] of [["deepseek-flash", "DeepSeek V4.1 Flash"], ["deepseek-v4-pro", "DeepSeek V4 Pro"]]) {
-      if (!models.some(m => m.id === id)) models.push({ id, label, default: false });
+    for (const item of STEWARD_MODELS) {
+      if (!models.some(m => m.id === item.id)) models.push({ ...item, default: false });
     }
   }
   const customValue = !!model && !models.some((m) => m.id === model);

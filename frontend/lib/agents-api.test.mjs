@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { api, ApiError } from './api.ts';
-import { activeAgents, agentFileHasNotes, agentFileText, agentNames, memoryGauge, tidyLine, modelFromInput, modelLabel, approvalModeLabel, parseAgentFile, redactionNotice } from './agents.ts';
+import { activeAgents, agentFileHasNotes, agentFileText, agentNames, chatModelLabel, memoryGauge, tidyLine, modelFromInput, modelLabel, approvalModeLabel, parseAgentFile, redactionNotice } from './agents.ts';
 
 const originalFetch = globalThis.fetch;
+test('the chat chip names the model selected for this conversation, including the engine default', () => {
+  const engine = { label: 'Codex', default_model: 'gpt-test', models: [{ id: 'gpt-test', label: 'GPT Test' }] };
+  assert.equal(chatModelLabel(engine, 'deepseek-flash', 'Default model'), 'DeepSeek Flash');
+  assert.equal(chatModelLabel(engine, null, 'Default model'), 'GPT Test');
+  assert.equal(chatModelLabel(engine, 'own-model', 'Default model'), 'own-model');
+  assert.equal(chatModelLabel(undefined, null, '默认模型'), '默认模型');
+});
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 function respondJson(status, body) {

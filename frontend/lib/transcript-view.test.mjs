@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { announcement, groupToolRuns, spokenText, toolRunSummary } from "./transcript-view.ts";
+import { announcement, usageByMessage, groupToolRuns, spokenText, toolRunSummary } from "./transcript-view.ts";
 
 const tool = (n, state = "done") => ({ kind: "tool", key: `t${n}`, state });
 const other = (kind, key, extra = {}) => ({ kind, key, ...extra });
@@ -52,4 +52,11 @@ test("spoken text drops Markdown marks and code but keeps link words", () => {
   const nl = String.fromCharCode(10);
   assert.equal(spokenText(["## Plan", "", "A **bold** step with `code` and [a link](https://x.test).", "", "- one", "- two"].join(nl)), "Plan A bold step with code and a link. one two");
   assert.equal(spokenText(["Run:", "```bash", "rm -rf /", "```", "done"].join(nl)), "Run: code block done");
+});
+
+test("usage attaches once to the last reply of its own turn; tool-only totals stay on that turn", () => {
+  const usage = { input_tokens: 0 };
+  const items = [other("assistant","a",{turnId:1,text:"first"}), other("assistant","b",{turnId:1,text:"last"}),
+    other("turn_end","endOther",{turnId:2,usage}), other("turn_end","end1",{turnId:1,usage})];
+  assert.deepEqual([...usageByMessage(items)], [["endOther",usage],["b",usage]]);
 });

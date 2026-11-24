@@ -9,6 +9,7 @@ import { useT } from "@/lib/use-i18n";
 import { relativeTime } from "@/lib/relative-time";
 import { rowStatus, type RowStatus } from "@/lib/sidebar";
 import { Avatar } from "@/components/ui/Avatar";
+import { AgentImage } from "@/components/chat/AgentImage";
 import { Button } from "@/components/ui/Button";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { StatusDot } from "./StatusDot";
@@ -120,7 +121,7 @@ export function ThreadRow({
           archived && "opacity-60",
         )}
       >
-        <Avatar agentId={thread.agent_id ?? null} name={agentName} size="md" />
+        {thread.agent_id != null ? <AgentImage agentId={thread.agent_id} name={agentName} /> : <Avatar agentId={null} />}
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1.5">
             <span className={cn("min-w-0 flex-1 truncate", unread ? "font-semibold" : "font-medium")}>{thread.title || t("sidebar.untitled")}</span>

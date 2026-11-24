@@ -5,6 +5,7 @@ import time
 from urllib.parse import quote
 
 import httpx
+from app.core.steward_timing import PATROL_SECONDS
 from .routing import enqueue
 
 CHOICES = {'采纳':'approve','稍后':'defer','忽略':'dismiss','跳过':'dismiss','later':'defer','skip':'dismiss'}
@@ -15,6 +16,14 @@ def initialize(db):
     db.execute("""create table if not exists suggestion_offers(
         id text, revision integer, outgoing text unique not null, decision_event text,
         choice text, options text, state text not null default 'offered', primary key(id,revision))""")
+    db.execute("""create table if not exists suggestion_delivery_clock(
+        singleton integer primary key check(singleton=1), sent real not null)""")
+
+
+def delivered(db, outgoing):
+    """Called in the same transaction as the successful outgoing receipt."""
+    db.execute("""insert or replace into suggestion_delivery_clock(singleton,sent)
+        select 1,? from suggestion_offers where outgoing=?""", (time.time(), outgoing))
 
 
 def offered_options(item):
@@ -22,13 +31,23 @@ def offered_options(item):
             if isinstance(option,dict) and option.get('id') in ('brief','followup') and isinstance(option.get('label'),str)][:2]
 
 
-def poll(worker):
+def poll(worker, *, wall_now=None):
     if not worker.cfg.get('proactive_suggestions',False):
         return
     now = time.monotonic()
     if now < getattr(worker,'next_offer_poll',0):
         return
     worker.next_offer_poll = now + 60
+    # Reuse old journal timestamps on upgrade. If delivery had to retry, the
+    # owner's quiet period starts when Feishu actually accepted the last offer.
+    last, pending = worker.db.execute("""select max(mark),max(pending) from (
+        select max(o.created) as mark,max(o.state='pending') as pending from suggestion_offers s
+        join outbox o on o.id=s.outgoing
+        union all select sent,0 from suggestion_delivery_clock)""").fetchone()
+    if pending:
+        return
+    if last is not None and (time.time() if wall_now is None else wall_now) < last + PATROL_SECONDS:
+        return
     try:
         response = worker.api.get('steward/suggestions',timeout=5)
         response.raise_for_status()

@@ -65,3 +65,21 @@ export function announcement(items: readonly AnnounceItem[]): { key: string; tex
   }
   return null;
 }
+
+
+// Show the engine's total once, on the last visible reply from the matching turn.
+// Tool-only turns keep their usage at the completion event.
+export function usageByMessage(items: readonly {
+  key: string; kind: string; turnId?: number | null; text?: string; usage?: Record<string, unknown> | null;
+}[]) {
+  const replies = new Map<number, string>();
+  const usage = new Map<string, Record<string, unknown>>();
+  for (const item of items) {
+    if (item.kind === "assistant" && item.text && item.turnId != null) replies.set(item.turnId, item.key);
+    if (item.kind === "turn_end" && item.usage) {
+      const key = item.turnId != null ? replies.get(item.turnId) : undefined;
+      usage.set(key ?? item.key, item.usage);
+    }
+  }
+  return usage;
+}

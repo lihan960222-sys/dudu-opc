@@ -1,3 +1,4 @@
+import { translate } from "./i18n.ts";
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { api, searchQuery } from './api.ts';
@@ -54,9 +55,13 @@ test('highlights count characters, so an emoji before a match does not shift the
 });
 
 test('usage text says "not reported" instead of inventing numbers', () => {
-  assert.equal(turnUsageText(null), 'Usage not reported');
-  assert.equal(turnUsageText({}), 'Usage not reported');
-  assert.equal(turnUsageText({ input_tokens: 1200, output_tokens: 34 }), '1.2k in · 34 out · cost not reported');
+  assert.equal(turnUsageText(null), '');
+  assert.equal(turnUsageText({}), '');
+  assert.equal(turnUsageText({input_tokens:386, output_tokens:127}, (key, p) => translate('zh', key, p)), '输入 386 · 输出 127');
+  assert.equal(turnUsageText({cache_creation_input_tokens:0,cost_usd:0}), '0 cached · $0.00');
+  assert.equal(turnUsageText({ provider_extra: true }), '');
+  assert.match(turnUsageText({ input_tokens: 0 }), /0 in/);
+  assert.equal(turnUsageText({ input_tokens: 1200, output_tokens: 34 }), '1.2k in · 34 out');
   assert.equal(
     turnUsageText({ input_tokens: 3, output_tokens: 2, cache_read_input_tokens: 5000, cost_usd: 0.0012 }),
     '3 in · 2 out · 5.0k cached · $0.0012'

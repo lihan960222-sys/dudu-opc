@@ -28,6 +28,10 @@ export type SessionInfo = {
 
 export type PersonRole = "owner" | "admin" | "member" | "viewer";
 
+export function canOpenWorkbench(session: SessionInfo | null): boolean {
+  return !!session?.scopes.includes("admin") && (!session.person_id || session.role === "owner");
+}
+
 // The invitation arrives in the URL fragment (#token=…&email=…), which never reaches a server log.
 export function inviteFromHash(hash: string): { token: string; email: string } | null {
   const params = new URLSearchParams(hash.replace(/^#/, ""));

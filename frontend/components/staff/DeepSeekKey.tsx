@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { ChevronRight } from "lucide-react";
 import { request } from "@/lib/api";
 
 const endpoint = "/staff/deepseek-key";
 
 export function DeepSeekKey() {
   const [configured, setConfigured] = useState<boolean | null>(null);
+  const [open, setOpen] = useState(false);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -29,6 +31,7 @@ export function DeepSeekKey() {
       });
       setConfigured(result.configured);
       setKey("");
+      setOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "密钥验证失败。");
     } finally {
@@ -37,21 +40,29 @@ export function DeepSeekKey() {
   }
 
   return (
-    <div className="dp-fields">
+    <div className="dp-key">
+      <button type="button" className="dp-key-toggle" aria-expanded={open} disabled={busy}
+        onClick={() => { setOpen(!open); if (open) setKey(""); }}>
+        <ChevronRight aria-hidden="true" />管理 DeepSeek 密钥
+        <span className={configured == null ? "dp-key-state" : configured ? "dp-status" : "dp-status pending"} role="status">
+          {configured == null ? (error ? "状态未知" : "读取中") : configured ? "已配置" : "未配置"}
+        </span>
+      </button>
+      {open && <div className="dp-fields">
       <label className="dp-field">
         <span>管家的 DeepSeek API Key</span>
         <input className="dp-input" type="password" value={key} autoComplete="off"
           maxLength={512} disabled={busy} onChange={e => setKey(e.target.value)}
           placeholder={configured ? "输入新密钥可替换" : "输入 DeepSeek API Key"} />
       </label>
-      <div className="dp-actions">
+      <div>
         <button type="button" className="dp-button" disabled={!key.trim() || busy} onClick={() => void save()}>
           {busy ? "正在验证…" : "验证并保存密钥"}
         </button>
-        <small role="status">{configured === null ? "" : configured ? "主机已配置密钥" : "主机尚未配置密钥"}</small>
       </div>
-      {error && <p role="alert" className="dp-error">{error}</p>}
       <small>保存员工资料后，管家发起的新模型请求会使用 DeepSeek。</small>
+      </div>}
+      {error && <p role="alert" className="dp-error">{error}</p>}
     </div>
   );
 }

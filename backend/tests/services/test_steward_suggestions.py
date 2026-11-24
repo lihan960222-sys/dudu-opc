@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.auth.policy import required_scope
 from app.db.base import Base
 from app.db.engine import create_app_async_engine
-from app.db.models import WorkColumn, WorkItem, WorkItemEvent
+from app.db.models import AppSetting, StewardSuggestion, WorkColumn, WorkItem, WorkItemEvent
 from app.routers.steward_suggestions import router
 from app.routers.threads import get_runtime
 from app.services import agent_store, steward_suggestions, work_planner
@@ -42,6 +43,39 @@ async def state(tmp_path):
 
 
 BASE = "/steward/suggestions"
+
+
+async def test_two_hour_patrol_survives_restart_and_list_reads(state):
+    sessions, client, _, first, _, cols = state
+    start = datetime(2030, 1, 1, tzinfo=UTC)
+    async def tick(at):
+        async with sessions() as db:
+            return await steward_suggestions.scan(db, "boss", now=at)
+
+    assert await tick(start) == 7200
+    async with sessions() as db:
+        board = await work_planner.default_board(db, "boss")
+        second = await work_planner.create_item(db, "boss", dict(board_id=board.id,
+            column_id=cols["waiting"], title="Second observation"))
+    assert await tick(start + timedelta(seconds=7199)) == 1
+    assert [s["task_id"] for s in (await client.get(BASE)).json()["items"]] == [first]
+    assert await asyncio.gather(*(tick(start + timedelta(hours=2)) for _ in range(2))) == [7200,7200]
+    assert {s["task_id"] for s in (await client.get(BASE)).json()["items"]} == {first,second.id}
+    # Coming back after a long outage does one review and starts a new interval.
+    assert await tick(start + timedelta(days=1)) == 7200
+    assert await tick(start + timedelta(days=1,seconds=10)) == 7190
+
+
+async def test_first_upgrade_uses_last_known_legacy_observation(state):
+    sessions, client, *_ = state
+    await scan(sessions)
+    async with sessions() as db:
+        old = await db.scalar(select(StewardSuggestion.created_at))
+        await db.delete(await db.get(AppSetting,"internal.steward.patrol.boss"))
+        await db.commit()
+    async with sessions() as db:
+        assert await steward_suggestions.scan(db,"boss",now=old+timedelta(minutes=30)) == 5400
+    assert len((await client.get(BASE)).json()["items"]) == 1
 
 
 async def scan(sessions):
