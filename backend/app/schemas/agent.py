@@ -161,6 +161,8 @@ class AgentResponse(BaseModel):
     # agent's id, under the default workspace root.
     workspace_path: str | None
     role_path: str | None = None
+    manager_agent_id: int | None = None
+    can_staff_team: bool = False
     approval_mode: ApprovalMode
     pinned: bool
     memory_enabled: bool

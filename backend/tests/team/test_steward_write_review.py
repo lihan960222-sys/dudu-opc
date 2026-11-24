@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.db.models import AgentJob, AgentJobInbox
+from app.db.models import AgentJob, AgentJobEvent, AgentJobInbox
 from app.services import agent_store, feature_tasks, thread_store
 from app.team import service, steward_review
 from app.team.jobs import Jobs
@@ -35,12 +35,15 @@ async def test_exact_write_is_reviewed_by_assigning_steward(sessions, owner, tmp
         job.requester_thread_id,job.requester_turn_id=lead_thread.id,lead_turn.id
         job.status,job.reply,job.current_turn_id="running","resume",turn.id
         ap=await thread_store.create_approval(db,thread_id=thread.id,turn_id=turn.id,request_id="w",
-            tool="feature_files.write_text",input={"path":"report.txt","text":"sample"})
+            tool="feature_files.write_text",input={"path":"结果.txt","text":"结果已核对，待领取。"})
         shown=await steward_review.preview(db,owner,job,ap)
-        assert shown and shown["text"]=="sample"
+        assert shown and shown["text"]=="结果已核对，待领取。"
         staff.approval_mode="ask"
         assert await steward_review.preview(db,owner,job,ap) is None
         staff.approval_mode="accept_edits"
+        staff.manager_agent_id=staff.id
+        assert await steward_review.preview(db,owner,job,ap) is None
+        staff.manager_agent_id=lead.id
         await db.commit()
 
     run=NS(agent_id=lead.id,thread_id=lead_thread.id,turn_id=lead_turn.id,owner_token=lead_turn.owner_token,ctx=NS(approval_mode="ask"))
@@ -68,3 +71,17 @@ async def test_exact_write_is_reviewed_by_assigning_steward(sessions, owner, tmp
             assert record["source"] == "person" and record["escalated"] and record["decision"] == "denied"
         else:
             assert (await steward_review.history(db,job))[0]["source"]=="steward"
+
+    async with sessions() as db:
+        delivered = await thread_store.mark_allow_delivered(db,ap.id,turn.owner_token)
+        assert delivered == (decision == "allow")
+        if delivered:
+            from app.services.feature_files import FeatureFiles
+            FeatureFiles(root).call("write_text",ap.input)
+            assert (root/"结果.txt").read_text("utf-8") == "结果已核对，待领取。"
+            assert not await thread_store.mark_allow_delivered(db,ap.id,turn.owner_token)
+        else:
+            assert not (root/"结果.txt").exists()
+        event = await db.scalar(select(AgentJobEvent).where(AgentJobEvent.job_id==job.id,
+            AgentJobEvent.kind.in_(("steward_review","review_escalated"))))
+        assert event.detail["approval_id"] == ap.id and event.detail["decision"] == decision

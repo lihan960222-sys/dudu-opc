@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 from sqlalchemy import select
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
@@ -24,6 +24,7 @@ from app.routers.feishu_owner_oauth import owner_browser
 from app.services import agent_store, image_gen, role_workspace, steward_deepseek
 from app.services.local_access_policy import require_local_access
 from app.services.thread_runtime import ThreadRuntime
+from app.team import service as team_service
 from app.team.setup import public_plan, request_version
 
 
@@ -36,6 +37,30 @@ def local_owner(request: Request):
 
 router = APIRouter(prefix="/staff", dependencies=[Depends(require_local_access), Depends(local_owner)])
 router.include_router(feishu_access_router)
+
+
+class StaffingGrant(BaseModel):
+    can_staff_team: StrictBool
+
+
+@router.patch("/{agent_id}/staffing", dependencies=[Depends(owner_browser)])
+async def set_staffing_grant(agent_id: int, grant: StaffingGrant, rt: ThreadRuntime = Depends(get_runtime)):
+    async with rt.session() as db:
+        await begin_write(db)
+        team = await team_service.team_for(db, rt.owner_id, lock=True)
+        if not team or team.lead_agent_id != agent_id:
+            raise HTTPException(409, "只有当前大管家可以获得招人授权。")
+        agent = await db.scalar(select(agent_store.Agent).where(
+            agent_store.Agent.id == agent_id, agent_store.Agent.owner_id == rt.owner_id,
+            agent_store.Agent.team_id == team.id, agent_store.Agent.archived_at.is_(None)
+        ).with_for_update())
+        if agent is None:
+            raise HTTPException(404, "未找到大管家。")
+        if agent.can_staff_team != grant.can_staff_team:
+            agent.can_staff_team = grant.can_staff_team
+            team_service.audit(db, team, "staffing_granted" if grant.can_staff_team else "staffing_revoked", agent_id=agent.id)
+        await db.commit()
+        return {"can_staff_team": grant.can_staff_team}
 
 
 @router.get("/deepseek-key", dependencies=[Depends(owner_browser)])

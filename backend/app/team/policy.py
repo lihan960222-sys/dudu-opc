@@ -34,7 +34,19 @@ def automatic(tool, mode, team, arguments):
     if team is None:
         return 'denied', 'no_team'
     name = tool.removeprefix('mcp__team__')
+    if name == 'propose_direct_report':
+        if team.feature_consult and team.strict_hierarchy and team.delegation_enabled and mode != 'plan' and team.origin == 'person':
+            return 'allowed','staff_proposal'
+        return 'denied','outside_staff_scope'
+    if name == 'review_direct_report':
+        if team.is_lead and team.strict_hierarchy and team.delegation_enabled and mode != 'plan' and team.origin == 'person':
+            return 'allowed','staff_review'
+        return 'denied','outside_staff_scope'
     if team.feature_consult:
+        if name == 'answer_job_question' and team.delegation_enabled and mode != 'plan':
+            return 'allowed', 'direct_report_clarification'
+        if name == 'delegate' and team.delegation_enabled and mode != 'plan' and arguments.get('mode','work') == 'work':
+            return 'allowed', 'direct_report_assignment'
         if team.delegation_enabled and (name == 'list_agents' or
                 (name == 'ask_agent' and arguments.get('mode') == 'consult')):
             return 'allowed', 'project_consult'

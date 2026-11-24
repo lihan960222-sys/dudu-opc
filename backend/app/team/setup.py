@@ -40,7 +40,10 @@ def revision(agent):
 
 def full_hash(agent):
     """Hash of everything that matters to undo: any later edit makes undo stale."""
-    return digest({f: getattr(agent, f) for f in HASHED})
+    fields = {f: getattr(agent, f) for f in HASHED}
+    if agent.manager_agent_id is not None or agent.can_staff_team:
+        fields.update(manager_agent_id=agent.manager_agent_id, can_staff_team=agent.can_staff_team)
+    return digest(fields)
 
 
 def snapshot(agent):
@@ -456,7 +459,7 @@ async def revise_pending(db, owner, request_id, version, plan, *, check_engine):
     operations = await validate(db, owner, team, caller, executable, turn_id=row.turn_id, check_engine=check_engine, reviewed_workspace=True)
     card_plan = review_plan(safe_plan, operations)
     next_version = current_version + 1
-    row.plan = {**card_plan, '_request_digest': (row.plan or {}).get('_request_digest', digest(public_plan(row.plan))), '_version': next_version}
+    row.plan = {**card_plan, **({k:v for k,v in row.plan.items() if k in ('_manager','_owner_review','_origin_job')}), '_request_digest': (row.plan or {}).get('_request_digest', digest(public_plan(row.plan))), '_version': next_version}
     row.result = {'version': next_version}
     from app.services import thread_store
     await thread_store.add_event_in_transaction(db, row.thread_id, 'team.setup.proposed',
@@ -488,7 +491,23 @@ async def decide_pending(db, owner, request_id, version, *, approve, check_engin
             plan = executable_plan(public_plan(row.plan))
             _guided_plan(plan)
             operations = await validate(db, owner, team, caller, plan, turn_id=row.turn_id, check_engine=check_engine, reviewed_workspace=True)
+            manager = None
+            if '_manager' in row.plan:
+                from app.team.staff_hiring import checked_manager
+                manager = await checked_manager(db,owner,team,caller,row.plan)
+                if len(operations)!=1 or operations[0]['op']!='create':
+                    raise TeamError('invalid_plan','A subordinate proposal can only create one read-only employee.')
             results, undo_data = await _apply_operations(db, owner, caller, team, row.turn_id, row.thread_id, operations, check_engine, cleanup)
+            if manager:
+                child = await db.get(Agent,results[0]['agent_id'])
+                child.manager_agent_id = manager.id
+                child.approval_mode = 'plan'
+                child.delegation_enabled = False
+                await db.flush()
+                undo_data['created'][0]['hash'] = full_hash(child)
+                results[0]['manager_agent_id'] = manager.id
+                results[0]['approval_mode'] = 'plan'
+                results[0]['changes'] = changes({}, {**snapshot(child), 'workspace_path':child.workspace_path, 'approval_mode':'plan'})
             result = {'results': results, 'model_note': 'New conversations use the saved model defaults. Existing conversations retain their model.',
                       'capability_note': 'App connections, skills, computers and routines require their own setup.'}
             row.state, row.result, row.undo, row.decided_at = 'applied', result, undo_data, now()
@@ -498,6 +517,9 @@ async def decide_pending(db, owner, request_id, version, *, approve, check_engin
             row.state, row.result, row.decided_at = 'rejected', {'version': current_version}, now()
             event_data = {'request_id': row.request_id, 'version': current_version, 'state': 'rejected'}
             event_type = 'team.setup.dismissed'
+        if '_origin_job' in row.plan:
+            from app.team.staff_hiring import notify_requesting_job
+            await notify_requesting_job(db, row)
         from app.services import thread_store
         await thread_store.add_event_in_transaction(db, row.thread_id, event_type, event_data)
         await db.commit()

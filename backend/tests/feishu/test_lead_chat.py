@@ -93,3 +93,50 @@ async def test_assignment_receipt_cannot_forward_invented_approval(tmp_path, ses
             assert await register_report(worker, row, {'result':'你得去他的会话批准，否则会超时。'})
         bodies = [json.loads(r[0]) for r in channel.execute('select body from outbox')]
         assert bodies == [{'text':'已交给 Jensen，有结果我在这里回复。','reply_to':'om_test'}]
+
+
+@pytest.mark.asyncio
+async def test_escalated_hire_notifies_original_steward_message_once(tmp_path, sessions, owner, monkeypatch):
+    from contextlib import closing
+    import json
+    from types import SimpleNamespace
+    from app.core.config import settings
+    from app.db.models import TeamSetupRequest
+    from app.feishu.lead_chat import publish_reports
+    from app.feishu.routing import journal
+    monkeypatch.setattr(session, 'AsyncSessionLocal', sessions)
+    monkeypatch.setattr(settings, 'SUPARAGENT_PUBLIC_URL', 'https://home.example.ts.net')
+    async with sessions() as db:
+        lead = await agent_store.create_agent(db, owner_id=owner, name='大嘴', make_lead=True)
+        manager = await agent_store.create_agent(db, owner_id=owner, name='Jensen')
+        fields = dict(owner_id=owner, requester_agent_id=lead.id, requester_thread_id=7,
+                      requester_turn_id=20, brief='需要下属', brief_hash='demo', status='waiting')
+        root = AgentJob(**fields, assignee_agent_id=lead.id, kind='root')
+        db.add(root)
+        await db.flush()
+        job = AgentJob(**fields, assignee_agent_id=manager.id, kind='job', parent_id=root.id, root_id=root.id)
+        db.add(job)
+        await db.flush()
+        plan = {'_origin_job': job.id, '_manager': manager.id, '_version': 1, 'summary': 'https://wrong.example'}
+        hire = TeamSetupRequest(owner_id=owner, team_id=lead.team_id, lead_agent_id=lead.id, thread_id=7,
+                                turn_id=20, request_id='hire-test', kind='setup', state='pending', plan=plan)
+        db.add(hire)
+        await db.commit()
+    with closing(journal(tmp_path/'channel')) as channel:
+        channel.execute('create table direct_turns(app text,event text,thread integer,turn integer)')
+        channel.execute("insert into direct_turns values('app','e',7,20)")
+        channel.execute("insert into inbox(app,event,message) values('app','e','om_original')")
+        channel.execute("insert into direct_team_reports(app,event,job) values('app','e',?)", (root.id,))
+        worker = SimpleNamespace(cfg={'owner_id': owner, 'steward': {'agent_id': lead.id, 'app_id': 'app'}}, db=channel)
+        await publish_reports(worker)
+        assert not channel.execute('select 1 from outbox').fetchall()
+        async with sessions() as db:
+            stored = await db.get(TeamSetupRequest, hire.id)
+            stored.plan = {**plan, '_owner_review': True}
+            await db.commit()
+        await publish_reports(worker)
+        await publish_reports(worker)
+        bodies = [json.loads(row[0]) for row in channel.execute('select body from outbox')]
+        assert len(bodies) == 1 and bodies[0]['reply_to'] == 'om_original'
+        assert 'https://home.example.ts.net/chat?thread=7' in bodies[0]['text']
+        assert 'wrong.example' not in bodies[0]['text']

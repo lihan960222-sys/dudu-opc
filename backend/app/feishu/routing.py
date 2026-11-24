@@ -22,6 +22,8 @@ def journal(path):
     create table if not exists direct_team_reports(
         app text,event text,job integer unique,question text,finished integer default 0,checked integer default 0,
         primary key(app,event));
+    create table if not exists direct_hiring_notices(
+        app text,event text,request text,primary key(app,event,request));
     create table if not exists owner_readwrite_requests(
         app text,event text,message text,owner text,tenant text,primary key(app,event));
     create table if not exists private_voice(

@@ -77,3 +77,34 @@ async def test_http_profile_and_owner_scope(sessions, owner, rt, cli, tmp_path, 
             person.owner_id = "another-owner"
             await db.commit()
         assert (await client.get(endpoint)).status_code == 404
+
+@pytest.mark.asyncio
+async def test_staffing_grant_is_owner_browser_only_and_only_for_current_lead(rt, cli, sessions, owner, monkeypatch):
+    from app.auth.policy import Principal
+    from app.core.config import settings
+    from app.routers.staff import router
+    from app.services import agent_store
+    from tests.routers.test_agents_api import app_for, client_for
+
+    monkeypatch.setattr(settings, "LOCAL_EXECUTION_ENABLED", True)
+    async with sessions() as db:
+        lead = await agent_store.create_agent(db, owner_id=owner, name="Lead", provider="codex", make_lead=True)
+        peer = await agent_store.create_agent(db, owner_id=owner, name="Peer", provider="codex")
+    app = app_for(rt)
+    app.include_router(router, prefix="/api/v1")
+    principal = Principal(kind="device", session_id=71)
+    @app.middleware("http")
+    async def auth(request, next_handler):
+        request.state.auth = principal
+        return await next_handler(request)
+    async with client_for(app) as client:
+        def grant(agent_id, enabled=True):
+            return client.patch(f"/api/v1/staff/{agent_id}/staffing", json={"can_staff_team":enabled})
+        assert (await grant(lead.id)).status_code == 403
+        principal = Principal(kind="browser", role="member", person_id=2, session_id=72)
+        assert (await grant(lead.id)).status_code == 403
+        principal = Principal(kind="browser", role="owner", session_id=73)
+        assert (await grant(peer.id)).status_code == 409
+        assert (await grant(lead.id)).json() == {"can_staff_team":True}
+        assert (await client.get(f"/api/v1/agents/{lead.id}")).json()["can_staff_team"] is True
+        assert (await grant(lead.id, False)).json() == {"can_staff_team":False}

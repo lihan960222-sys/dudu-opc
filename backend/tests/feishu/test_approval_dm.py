@@ -91,5 +91,18 @@ async def test_active_delegated_approval_reaches_steward_once(sessions, owner, t
             messages = channel.execute("select role,body from outbox").fetchall()
             assert len(messages) == 1 and messages[0]["role"] == "steward"
             assert "Employee" in messages[0]["body"] and "report.txt" in messages[0]["body"]
+            junior = await agent_store.create_agent(db, owner_id=owner, name="Junior")
+            await change_member(db, owner, junior.id)
+            junior.manager_agent_id = staff.id
+            subordinate_thread = await store.create_thread(db, owner_id=owner, agent_id=junior.id, provider="codex", workspace_path=str(tmp_path))
+            subordinate_turn = await store.start_turn(db, subordinate_thread.id, "nested work")
+            await store.create_approval(db, thread_id=subordinate_thread.id, turn_id=subordinate_turn.id,
+                request_id="b", tool="feature_files.write_text", input={"path":"nested.txt","text":"draft"})
+            db.add(AgentJob(owner_id=owner, requester_agent_id=staff.id, requester_thread_id=thread.id,
+                requester_turn_id=turn.id, assignee_agent_id=junior.id, assignee_thread_id=subordinate_thread.id,
+                assignee_turn_id=subordinate_turn.id, brief="nested", brief_hash="y", status="running"))
+            await db.commit()
+            await approvals.collect_team_requests(worker)
+            assert channel.execute("select count(*) from outbox").fetchone()[0] == 1
         finally:
             channel.close()

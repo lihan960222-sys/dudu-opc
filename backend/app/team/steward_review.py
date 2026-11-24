@@ -26,6 +26,7 @@ async def preview(db, owner, job, approval):
     lead = await db.get(Agent, job.requester_agent_id, with_for_update=True)
     if (not team or not worker or not lead or lead.id != team.lead_agent_id or lead.id == worker.id
             or any(a.team_id != team.id or a.owner_id != owner or a.archived_at for a in (worker,lead))
+            or worker.manager_agent_id not in (None, lead.id)
             or not lead.delegation_enabled or worker.approval_mode != 'accept_edits' or not worker.role_path):
         return None
     thread = await db.get(Thread, approval.thread_id)
@@ -35,6 +36,7 @@ async def preview(db, owner, job, approval):
     binding = await db.get(FeatureSession, approval.thread_id)
     if (not parent or parent.owner_id != owner or parent.agent_id != lead.id or parent.kind != 'chat'
             or parent.archived_at or parent.room_id or parent.job_id or not original or original.person_id is not None
+            or original.thread_id != parent.id
             or not thread or thread.kind != 'feature' or thread.archived_at or thread.owner_id != owner
             or thread.agent_id != worker.id or not card or card.owner_id != owner or card.agent_id != worker.id
             or card.archived or card.completed_at or card.thread_id != thread.id or not binding or binding.task_id != card.id):

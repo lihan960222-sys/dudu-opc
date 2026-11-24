@@ -186,6 +186,7 @@ async def update_agent(
         from app.team.service import team_for, audit
         team = await team_for(db, agent.owner_id, lock=True)
         if team is not None and team.lead_agent_id == agent.id:
+            agent.can_staff_team = False
             team.lead_agent_id = None
             team.updated_at = _utcnow()
             audit(db, team, 'lead_removed', agent_id=agent.id)
@@ -299,6 +300,8 @@ async def _leave_team(db: AsyncSession, agent: Agent) -> None:
     if team is not None and team.lead_agent_id == agent.id:
         team.lead_agent_id = None
         team.updated_at = _utcnow()
+    from app.team.service import release_reports
+    await release_reports(db,agent)
     agent.team_id = None
 
 

@@ -6,6 +6,7 @@ import os
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 import shutil
+import sqlite3
 import threading
 import time
 from uuid import uuid4
@@ -111,6 +112,7 @@ async def test_feishu_deepseek_lead_delegates_to_gpt_and_receives_report(tmp_pat
         (home/'auth.json').write_text(json.dumps({'OPENAI_API_KEY':'sk-local-fixture'}))
         (home/'config.toml').write_text('openai_base_url="'+origin+'/gpt"\nanalytics.enabled=false\n','utf-8')
         monkeypatch.setenv('CODEX_HOME',str(home))
+        monkeypatch.setenv('CODEX_SQLITE_HOME',str(home))
         monkeypatch.setenv('OPENAI_BASE_URL',origin+'/gpt')
         monkeypatch.setenv('OPENAI_API_KEY','sk-local-fixture')
         monkeypatch.setattr(codex_adapter,'DEEPSEEK_BASE_URL',origin+'/deep/')
@@ -218,6 +220,9 @@ async def test_feishu_deepseek_lead_delegates_to_gpt_and_receives_report(tmp_pat
             specialist=await db.get(Thread,child.assignee_thread_id)
             assert specialist.provider_state.get("service_history")
             assert not list((home/"sessions").rglob("rollout-*.jsonl"))
+            for index in home.glob("state_*.sqlite"):
+                with sqlite3.connect(index.as_uri() + "?mode=ro", uri=True) as desktop:
+                    assert desktop.execute("select count(*) from threads").fetchone() == (0,)
             assert specialist.agent_id==staff.id and specialist.model=='gpt-6.2-sol'
             inbox=await db.scalar(select(AgentJobInbox).where(AgentJobInbox.job_id==child.id))
             assert inbox and inbox.delivered_at

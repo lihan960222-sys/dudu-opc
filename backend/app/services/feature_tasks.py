@@ -165,7 +165,9 @@ async def dispatch(db, *, owner_id, steward_id, task_id, event_key, thread_id):
             or not item or item.owner_id != owner_id or item.thread_id != thread_id
             or receipt.agent_id != item.agent_id or receipt.agent_id == lead.id):
         raise ValueError("Dispatch does not belong to this specialist task")
-    await service.member(db, owner_id, receipt.agent_id, team_id=team.id)
+    specialist = await service.member(db, owner_id, receipt.agent_id, team_id=team.id)
+    if specialist.manager_agent_id not in (None, lead.id):
+        raise ValueError("派工需要由这名员工的直属主管发起。")
     if receipt.result.get("job_id"):
         return receipt.result["job_id"]
     scope = await db.get(FeatureScope, task_id)
@@ -218,6 +220,7 @@ async def bind_turn(db, owner_id, event_key, thread_id, turn_id):
     if assigned:
         raise ValueError("This turn already belongs to another dispatch")
     job.assignee_turn_id = turn_id
+    message.result = {**message.result, "submitted_turn_id": turn_id}
     item = await db.get(WorkItem, message.result["task_id"], with_for_update=True)
     item.column_id = await db.scalar(select(WorkColumn.id).where(WorkColumn.board_id == item.board_id,
                                                                  WorkColumn.key == "doing"))
@@ -338,8 +341,9 @@ async def submission(db, thread, key, prompt, attachment_ids, *, reserve=False):
     saved = receipt.result.get("submission_sha256")
     if saved and saved != digest:
         raise DispatchConflict("The dispatch was already submitted with different input.")
-    if job.assignee_turn_id is not None:
-        turn = await db.get(Turn, job.assignee_turn_id)
+    submitted_turn_id = receipt.result.get("submitted_turn_id", job.assignee_turn_id)
+    if submitted_turn_id is not None:
+        turn = await db.get(Turn, submitted_turn_id)
         if not turn or turn.thread_id != thread.id or not saved:
             raise DispatchConflict("Legacy dispatch needs reconciliation.")
         return turn
@@ -364,7 +368,7 @@ async def consult_scope(db, owner_id, team, caller, turn, thread):
                WorkItem.archived.is_(False), WorkItem.completed_at.is_(None),
                AgentJob.owner_id == owner_id, AgentJob.assignee_turn_id == turn.id,
                AgentJob.assignee_thread_id == thread.id, AgentJob.assignee_agent_id == caller.id,
-               AgentJob.requester_agent_id == team.lead_agent_id, AgentJob.status.in_(("dispatched", "running")),
+               AgentJob.requester_agent_id == (caller.manager_agent_id or team.lead_agent_id), AgentJob.status.in_(("dispatched", "running")),
                AgentJob.project == FeatureScope.project))).one_or_none()
     if row is None:
         raise TeamError("consult_scope", "No active steward dispatch was found for this task.")
@@ -507,14 +511,14 @@ async def protocol(db, owner_id, task_id, *, owner_handoff=False):
         "version": scope.version, "related_task_id": scope.related_id, "thread_id":item.thread_id}
 
 
-async def attach_command(db, job, args):
+async def attach_command(db, job, args, *, subtask=False):
     """Attach a native lead delegate receipt to a durable planner card in the enqueue transaction."""
     key = f"team-job-{job.id}"
     title = args.get("task_title") or job.brief.splitlines()[0][:200]
     if not isinstance(title,str) or not title.strip() or len(title)>200:
         raise ValueError("A work assignment needs a short task title.")
     result = await route(db, owner_id=job.owner_id, agent_id=job.assignee_agent_id,
-        project=args["project"].strip(), event_key=key, title=title, text=job.brief,
+        project=args["project"].strip(), event_key=key, title=title, text=job.brief, intent="independent" if subtask else "deliver",
         version=args.get("version",""), acceptance=job.done_when or "", reference_id=args.get("task_id"),
         dependencies=args.get("dependencies",[]), deliverables=args.get("deliverables",[]),
         priority=args.get("priority","normal"))
@@ -554,9 +558,18 @@ async def command_thread(db, owner_id, job):
     from app.team import service
     await begin_write(db)
     team = await service.team_for(db, owner_id,lock=True)
-    if not team or team.lead_agent_id != job.requester_agent_id or job.owner_id != owner_id:
+    if not team or job.owner_id != owner_id:
         raise ValueError("The current steward no longer owns this dispatch.")
     agent = await service.member(db,owner_id,job.assignee_agent_id,team_id=team.id)
+    requester = await service.member(db,owner_id,job.requester_agent_id,team_id=team.id)
+    if not requester.delegation_enabled or (agent.manager_agent_id or team.lead_agent_id) != requester.id:
+        raise ValueError("The reporting relationship changed.")
+    if requester.id != team.lead_agent_id:
+        parent = await db.get(AgentJob, job.parent_id) if job.parent_id else None
+        if not (parent and parent.owner_id == owner_id and parent.assignee_agent_id == requester.id
+                and parent.assignee_thread_id == job.requester_thread_id and parent.project == job.project
+                and parent.status in ("running","waiting","needs_input") and job.approval_mode == "plan"):
+            raise ValueError("The parent assignment is no longer active.")
     root=checked_root(Path(agent.role_path))
     model=load(root, agent.model).model
     folder=root/"任务"/str(job.task_id)

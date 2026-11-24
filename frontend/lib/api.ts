@@ -482,6 +482,8 @@ export type ClaudeAccount = { id: string; label: string; created_at: string | nu
 
 export type Agent = {
   id: number;
+  manager_agent_id?: number | null;
+  can_staff_team?: boolean;
   name: string;
   // A short role line and a longer description; neither is sent to Claude.
   title?: string | null;

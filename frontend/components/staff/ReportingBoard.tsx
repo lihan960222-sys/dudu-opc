@@ -5,6 +5,7 @@ import { Network, UserRound } from "lucide-react";
 import { api, type Agent } from "@/lib/api";
 import { collaboration, type TeamState } from "@/lib/collaboration";
 import { useT } from "@/lib/use-i18n";
+import { reportingPath } from "@/lib/reporting";
 import { Face } from "./ProfileControls";
 
 export function ReportingBoard({ openProfile }: {
@@ -36,6 +37,20 @@ export function ReportingBoard({ openProfile }: {
     </button>
   );
 
+  const branches = new Map<number, Agent[]>();
+  const unresolved: Agent[] = [];
+  for (const employee of employees) {
+    const chain = reportingPath(members, lead?.id ?? null, employee.id);
+    const manager = chain?.at(-2);
+    if (!manager) { unresolved.push(employee); continue; }
+    const reports = branches.get(manager.id) ?? [];
+    reports.push(employee);
+    branches.set(manager.id, reports);
+  }
+  function reports(managerId: number): React.ReactNode {
+    const staff = branches.get(managerId);
+    return staff && <ul>{staff.map(a => <li key={a.id}>{person(a)}{reports(a.id)}</li>)}</ul>;
+  }
   return <details className="dp-org" onToggle={e => {
     setOpen(e.currentTarget.open);
     if (!e.currentTarget.open) { setSnapshot(null); setFailed(false); }
@@ -49,10 +64,10 @@ export function ReportingBoard({ openProfile }: {
           <div className="dp-org-node"><UserRound size={18} />{t("org.owner")}</div>
           <ul><li>
             <div className="dp-org-node">{lead ? <>{person(lead)}<small>{t("org.lead")}</small></> : t("org.noLead")}</div>
-            {lead && employees.length > 0 && <ul>{employees.map(a => <li key={a.id}>{person(a)}</li>)}</ul>}
+            {lead && reports(lead.id)}
           </li></ul>
         </li></ul>
-        {!lead && employees.length > 0 && <div><h3>{t("org.pendingLead")}</h3>{employees.map(a => <div key={a.id}>{person(a)}</div>)}</div>}
+        {unresolved.length > 0 && <div><h3>{t("org.unassigned")}</h3>{unresolved.map(a => <div key={a.id}>{person(a)}</div>)}</div>}
         {outside.length > 0 && <div><h3>{t("org.outside")}</h3>{outside.map(a => <div key={a.id}>{person(a)}</div>)}</div>}
       </>}
     </div>}

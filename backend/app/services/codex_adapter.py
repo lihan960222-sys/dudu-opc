@@ -720,7 +720,7 @@ class _CodexTurn:
         if self.ctx.team_launch is not None:
             team_launch = self.ctx.team_launch
             common.setdefault("config", {}).setdefault("mcp_servers", {})["team"] = {
-                **({"enabled":True, "enabled_tools":["list_agents","ask_agent"]} if self.feature else {}),
+                **({"enabled":True, "enabled_tools":["list_agents","propose_direct_report","delegate","answer_job_question","ask_agent"]} if self.feature else {}),
                 "command": team_launch.command, "args": list(team_launch.args), "env": dict(team_launch.env),
                 "default_tools_approval_mode": "prompt",
             }
@@ -1057,7 +1057,7 @@ class _CodexTurn:
         if kind not in TOOL_ITEMS or not isinstance(item_id, str):
             return
         project_tool = (self.ctx.team_launch is not None and item.get("server") == "team"
-                        and item.get("tool") in ("list_agents", "ask_agent"))
+                        and item.get("tool") in ("list_agents", "propose_direct_report", "delegate", "answer_job_question", "ask_agent"))
         if self.feature and (getattr(self.ctx, "consult_only", False) or kind != "mcpToolCall"
                              or (item.get("server") != "feature_files" and not project_tool)):
             self.breach = True
@@ -1251,7 +1251,7 @@ class _CodexTurn:
                 name, tool_input = found
                 from app.team.mcp_server import TOOLS
                 if (name not in {entry['name'] for entry in TOOLS} or
-                        (self.feature and name != 'list_agents' and
+                        (self.feature and name not in ('list_agents','propose_direct_report','delegate','answer_job_question') and
                          (name != 'ask_agent' or tool_input.get('mode') != 'consult'))):
                     self.rpc.respond(rid, payload(False))
                     return

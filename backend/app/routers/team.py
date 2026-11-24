@@ -107,6 +107,8 @@ async def clear_lead(agent_id: int = Query(...), rt=Depends(get_runtime)):
         team = await service.team_for(db, rt.owner_id, lock=True)
         if team is None or team.lead_agent_id != agent_id:
             raise HTTPException(409, detail={'error_code': 'changed_since', 'message': 'The lead changed. Refresh the team.'})
+        former = await service.member(db,rt.owner_id,agent_id,team_id=team.id)
+        former.can_staff_team = False
         team.lead_agent_id = None
         team.updated_at = service.now()
         service.audit(db, team, 'lead_removed', agent_id=agent_id)

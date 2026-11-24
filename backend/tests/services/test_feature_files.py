@@ -1,6 +1,11 @@
-from pathlib import Path
+import json
 import os
+from pathlib import Path
+import subprocess
+import sys
+
 import pytest
+from app.services import feature_files
 from app.services.feature_files import FeatureFiles
 
 def test_files_are_scoped(tmp_path):
@@ -31,3 +36,19 @@ def test_codex_images_and_scoped_config():
     assert config["plugins"]["plugin@global"] == {"enabled":False}
     assert "write_text" not in config["mcp_servers"]["feature_files"]["enabled_tools"]
     assert config["features"]["shell_tool"] is False
+
+
+def test_stdio_reads_a_chinese_filename(tmp_path):
+    task = tmp_path / "任务" / "17"
+    task.mkdir(parents=True)
+    (tmp_path / "验收.txt").write_text("蓝桥-27", encoding="utf-8")
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "read_text", "arguments": {"scope": "role", "path": "验收.txt"}}}
+    result = subprocess.run(
+        [sys.executable, "-X", "utf8=0", "-I", feature_files.__file__, str(task), "read"],
+        input=(json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8"),
+        capture_output=True, check=True, timeout=10,
+    )
+    reply = json.loads(result.stdout)["result"]
+    assert not reply["isError"], reply
+    assert json.loads(reply["content"][0]["text"])["text"] == "蓝桥-27"

@@ -112,7 +112,8 @@ async def register_report(worker,row,turn):
 
 async def publish_reports(worker):
     from app.db import session
-    from app.db.models import AgentJob
+    from app.core.config import settings
+    from app.db.models import AgentJob, TeamSetupRequest
     from .routing import enqueue
     cfg=worker.cfg
     actor=cfg.get('steward',{}).get('agent_id')
@@ -127,13 +128,35 @@ async def publish_reports(worker):
         jobs={j.id:j for j in await db.scalars(select(AgentJob).where(AgentJob.id.in_([r['job'] for r in rows]),
             AgentJob.kind=='root',AgentJob.owner_id==cfg['owner_id'],AgentJob.requester_agent_id==actor,
             AgentJob.assignee_agent_id==actor))}
+        pending_hires = {}
+        proposals = await db.execute(select(AgentJob.parent_id, TeamSetupRequest.request_id, TeamSetupRequest.thread_id)
+            .join(TeamSetupRequest, TeamSetupRequest.plan['_origin_job'].as_integer() == AgentJob.id)
+            .where(AgentJob.parent_id.in_(jobs), AgentJob.owner_id == cfg['owner_id'], AgentJob.kind == 'job',
+                   AgentJob.requester_agent_id == actor, AgentJob.requester_thread_id == TeamSetupRequest.thread_id,
+                   AgentJob.requester_turn_id == TeamSetupRequest.turn_id,
+                   AgentJob.assignee_agent_id == TeamSetupRequest.plan['_manager'].as_integer(),
+                   TeamSetupRequest.owner_id == cfg['owner_id'], TeamSetupRequest.lead_agent_id == actor,
+                   TeamSetupRequest.kind == 'setup', TeamSetupRequest.state == 'pending',
+                   TeamSetupRequest.plan['_owner_review'].as_boolean().is_(True)))
+        for parent_id, request_id, thread_id in proposals:
+            pending_hires.setdefault(parent_id, []).append((request_id, thread_id))
     for row in rows:
         job=jobs.get(row['job'])
         with worker.db:
             worker.db.execute('update direct_team_reports set checked=unixepoch() where job=?',(row['job'],))
             if not job or job.requester_thread_id!=row['thread'] or job.requester_turn_id!=row['turn']:
                 worker.db.execute('update direct_team_reports set finished=1 where job=?',(row['job'],))
-            elif job.status=='needs_input' and job.question and signature(job.question)!=row['question']:
+                continue
+            for request_id, thread_id in pending_hires.get(job.id, []):
+                if thread_id != job.requester_thread_id:
+                    continue
+                notice = worker.db.execute('insert or ignore into direct_hiring_notices values(?,?,?)',
+                                           (row['app'], row['event'], request_id))
+                if notice.rowcount:
+                    origin = settings.PUBLIC_ORIGIN or 'http://127.0.0.1:8000'
+                    text = f'有一份招人申请需要你决定。请在这段管家会话里打开招人卡片。\n{origin}/chat?thread={thread_id}'
+                    enqueue(worker.db, None, 'steward', {'text': text, 'reply_to': row['message']})
+            if job.status=='needs_input' and job.question and signature(job.question)!=row['question']:
                 enqueue(worker.db,None,'steward',{'text':job.question[:2000],'reply_to':row['message']})
                 worker.db.execute('update direct_team_reports set question=? where job=?',(signature(job.question),job.id))
             elif job.status in ('completed','failed','cancelled'):

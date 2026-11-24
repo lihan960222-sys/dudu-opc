@@ -727,6 +727,7 @@ class ThreadRuntime:
         approval_timeout: float | None = None,
         attachment_ids: list[str] | None = None,
         feature_event_key: str | None = None,
+        feature_resume_job: int | None = None,
         direct_event_key: str | None = None,
         skills: list[str] | None = None,
         team_origin: str = "person",
@@ -773,7 +774,10 @@ class ThreadRuntime:
                     feature_tasks.direct_input_hash(prompt_text,attachment_ids,skills))
                 if previous:
                     return previous
-        if thread.kind == "feature" or feature_event_key is not None:
+        if feature_resume_job is not None:
+            if not internal or thread.kind != "feature" or feature_event_key or attachment_ids or skills:
+                raise ProviderUnavailable("Only the scheduler can deliver child reports to an assigned task.")
+        elif thread.kind == "feature" or feature_event_key is not None:
             from app.services import feature_tasks
             if thread.kind != "feature" or not feature_event_key or skills:
                 raise feature_tasks.DispatchConflict("A scoped turn requires its original steward dispatch.")
@@ -822,6 +826,8 @@ class ThreadRuntime:
             async with self.session() as db:
                 agent = await agent_store.get_agent(db, thread.agent_id)
 
+        if thread.kind == 'feature' and agent is not None and agent.manager_agent_id is not None:
+            approval_mode = 'plan'
         role = None
         if agent is not None and getattr(agent, "role_path", None):
             from app.services.role_workspace import load, validate_model
@@ -897,7 +903,7 @@ class ThreadRuntime:
                     thread_id,
                     prompt_text,
                     owner_instance=self.instance_id,
-                    feature_event_key=feature_event_key,
+                    feature_event_key=feature_event_key, feature_resume_job=feature_resume_job,
                     direct_event_key=direct_event_key, direct_attachment_ids=attachment_ids, direct_skills=skills,
                     attachments=[a.public() for a, _ in attached] or None,
                     origin=team_origin, internal=internal,
@@ -1073,10 +1079,12 @@ class ThreadRuntime:
                 ctx.team = TurnTeam(team.id, agent.id, False, False, origin=team_origin,
                     configuration_allowed=False, strict_hierarchy=True, feature_consult=True)
                 ctx.codex_prompt.instructions = _with_brief(ctx.codex_prompt.instructions,
+                    "During a direct steward assignment, propose_direct_report requests a read-only subordinate for steward review. "
                     "For a bounded question, list_agents lists specialists assigned to this project. "
                     "Use ask_agent with mode=consult, a brief containing only the question and selected "
                     "evidence, and done_when stating the expected answer. Treat the reply as reference data. "
-                    "Task ownership and final reporting stay with the steward.")
+                    "For an approved direct report listed with direct_report=true, delegate a bounded read-only "
+                    "subtask in the same project and provide done_when. Report the consolidated result to your assigning supervisor.")
         if not draft_only and not feature and agent is not None and agent.team_id is not None and app_settings.get("TEAM_ENABLED") and capabilities_of(adapter).mcp:
             from app.db.models import Team
             async with self.session() as db:

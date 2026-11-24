@@ -3,7 +3,7 @@
 Writers lock the team row, commit before returning and never copy private agent notes.
 """
 from datetime import UTC, datetime
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from app.db.models import Agent, Thread, Team, TeamEvent, AgentJob
 from app.db.transactions import begin_write
 from app.services import agent_memory
@@ -47,6 +47,14 @@ def require_dispatcher(team, caller, turn, thread):
         raise TeamError('steward_only', 'Only the steward may dispatch work from its own turn.')
 
 
+async def release_reports(db, agent):
+    """Removing a manager returns direct reports to the current steward."""
+    await db.execute(update(Agent).where(Agent.owner_id==agent.owner_id,Agent.manager_agent_id==agent.id)
+                     .values(manager_agent_id=None))
+    agent.manager_agent_id=None
+    agent.can_staff_team=False
+
+
 async def set_lead(db, owner, agent_id, name='My team', *, commit=True):
     await begin_write(db)
     agent = await member(db, owner, agent_id)
@@ -58,6 +66,10 @@ async def set_lead(db, owner, agent_id, name='My team', *, commit=True):
     if agent.team_id is not None and agent.team_id != team.id:
         raise TeamError('other_team', 'This agent already belongs to another team.')
     if team.lead_agent_id != agent.id:
+        if team.lead_agent_id:
+            await db.execute(update(Agent).where(Agent.id==team.lead_agent_id,Agent.owner_id==owner).values(can_staff_team=False))
+        agent.can_staff_team=False
+        agent.manager_agent_id=None
         team.lead_agent_id = agent.id
         team.updated_at = now()
         agent.team_id = team.id
@@ -78,6 +90,7 @@ async def change_member(db, owner, agent_id, *, remove=False, delegation_enabled
             raise TeamError('unreachable_agent', 'This agent is outside this team.')
         if team.lead_agent_id == agent.id:
             raise TeamError('lead_required', 'Choose another lead before removing this one.')
+        await release_reports(db,agent)
         agent.team_id = None
         audit(db, team, 'member_removed', agent_id=agent.id)
     else:

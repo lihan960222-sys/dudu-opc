@@ -545,6 +545,7 @@ async def start_turn(
     *,
     owner_instance: str | None = None,
     feature_event_key: str | None = None,
+    feature_resume_job: int | None = None,
     direct_event_key: str | None = None,
     direct_attachment_ids: list[str] | None = None,
     direct_skills: list[str] | None = None,
@@ -615,6 +616,14 @@ async def start_turn(
         from app.db.models import DirectTurnReceipt
         db.add(DirectTurnReceipt(owner_id=thread.owner_id,event_key=direct_event_key,thread_id=thread.id,
                                  turn_id=turn.id,input_sha256=digest))
+    if feature_resume_job is not None:
+        from app.db.models import AgentJob
+        holder = await db.get(AgentJob, feature_resume_job, with_for_update=True)
+        if (not internal or thread.kind != "feature" or not holder or holder.owner_id != thread.owner_id or
+                holder.status != "running" or holder.current_turn_id is not None or holder.executions < 2 or
+                holder.assignee_thread_id != thread_id or holder.assignee_agent_id != thread.agent_id):
+            raise ThreadBusy(thread_id)
+        holder.current_turn_id = holder.assignee_turn_id = turn.id
     if feature_event_key is not None:
         await feature_tasks.bind_turn(db, thread.owner_id, feature_event_key, thread_id, turn.id)
     await _add_event(db, thread_id, "turn.started", started, turn.id)

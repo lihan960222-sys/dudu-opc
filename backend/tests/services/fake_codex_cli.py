@@ -145,9 +145,13 @@ def complete(thread_id, turn_id, status="completed", error=None):
     notify("turn/completed", {"threadId": thread_id, "turn": {"id": turn_id, "status": status, "error": error, "items": []}})
 
 
-def play(thread_id, turn_id, step):
+def play(thread_id, turn_id, step, prompt):
     kind = step.get("type")
-    if kind == "chat":
+    if kind == "relay_report":
+        report = json.loads(prompt.splitlines()[-1])["reports"][-1]
+        message(thread_id, turn_id, report["result"])
+        complete(thread_id, turn_id)
+    elif kind == "chat":
         message(thread_id, turn_id, step.get("text", "hello"))
         complete(thread_id, turn_id)
     elif kind == "command":
@@ -182,6 +186,12 @@ def play(thread_id, turn_id, step):
     elif kind in ("computer", "team"):
         server_name = step.get("server", kind)
         tool, arguments = step.get("tool", "exec"), step.get("arguments", {})
+        if step.get("review_proposal"):
+            proposal = next(r["hiring_proposal"] for r in json.loads(prompt.splitlines()[-1])["reports"] if "hiring_proposal" in r)
+            arguments = {"request_id": proposal["request_id"], "version": proposal["version"], "decision": "approve"}
+        if step.get("delegate_hired"):
+            decision = next(r["hiring_decision"] for r in json.loads(prompt.splitlines()[-1])["reports"] if "hiring_decision" in r)
+            arguments = {**arguments, "agent_ids": [decision["employee_id"]]}
         item_id = "mcp-" + uuid.uuid4().hex[:8]
         item = {"type": "mcpToolCall", "id": item_id, "server": server_name, "tool": tool, "status": "inProgress", "arguments": arguments}
         notify("item/started", {"threadId": thread_id, "turnId": turn_id, "item": item})
@@ -197,7 +207,7 @@ def play(thread_id, turn_id, step):
             text, is_error = call_mcp(thread_configs[thread_id], server_name, tool, arguments)
             log(event="mcp_result", content=text, is_error=is_error)
         notify("item/completed", {"threadId": thread_id, "turnId": turn_id, "item": {**item, "status": "completed" if accepted else "declined"}})
-        message(thread_id, turn_id, "ran" if accepted else "declined")
+        message(thread_id, turn_id, text if accepted and step.get("echo_tool") else ("ran" if accepted else "declined"))
         complete(thread_id, turn_id)
     elif kind == "unknown_request":
         answer = ask("item/tool/call", {"threadId": thread_id, "tool": "x"})
@@ -270,7 +280,7 @@ for line in sys.stdin:
         turn_id = "turn-" + uuid.uuid4().hex[:8]
         send({"id": rid, "result": {"turn": {"id": turn_id, "status": "inProgress"}}})
         step = next_step()
-        threading.Thread(target=play, args=(params.get("threadId"), turn_id, step), daemon=True).start()
+        threading.Thread(target=play, args=(params.get("threadId"), turn_id, step, params["input"][0]["text"]), daemon=True).start()
     elif method == "turn/interrupt":
         interrupted.set()
         send({"id": rid, "result": {}})

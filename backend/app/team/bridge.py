@@ -108,6 +108,9 @@ class TeamBridge:
 
     async def execute(self, name, args):
         rt, run = self.runtime, self.run
+        if name in ('propose_direct_report','review_direct_report'):
+            from app.team import staff_hiring
+            return await staff_hiring.call(rt,run,name,args)
         if name == 'refresh_today':
             async with rt.session() as db:
                 caller = await service.member(db, rt.owner_id, run.agent_id, team_id=run.ctx.team.team_id)
@@ -128,8 +131,12 @@ class TeamBridge:
                     raise service.TeamError('parent_gone', 'This consultation turn is no longer active.')
                 _, peers = await feature_tasks.consult_scope(db, rt.owner_id, team, caller, turn, thread)
                 if name == 'list_agents':
-                    return {'agents':[{'id':p.id, 'name':fence.line(p.name), 'title':fence.line(p.title)} for p in peers]}
-                if name != 'ask_agent' or args.get('mode') != 'consult':
+                    children = await db.scalars(select(Agent).where(Agent.owner_id == rt.owner_id,
+                        Agent.team_id == team.id, Agent.manager_agent_id == caller.id, Agent.archived_at.is_(None)))
+                    roster = {p.id:p for p in [*peers,*children]}
+                    return {'agents':[{'id':p.id, 'name':fence.line(p.name), 'title':fence.line(p.title),
+                                       'direct_report':p.manager_agent_id == caller.id} for p in roster.values()]}
+                if name not in ('delegate','answer_job_question') and (name != 'ask_agent' or args.get('mode') != 'consult'):
                     raise service.TeamError('consult_only','Only same-project consultation is available.')
             elif name == 'list_agents':
                 rows = (await db.execute(select(Agent).where(Agent.team_id == caller.team_id, Agent.owner_id == rt.owner_id, Agent.archived_at.is_(None)).order_by(Agent.id))).scalars()

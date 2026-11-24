@@ -120,7 +120,7 @@ async def test_scoped_codex_asks_and_receives_peer_answer(crt, sessions, owner, 
         protocol=await feature_tasks.protocol(db,owner,task)
         assert protocol["deliverables"]==["unit note"] and protocol["acceptance_criteria"]==["check units"]
     parent_config,child_config=[r["params"]["config"] for r in codex.received("thread/start")]
-    assert parent_config["mcp_servers"]["team"]["enabled_tools"]==["list_agents","ask_agent"]
+    assert set(parent_config["mcp_servers"]["team"]["enabled_tools"])=={"list_agents","ask_agent","delegate","answer_job_question","propose_direct_report"}
     assert not any(v.get("enabled",True) for v in child_config["mcp_servers"].values())
     assert all(not v for v in child_config["features"].values())
     assert any("Pa, per supplied sheet." in e.get("content","") for e in codex.log() if e.get("event")=="mcp_result")

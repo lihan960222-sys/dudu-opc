@@ -27,7 +27,8 @@ class FakeEngine(Engine):
             if 'ASK' in ctx.prompt and 'Clarification from the assigning steward' not in ctx.prompt:
                 self.contexts.append(ctx)
                 await sink.emit('assistant.message', {'text': 'partial'})
-                return TurnOutcome('succeeded', result='partial work\nNEEDS INPUT: which environment?')
+                question = '把结果交给哪位负责人？' if '把结果交给负责人' in ctx.prompt else 'which environment?'
+                return TurnOutcome('succeeded', result=f'partial work\nNEEDS INPUT: {question}')
         return await super().run_turn(ctx, sink, gate)
 
 
@@ -413,3 +414,38 @@ async def test_person_message_gets_a_note_about_outstanding_work(team, sessions)
     note = await rt.team_jobs.outstanding_note(thread.id)
     assert 'Reviewer' in note and 'Do not assign it again' in note
     await rt.team_jobs.cancel((await root_of(sessions, thread.id)).id)
+
+async def test_owner_clarifies_external_delivery_only_in_steward_chat(team, sessions):
+    rt, engine, lead, employee, _ = team
+    chat = await rt.create_thread(agent_id=lead.id)
+    jobs, asked = [], []
+    owner_answer = '不用外发，待领取'
+    async def lead_turn(ctx, sink, gate):
+        run = rt._runs[ctx.turn_id]
+        if not jobs:
+            assigned = await rt.team_jobs.delegate(run, {'agent_ids':[employee.id], 'brief':'ASK 把结果交给负责人'})
+            jobs.append(assigned['receipts'][0]['job_id'])
+        elif owner_answer in ctx.prompt and 'Harness message' not in ctx.prompt:
+            row = (await rt.team_jobs.job_status(run, {'job_id':jobs[0]}))['jobs'][0]
+            await rt.team_jobs.answer_question(run, {'job_id':jobs[0],'question_turn_id':row['question_turn_id'],'answer':owner_answer})
+        elif '把结果交给哪位负责人' in ctx.prompt:
+            asked.append(chat.id)
+            return TurnOutcome('succeeded', result='负责人是谁，还是把结果留在项目里待领取？')
+        return TurnOutcome('succeeded', result='已记录处理状态。')
+    engine.handlers[chat.id] = lead_turn
+    await rt.send_turn(chat.id, '把结果交给负责人')
+    async def waiting():
+        root = await root_of(sessions, chat.id)
+        return asked and root and root.status=='waiting' and not rt._runs
+    await wait_until(waiting)
+    await rt.send_turn(chat.id, owner_answer)
+    async def finished():
+        root = await root_of(sessions, chat.id)
+        return root and root.status=='completed'
+    await wait_until(finished)
+    async with sessions() as db:
+        rows = list(await db.scalars(select(AgentJob).where(AgentJob.kind=='job',AgentJob.requester_thread_id==chat.id)))
+        assert len(rows)==1 and rows[0].answer==owner_answer and rows[0].status=='completed'
+        employee_turns=await turns_of(sessions,rows[0].assignee_thread_id)
+        assert len(employee_turns)==2 and owner_answer.replace('，', ',') in employee_turns[-1].prompt_text
+        assert asked == [chat.id]

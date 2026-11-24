@@ -111,6 +111,8 @@ class FeatureFiles:
 
 
 def main():
+    sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+    sys.stdout.reconfigure(encoding="utf-8", errors="strict")
     fs = FeatureFiles(Path(sys.argv[1]), sys.argv[2] == "write")
     for line in sys.stdin:
         req = json.loads(line)

@@ -5,6 +5,7 @@ import { Check, FileText, MessageSquare, Pencil, UserRound } from "lucide-react"
 import { api, request, type Agent, type ApprovalMode, type Engine } from "@/lib/api";
 import { teamActionsFor, type ProfileTeamAction } from "@/lib/staff-team";
 import { canOpenWorkbench } from "@/lib/session";
+import { reportingPath } from "@/lib/reporting";
 import { useT } from "@/lib/use-i18n";
 import { collaboration, type TeamState } from "@/lib/collaboration";
 import type { SkillSummary } from "@/lib/skills";
@@ -68,6 +69,7 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
     [error, setError] = useState("");
   const [skills, setSkills] = useState<SkillSummary[]>([]),
     [skillError, setSkillError] = useState("");
+  const [canStaff, setCanStaff] = useState(agent?.can_staff_team ?? false);
   const [makeLead, setMakeLead] = useState(false);
   const [teamMember, setTeamMember] = useState(!!lead);
   useEffect(() => {
@@ -107,6 +109,8 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
       live = false;
     };
   }, [agent?.id, agent?.role_path, loadTick]);
+  const chain = agent && member ? reportingPath(team?.agents ?? [], lead?.id ?? null, agent.id) : null;
+  const managers = agent ? chain?.slice(0, -1) ?? [] : (lead && teamMember ? [lead] : []);
   const role =
     agent && agent.id === lead?.id
       ? "大管家"
@@ -207,6 +211,12 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
       if (!agent && lead && teamMember) {
         step = "加入团队";
         await collaboration.addMember(employee.id);
+      }
+      if (ownsHost && (isLead || (!agent && makeLead)) && canStaff !== Boolean(agent?.can_staff_team)) {
+        step = "保存招人授权";
+        await request(`/staff/${employee.id}/staffing`, {
+          method: "PATCH", body: JSON.stringify({ can_staff_team: canStaff }),
+        });
       }
       if (avatar) {
         step = "保存头像";
@@ -317,6 +327,10 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
                   {approvalMode === "full_access" && <option value="full_access">完全访问</option>}
                 </select>
               </label>}
+              {ownsHost && (isLead || (!agent && makeLead)) && <label className="dp-field">
+                <span><input type="checkbox" checked={canStaff} onChange={e => setCanStaff(e.target.checked)} /> 允许大管家按需招人</span>
+                <small>大管家可代审只读岗位，沿用发起员工的模型，使用独立工作目录，不增加工具权限。超出范围仍由你审批。</small>
+              </label>}
               {isLead && ownsHost && provider === "codex" && (model === "deepseek-flash" || model === "deepseek-v4-pro") && (
                 <DeepSeekKey />
               )}
@@ -403,16 +417,13 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
               </span>
               <span>所有者</span>
             </div>
-            {lead && (member || agent?.id === lead.id) && (
-              <div className="dp-chainrow">
-                <Face id={lead.id} name={lead.name} />
-                <span>
-                  {lead.name}
-                  <small>大管家</small>
-                </span>
+            {managers.map(manager => (
+              <div key={manager.id} className="dp-chainrow">
+                <Face id={manager.id} name={manager.name} />
+                <span>{manager.name}<small>{manager.id === lead?.id ? "大管家" : manager.title}</small></span>
               </div>
-            )}
-            {agent?.id !== lead?.id && (
+            ))}
+            {agent && member && !chain && <small>{t("org.unassigned")}</small>}
               <div className="dp-chainrow">
                 <Face id={agent?.id} name={name} />
                 <span>
@@ -420,7 +431,6 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
                   <small>{role}</small>
                 </span>
               </div>
-            )}
           </div>
           {actions.length > 0 && <div className="dp-fields">
             {actions.includes("delegate") && <label className="flex items-center gap-2 text-sm">

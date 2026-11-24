@@ -75,6 +75,8 @@ async def collect_team_requests(worker):
                     Team.owner_id == owner, Team.lead_agent_id == lead, Agent.owner_id == owner,
                     Thread.owner_id == owner, Thread.agent_id == Agent.id, Agent.archived_at.is_(None),
                     AgentJob.owner_id == owner, AgentJob.assignee_thread_id == Thread.id,
+                    AgentJob.requester_agent_id == lead,
+                    (Agent.manager_agent_id.is_(None) | (Agent.manager_agent_id == lead)),
                     AgentJob.kind == "job", AgentJob.mode == "work"))
     async with session.AsyncSessionLocal() as db:
         for job, approval, agent in await db.execute(query):
