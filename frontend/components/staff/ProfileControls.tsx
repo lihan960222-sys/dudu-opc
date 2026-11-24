@@ -286,6 +286,7 @@ export function StaffModelFields({
   model,
   disabled = false,
   lockProvider = false,
+  stewardModels = false,
   onChange,
 }: {
   engines: Engine[];
@@ -293,11 +294,18 @@ export function StaffModelFields({
   model: string | null;
   disabled?: boolean;
   lockProvider?: boolean;
+  stewardModels?: boolean;
   onChange: (provider: string, model: string | null) => void;
 }) {
   const engine = engines.find((e) => e.id === provider);
   const [custom, setCustom] = useState(false);
-  const customValue = !!model && !engine?.models.some((m) => m.id === model);
+  const models = [...(engine?.models ?? [])];
+  if (stewardModels && provider === "codex") {
+    for (const [id, label] of [["deepseek-flash", "DeepSeek V4.1 Flash"], ["deepseek-v4-pro", "DeepSeek V4 Pro"]]) {
+      if (!models.some(m => m.id === id)) models.push({ id, label, default: false });
+    }
+  }
+  const customValue = !!model && !models.some((m) => m.id === model);
   return (
     <div className="dp-fields space-y-2">
       <div className="dp-pair grid min-w-0 gap-2 sm:grid-cols-2">
@@ -338,7 +346,7 @@ export function StaffModelFields({
               引擎默认
               {engine?.default_model ? " · " + engine.default_model : ""}
             </option>
-            {engine?.models.map((m) => (
+            {models.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.label}
               </option>

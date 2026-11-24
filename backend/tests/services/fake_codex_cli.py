@@ -222,7 +222,7 @@ def thread_result(thread_id, params):
     sandbox = {"read-only": "readOnly", "workspace-write": "workspaceWrite", "danger-full-access": "dangerFullAccess"}.get(params.get("sandbox"), "readOnly")
     if plan.get("policy_mismatch"):
         policy, sandbox = "never", "dangerFullAccess"
-    return {"thread": {"id": thread_id,"status":{"type":plan.get("native_status","idle")}}, "model": params.get("model") or "gpt-fake", "approvalPolicy": policy, "sandbox": {"type": sandbox}}
+    return {"thread": {"id": thread_id,"status":{"type":plan.get("native_status","idle")}}, "modelProvider": params.get("modelProvider", "openai"), "model": params.get("model") or "gpt-fake", "approvalPolicy": policy, "sandbox": {"type": sandbox}}
 
 
 for line in sys.stdin:

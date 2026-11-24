@@ -38,3 +38,14 @@ def test_role_cannot_cover_sensitive_paths(tmp_path):
         with pytest.raises(ValueError):
             validate_location(folder, [private])
     validate_location(tmp_path / "roles" / "developer", [private])
+
+
+def test_worker_workspace_cannot_overlap_steward_model_sessions(tmp_path, monkeypatch):
+    from app.core.config import settings
+    from app.services.role_workspace import validate_configured_location
+
+    profile = tmp_path / 'home-profile'
+    monkeypatch.setattr(settings, 'SQLITE_PATH', str(profile / 'suparagent.db'))
+    with pytest.raises(ValueError, match='private'):
+        validate_configured_location(profile / 'deepseek-codex' / 'sessions')
+    validate_configured_location(profile / 'workspace' / 'worker')

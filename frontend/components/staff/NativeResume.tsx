@@ -4,15 +4,18 @@ import { SquareTerminal } from "lucide-react";
 import { Dialog } from "../ui/Dialog";
 import { request } from "@/lib/api";
 
+type ResumeLocation = { mode: "workbench"; thread_id: number } | {
+  mode?: "native";
+  cwd: string;
+  resume_command: string;
+  last_native_activity?: { count: number } | null;
+};
+
 export function NativeResume({ threadId }: { threadId: number }) {
   const [open, setOpen] = useState(false),
     [error, setError] = useState(""),
     [loading, setLoading] = useState(false);
-  const [handoff, setHandoff] = useState<{
-    cwd: string;
-    resume_command: string;
-    last_native_activity?: { count: number };
-  } | null>(null);
+  const [handoff, setHandoff] = useState<ResumeLocation | null>(null);
   useEffect(() => {
     if (!open) return;
     let live = true;
@@ -37,8 +40,8 @@ export function NativeResume({ threadId }: { threadId: number }) {
       <button
         type="button"
         className="shrink-0 rounded-md p-1.5 text-muted hover:bg-hover"
-        title="在 Codex 续接"
-        aria-label="在 Codex 续接"
+        title="续接会话"
+        aria-label="续接会话"
         onClick={() => {
           setLoading(true);
           setError("");
@@ -51,13 +54,18 @@ export function NativeResume({ threadId }: { threadId: number }) {
       <Dialog
         open={open}
         onOpenChange={setOpen}
-        title="在 Codex 续接"
+        title="续接会话"
         size="sm"
       >
         {loading ? (
           <p role="status">读取会话中…</p>
         ) : error ? (
           <p role="alert">{error}</p>
+        ) : handoff?.mode === "workbench" ? (
+          <div className="space-y-3">
+            <p>这条 DeepSeek 会话由家庭主机管理。回到当前对话发消息，即可继续使用管家的团队工具和审批。</p>
+            <button type="button" className="dp-button" onClick={() => setOpen(false)}>回到当前对话</button>
+          </div>
         ) : handoff ? (
           <div className="space-y-3">
             {[

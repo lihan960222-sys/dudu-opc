@@ -1,0 +1,95 @@
+{
+  "models": [
+    {
+      "slug": "deepseek-flash",
+      "display_name": "DeepSeek Flash",
+      "description": "DeepSeek Flash",
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "priority": 1,
+      "prefer_websockets": false,
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "apply_patch_tool_type": "freeform",
+      "supports_parallel_tool_calls": true,
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "effective_context_window_percent": 95,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "reasoning_summary_format": "experimental",
+      "default_reasoning_summary": "none",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Low"
+        },
+        {
+          "effort": "high",
+          "description": "High"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "minimal_client_version": "0.164.0",
+      "supported_in_api": true,
+      "supports_reasoning_summaries": true,
+      "base_instructions": "Follow the assigned role, the conversation instructions, and the configured tool approval policy.",
+      "experimental_supported_tools": []
+    },
+    {
+      "slug": "deepseek-v4-pro",
+      "display_name": "DeepSeek V4 Pro",
+      "description": "DeepSeek V4 Pro",
+      "input_modalities": [
+        "text"
+      ],
+      "priority": 2,
+      "prefer_websockets": false,
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "apply_patch_tool_type": "freeform",
+      "supports_parallel_tool_calls": true,
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "effective_context_window_percent": 95,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "reasoning_summary_format": "experimental",
+      "default_reasoning_summary": "none",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Low"
+        },
+        {
+          "effort": "high",
+          "description": "High"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "minimal_client_version": "0.164.0",
+      "supported_in_api": true,
+      "supports_reasoning_summaries": true,
+      "base_instructions": "Follow the assigned role, the conversation instructions, and the configured tool approval policy.",
+      "experimental_supported_tools": []
+    }
+  ]
+}

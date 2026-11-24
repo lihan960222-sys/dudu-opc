@@ -198,6 +198,7 @@ class TurnContext:
     draft_only: bool = False
     feature_workspace: str | None = None
     consult_only: bool = False
+    steward_deepseek: bool = False
     media_review_only: bool = False
     # Extra instructions from the thread's named agent, for the provider's
     # system prompt (appended, never replacing it), or None. Read fresh each turn.

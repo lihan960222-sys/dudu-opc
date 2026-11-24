@@ -17,6 +17,18 @@ CREATE TABLE steward_direct_turn (
 	PRIMARY KEY (owner_id, event_key)
 );
 
+CREATE TABLE feishu_lead_chat (
+	thread_id BIGINT NOT NULL,
+	channel VARCHAR(64) NOT NULL,
+	selection VARCHAR(64) NOT NULL,
+	model VARCHAR,
+	project VARCHAR NOT NULL,
+	isolated BOOLEAN NOT NULL,
+	PRIMARY KEY (thread_id),
+	CONSTRAINT uq_feishu_lead_selection UNIQUE (channel, selection),
+	FOREIGN KEY(thread_id) REFERENCES thread (id) ON DELETE CASCADE
+);
+
 CREATE TABLE feature_scope (
 	task_id BIGINT NOT NULL,
 	project VARCHAR NOT NULL,

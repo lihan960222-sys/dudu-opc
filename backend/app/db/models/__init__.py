@@ -76,3 +76,4 @@ __all__ = [
 ]
 from app.db.models.feature import DirectTurnReceipt, FeatureScope, FeatureMessage, FeatureSession
 from app.db.models.steward_suggestion import StewardSuggestion
+from app.db.models.feishu_lead import FeishuLeadChat

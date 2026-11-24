@@ -2,6 +2,7 @@
 import base64
 import binascii
 import hashlib
+import json
 import os
 import re
 import tempfile
@@ -10,6 +11,8 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from starlette.concurrency import run_in_threadpool
+from starlette.responses import JSONResponse
 
 from app.auth.middleware import principal_of
 from app.core import tenant_paths
@@ -17,7 +20,8 @@ from app.db.models.team import TeamSetupRequest
 from app.db.transactions import begin_write
 from app.routers.agents import _agent_or_404, _restricted, get_runtime, _check_engine
 from app.routers.feishu_access import router as feishu_access_router
-from app.services import agent_store, image_gen, role_workspace
+from app.routers.feishu_owner_oauth import owner_browser
+from app.services import agent_store, image_gen, role_workspace, steward_deepseek
 from app.services.local_access_policy import require_local_access
 from app.services.thread_runtime import ThreadRuntime
 from app.team.setup import public_plan, request_version
@@ -32,6 +36,32 @@ def local_owner(request: Request):
 
 router = APIRouter(prefix="/staff", dependencies=[Depends(require_local_access), Depends(local_owner)])
 router.include_router(feishu_access_router)
+
+
+@router.get("/deepseek-key", dependencies=[Depends(owner_browser)])
+def deepseek_status():
+    return JSONResponse({"configured": bool(steward_deepseek.api_key())}, headers={"Cache-Control": "no-store"})
+
+
+@router.put("/deepseek-key", dependencies=[Depends(owner_browser)])
+async def save_deepseek_key(request: Request):
+    # A validation error for a credential must never include the submitted value.
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > 2048:
+            raise HTTPException(413, "密钥请求过大。")
+        raw.extend(chunk)
+    try:
+        payload = json.loads(raw)
+    except (ValueError, RecursionError):
+        payload = None
+    if not isinstance(payload, dict) or set(payload) != {"api_key"} or not isinstance(payload["api_key"], str):
+        raise HTTPException(422, "请输入 DeepSeek API Key。")
+    try:
+        await run_in_threadpool(steward_deepseek.verify_and_save, payload["api_key"])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return JSONResponse({"configured": True}, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/folders")

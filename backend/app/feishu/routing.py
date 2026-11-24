@@ -18,6 +18,10 @@ def journal(path):
     create table if not exists delivery_timing(
         app text,event text,received real,submit real,accepted real,engine_start real,engine_end real,
         outgoing text unique,sent real,primary key(app,event));
+    create table if not exists direct_targets(app text,event text,thread integer,primary key(app,event));
+    create table if not exists direct_team_reports(
+        app text,event text,job integer unique,question text,finished integer default 0,checked integer default 0,
+        primary key(app,event));
     create table if not exists owner_readwrite_requests(
         app text,event text,message text,owner text,tenant text,primary key(app,event));
     create table if not exists private_voice(

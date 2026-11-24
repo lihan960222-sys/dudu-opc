@@ -480,3 +480,49 @@ async def test_native_context_keeps_skill_and_roster_out_of_user_message(crt, se
     events = await events_of(sessions, thread.id)
     assert [e.data["prompt_text"] for e in events if e.type == "turn.started"] == ["Please edit this.","One more edit."]
     assert [e.data["skills"] for e in events if e.type == "skill.used"] == [["humanizer-zh"],["humanizer-zh"]]
+
+
+async def test_steward_deepseek_overrides_only_its_own_session(crt,sessions,owner,codex,tmp_path,monkeypatch):
+    from app.core.config import settings
+    from app.services import agent_store, steward_deepseek
+    from app.team import service
+    from app.services.thread_runtime import ProviderUnavailable
+    monkeypatch.setattr(settings,"STEWARD_STRICT_OWNER",owner)
+    monkeypatch.setattr(settings,"TEAM_ENABLED",True)
+    monkeypatch.setattr(codex_adapter,"deepseek_home",lambda:tmp_path/"private-ds")
+    async with sessions() as db:
+        lead = await agent_store.create_agent(db,owner_id=owner,name="lead",provider="codex",model="deepseek-flash")
+        await service.set_lead(db,owner,lead.id)
+    thread = await crt.create_thread(agent_id=lead.id,provider="codex",model="deepseek-flash")
+    monkeypatch.setattr(steward_deepseek,"api_key",lambda:"")
+    with pytest.raises(ProviderUnavailable,match="DeepSeek"):
+        await crt.send_turn(thread.id,"test")
+    assert not codex.received("turn/start")
+    monkeypatch.setattr(steward_deepseek,"api_key",lambda:"test-only-credential")
+    codex.plan({"type":"chat","text":"answered"},login="out")
+    await crt.send_turn(thread.id,"hello")
+    await finished(sessions,thread.id)
+    first = codex.received("thread/start")[0]["params"]
+    assert first["modelProvider"] == "suparagent_deepseek" and first["model"]=="deepseek-flash"
+    cfg = first["config"]["model_providers.suparagent_deepseek"]
+    assert cfg["wire_api"] == "responses" and cfg["base_url"] == "https://api.deepseek.com/"
+    assert cfg["experimental_bearer_token"] == "test-only-credential"
+    assert not cfg["requires_openai_auth"] and first["config"]["web_search"] == "disabled"
+    assert first["config"]["mcp_servers"]["team"]["command"]
+    row = await reload(sessions,Thread,thread.id)
+    assert row.provider_state["steward_deepseek"] is True
+    assert "test-only-credential" not in json.dumps(row.provider_state)
+    await crt.send_turn(thread.id,"continue")
+    await finished(sessions,thread.id,count=2)
+    assert codex.received("thread/resume")[-1]["params"]["modelProvider"]=="suparagent_deepseek"
+    codex.plan({"type": "fail", "message": "invalid test-only-credential"})
+    await crt.send_turn(thread.id, "simulate invalid provider credentials")
+    await finished(sessions, thread.id, count=3)
+    errors = data_of(await events_of(sessions, thread.id), "turn.failed")
+    assert errors[-1]["error"] == "invalid [redacted]"
+    assert crt.engine_limit("codex") is None
+    async with sessions() as db:
+        (await db.get(Thread,thread.id)).model="gpt-fake"
+        await db.commit()
+    with pytest.raises(ProviderUnavailable,match="新会话"):
+        await crt.send_turn(thread.id,"switch provider")

@@ -474,6 +474,12 @@ async def thread_handoff(db, owner_id, thread_id, *, task_id=None):
         return None
     if not uuid or uuid != native or not cwd:
         return None
+    if state.get("steward_deepseek"):
+        # Only the backend provisions the per-turn team mailbox, approvals and
+        # dedicated provider credential for this steward's session.
+        if thread.kind != "chat":
+            return None
+        return {"mode": "workbench", "thread_id": thread.id}
     handoff = {"session_id":uuid, "cwd":cwd, "resume_command":f"codex resume {uuid}"}
     if activity := state.get("last_native_activity"):
         handoff["last_native_activity"] = activity

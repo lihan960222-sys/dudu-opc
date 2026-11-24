@@ -18,3 +18,4 @@ workspace-access.sqlite3*
 suparagent.db*
 private-access.json
 codex-network.json
+deepseek-codex/

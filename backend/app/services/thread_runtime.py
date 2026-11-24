@@ -757,6 +757,13 @@ class ThreadRuntime:
             raise ProviderUnavailable("The app is shutting down; send this again after it restarts.")
         async with self.session() as db:
             thread = await store.get_thread(db, thread_id)
+            from app.db.models import FeishuLeadChat
+            managed = await db.get(FeishuLeadChat,thread_id) if thread and thread.kind=='chat' and thread.agent_id else None
+            isolated = bool(managed and managed.isolated)
+            project_facts = ''
+            if isolated and thread.owner_id==self.owner_id:
+                from app.feishu.lead_chat import project_context
+                project_facts=await project_context(db,self.owner_id,managed.project)
         if thread is None or thread.owner_id != self.owner_id:
             raise store.ThreadNotFound(thread_id)
         if direct_event_key is not None:
@@ -781,7 +788,8 @@ class ThreadRuntime:
         consult = thread.kind == "feature_consult"
         if consult and (not internal or approval_mode != "plan" or attachment_ids or skills):
             raise ProviderUnavailable("A project consultation only accepts its assigned internal question.")
-        if settings.STEWARD_STRICT_OWNER == self.owner_id and thread.agent_id is not None and thread.kind not in ("feature", "feature_consult"):
+        strict_lead = settings.STEWARD_STRICT_OWNER == self.owner_id and thread.agent_id is not None and not (thread.kind == "feature" or consult)
+        if strict_lead:
             from app.team import service as team_service
             async with self.session() as db:
                 team = await team_service.team_for(db, self.owner_id)
@@ -806,10 +814,6 @@ class ThreadRuntime:
             raise ProviderUnavailable(str(exc)) from None
         snapshot = app_settings.capture()
         config = await self.prepare_adapter(thread.provider, adapter)
-        with app_settings.use(snapshot):
-            status = await self._provider_status(adapter, config)
-        if not status.ready:
-            raise ProviderUnavailable(status.error or f"{thread.provider} is not ready")
 
         # A named agent's current settings apply to every turn. A deleted agent
         # leaves the thread with its own provider and model only.
@@ -823,9 +827,27 @@ class ThreadRuntime:
             from app.services.role_workspace import load, validate_model
             try:
                 role = load(Path(agent.role_path))
-                await validate_model(self, thread.provider, role.model)
+                selected=managed.model if managed else role.model
+                if selected:
+                    await validate_model(self,thread.provider,selected)
             except (OSError, ValueError, EngineModelInvalid) as exc:
                 raise ProviderUnavailable(f"{agent.name} ({agent.role_path}/AGENTS.md): {exc}") from None
+
+        selected_model = managed.model if managed else role.model if role else thread.model or (
+            agent.model if agent is not None and agent.provider == thread.provider else None)
+        from app.services.codex_adapter import DEEPSEEK_MODELS, deepseek_status
+        deepseek_route = (
+            strict_lead and agent is not None and thread.provider == "codex"
+            and thread.kind == "chat" and selected_model in DEEPSEEK_MODELS
+        )
+        if thread.session_state == "active" and bool((thread.provider_state or {}).get("steward_deepseek")) != deepseek_route:
+            raise ProviderUnavailable("切换模型供应商需要新会话，原会话仍保留在原供应商。")
+        if deepseek_route and selected_model == "deepseek-v4-pro" and any(a.kind == "image" for a,_ in attached):
+            raise ImagesUnsupported("DeepSeek V4 Pro")
+        with app_settings.use(snapshot):
+            status = deepseek_status() if deepseek_route else await self._provider_status(adapter, config)
+        if not status.ready:
+            raise ProviderUnavailable(status.error or f"{thread.provider} is not ready")
 
         feature = thread.kind == "feature" or consult
         feature_context = ""
@@ -858,8 +880,8 @@ class ThreadRuntime:
                 raise ProviderUnavailable("Draft-only routines require a confined Claude engine and compatible Gmail read grants.")
             if draft_only and (skills or attached or thread.session_state == "active"):
                 raise ProviderUnavailable("Draft-only routines require a fresh conversation without skills or attachments.")
-        recall = None if draft_only or consult else await self._recall(agent, thread_id, prompt_text)
-        brief = "" if draft_only or feature else await self._recent_work(agent, thread)
+        recall = None if draft_only or consult or isolated else await self._recall(agent, thread_id, prompt_text)
+        brief = project_facts if isolated else "" if draft_only or feature else await self._recent_work(agent, thread)
         handoff = ""
         if thread.provider_session_id is not None:
             # Native sessions have never seen turns that ran on a fallback.
@@ -887,7 +909,7 @@ class ThreadRuntime:
         if role is not None:
             async with self.session() as db:
                 await store.append_turn_event(db, turn.id, turn.owner_token, "role.config",
-                                              {"model": role.model, "sha256": role.digest})
+                                              {"model": managed.model if managed else role.model, "sha256": role.digest})
         if chosen_skills:
             async with self.session() as db:
                 await store.append_turn_event(
@@ -942,7 +964,7 @@ class ThreadRuntime:
                 await run.recorder.emit("context.compacted", plan.record)
             return plan.items
 
-        explicit_memory = None if feature else memory_explicit.prepare(agent, thread, turn, internal=internal)
+        explicit_memory = None if feature or isolated else memory_explicit.prepare(agent, thread, turn, internal=internal)
         # With several people in the workspace the engine is told whose message this is. The stored
         # prompt stays exactly what they typed.
         speaker_note = ""
@@ -952,7 +974,7 @@ class ThreadRuntime:
         from app.services.provider_adapter import CodexPrompt
         role_policy = role.instructions if role else agent.instructions if agent is not None else None
         background = {}
-        if feature:
+        if feature or isolated:
             instructions = role_policy
         elif agent is not None:
             background["agent_notes"] = agent_memory.turn_background(agent) or ""
@@ -982,8 +1004,8 @@ class ThreadRuntime:
             # A model chosen for this conversation wins over its agent's. An
             # agent's model is for the agent's engine: a conversation on another
             # engine (the agent changed engine since) uses that engine's default.
-            model=role.model if role else thread.model
-            or (agent.model if agent is not None and agent.provider == thread.provider else None),
+            model=selected_model,
+            steward_deepseek=deepseek_route,
             effort=(thread.provider_state or {}).get("effort") if isinstance(thread.provider_state, dict) else None,
             provider_session_id=thread.provider_session_id,
             provider_state=thread.provider_state,
@@ -1022,12 +1044,12 @@ class ThreadRuntime:
             agent_id=agent.id if agent is not None else None,
             approval_timeout=approval_timeout,
             engine_id=thread.provider,
-            fallback=None if draft_only or feature else _fallback_of(agent, thread.provider),
+            fallback=None if draft_only or feature or managed else _fallback_of(agent, thread.provider),
             continues=turn.seq > 1,
             prompt_text=prompt_text,
-            log_memory=not draft_only and not feature and agent is not None and agent.memory_enabled,
+            log_memory=not draft_only and not feature and not isolated and agent is not None and agent.memory_enabled,
             capturable=(
-                not draft_only
+                not draft_only and not isolated
                 and agent is not None
                 and agent.memory_enabled
                 and agent.memory_upkeep
@@ -1545,6 +1567,8 @@ class ThreadRuntime:
         `engine.switched` event. Never for a turn the engine had started on,
         never silently, and never to an engine that lacks what the turn needs:
         then the turn fails with the reason and what to do."""
+        if getattr(run.ctx, "steward_deepseek", False):
+            return outcome
         if outcome.status == "succeeded":
             self._limits.pop(run.engine_id, None)
             return outcome

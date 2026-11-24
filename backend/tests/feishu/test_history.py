@@ -215,6 +215,11 @@ async def test_private_model_selection_respects_explicit_or_single_native_defaul
     monkeypatch.setattr(CodexAdapter,'_live_models',models)
     assert await select_model('verified','codex','gpt-5.4')=='gpt-5.4' and not seen
     assert await select_model('verified','codex',None)=='gpt-6.2-sol' and seen==['verified']
+    # The separate contact-summary consent is for OpenAI, even when the steward chats via DeepSeek.
+    assert await select_model('verified','codex','deepseek-flash')=='gpt-6.2-sol'
+    assert await select_model('verified','codex','deepseek-v4-pro')=='gpt-6.2-sol'
+    with pytest.raises(ValueError):
+        await select_model('verified','codex','unrelated-provider-model')
     for invalid in ([],[SimpleNamespace(id='gpt-a',default=True),SimpleNamespace(id='gpt-b',default=True)]):
         catalog[:]=invalid
         with pytest.raises(ValueError):

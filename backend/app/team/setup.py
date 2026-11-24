@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.db.models import Agent, AgentJob, Approval, Thread, Team, TeamEvent, TeamSetupRequest, Turn
 from app.db.transactions import begin_write
 from app.services import agent_memory
+from app.services.steward_deepseek import MODELS as STEWARD_MODELS
 from app.team import fence
 from app.team.service import TeamError, audit, clean_line, member, now, team_for
 
@@ -96,7 +97,7 @@ def text_value(field, value):
     raise TeamError('invalid_input', 'Unrecognised setting.')
 
 
-async def validate(db, owner, team, caller, plan, *, turn_id, check_engine, reviewed_workspace=False):
+async def validate(db, owner, team, caller, plan, *, turn_id, check_engine, reviewed_workspace=False, employee_codex_default=None):
     """Normalise and check a plan against the current state. Raises TeamError."""
     if team is None or caller.team_id != team.id or team.lead_agent_id != caller.id:
         raise TeamError('lead_only', 'Only the team lead can change the team.')
@@ -122,7 +123,10 @@ async def validate(db, owner, team, caller, plan, *, turn_id, check_engine, revi
             fields.setdefault('instructions', '')
             fields.setdefault('provider', caller.provider)
             if 'model' not in raw:
-                fields['model'] = caller.model if fields['provider'] == caller.provider else None
+                model = caller.model if fields['provider'] == caller.provider else None
+                if fields['provider'] == 'codex' and settings.STEWARD_STRICT_OWNER == owner and model in STEWARD_MODELS:
+                    model = None
+                fields['model'] = employee_codex_default if fields['provider'] == 'codex' and employee_codex_default else model
             check_engine(fields['provider'], fields['model'])
             if 'share_workspace' in raw and type(raw['share_workspace']) is not bool:
                 raise TeamError('invalid_input', 'share_workspace must be a boolean.')
@@ -376,7 +380,7 @@ async def _apply_operations(db, owner, caller, team, turn_id, thread_id, operati
     return results, undo
 
 
-async def prepare_pending(db, owner, caller_id, turn_id, thread_id, plan, *, check_engine, request_id=None, authorize=None):
+async def prepare_pending(db, owner, caller_id, turn_id, thread_id, plan, *, check_engine, request_id=None, authorize=None, employee_codex_default=None):
     """Validate a proposed setup and persist it for the person to review."""
     await begin_write(db)
     team = await team_for(db, owner, lock=True)
@@ -410,7 +414,8 @@ async def prepare_pending(db, owner, caller_id, turn_id, thread_id, plan, *, che
             await db.rollback()
         return replayed
     _guided_plan(plan)
-    operations = await validate(db, owner, team, caller, plan, turn_id=turn_id, check_engine=check_engine)
+    operations = await validate(db, owner, team, caller, plan, turn_id=turn_id, check_engine=check_engine,
+                                employee_codex_default=employee_codex_default)
     card_plan = review_plan(safe_plan, operations)
     if authorize:
         await authorize(db)
@@ -755,8 +760,19 @@ async def call(rt, run, name, args):
                 plan = {'operations': [{'op': 'create', **{key: value for key, value in args.items() if key != 'request_id'}}]}
             else:
                 plan = {k: v for k, v in args.items() if k != 'request_id'}
+            employee_default = None
+            operations = plan.get('operations')
+            if getattr(run.ctx, 'steward_deepseek', False) and isinstance(operations, list) and any(
+                isinstance(op, dict) and op.get('op') == 'create' and op.get('provider', 'codex') == 'codex'
+                and 'model' not in op for op in operations
+            ):
+                # Probe the employee's ordinary Codex home before taking the setup write lock.
+                engines = await rt.engines.describe(only='codex')
+                employee_default = next((e['default_model'] for e in engines if e['id'] == 'codex'
+                                         and e.get('default_model') and e['default_model'] not in STEWARD_MODELS), None)
             result = await prepare_pending(db, owner, caller, run.turn_id, run.thread_id, plan, check_engine=_checker(rt),
-                                           request_id=args.get('request_id'), authorize=_authorizer(rt, run))
+                                           request_id=args.get('request_id'), authorize=_authorizer(rt, run),
+                                           employee_codex_default=employee_default)
             if result['state'] == 'pending' and result.get('notify_thread_id'):
                 event_seq = result.get('event_seq')
                 if isinstance(event_seq, int):

@@ -6,6 +6,8 @@ import { api, request, type Agent, type Engine } from "@/lib/api";
 import { collaboration } from "@/lib/collaboration";
 import type { SkillSummary } from "@/lib/skills";
 import { StaffModelFields } from "./ProfileControls";
+import { DeepSeekKey } from "./DeepSeekKey";
+import { useSession } from "../AuthGate";
 import {
   AvatarPicker,
   Face,
@@ -27,6 +29,10 @@ type Props = {
   onSaved: (id: number) => void;
 };
 export function StaffEditor({ agent, lead, member, engines, onSaved }: Props) {
+  const { session } = useSession();
+  const ownsHost = session?.kind === "browser" && !!session.session_id && session.scopes.includes("admin")
+    && (session.role === "owner" || (!session.role && !session.person_id));
+  const isLead = !!agent && agent.id === lead?.id;
   const [name, setName] = useState(agent?.name ?? ""),
     [title, setTitle] = useState(agent?.title ?? ""),
     [summary, setSummary] = useState(agent?.description ?? "");
@@ -254,11 +260,15 @@ export function StaffEditor({ agent, lead, member, engines, onSaved }: Props) {
                 model={model}
                 disabled={!!agent?.role_path && !rules}
                 lockProvider={!!agent?.role_path}
+                stewardModels={isLead}
                 onChange={(p, m) => {
                   setProvider(p);
                   setModel(m);
                 }}
               />
+              {isLead && ownsHost && provider === "codex" && (model === "deepseek-flash" || model === "deepseek-v4-pro") && (
+                <DeepSeekKey />
+              )}
               {!agent && (
                 <label className="dp-field">
                   <span>

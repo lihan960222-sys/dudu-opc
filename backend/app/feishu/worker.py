@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
+from sqlalchemy.exc import SQLAlchemyError
 
 from . import approvals, direct_requests, enquiries, recalls, suggestions, team_progress, timing, video_frames
 from . import submissions
@@ -100,7 +101,7 @@ class Worker:
         if await history.answer(self,row,msg,text):
             return
         if not self.cfg['roles'] and self.cfg.get('steward_thread'):
-            self.direct_chat(row, msg, text)
+            await self.route_direct(row,msg,text)
             return
         intent, role, title, prompt = command(text)
         ref = self.reference(msg)
@@ -138,8 +139,17 @@ class Worker:
                 (row['app'],parent,row['app'],parent)).fetchone()
             casual = re.fullmatch(r'(你好|您好|早上好|晚上好|谢谢|辛苦了|在吗|你在吗|hi|hello)[！!.。？? ]*',text.strip(),re.I)
             if is_direct_reply or casual or not self.cfg.get('isolated_runner_enabled'):
-                self.direct_chat(row,msg,text)
+                await self.route_direct(row,msg,text)
                 return
+            if self.cfg.get('owner_id') and self.cfg['steward'].get('agent_id'):
+                from .lead_chat import select_thread
+                from app.services.steward_deepseek import MODELS
+                chosen,model=await select_thread(self.cfg,with_model=True)
+                if chosen!=self.cfg['steward_thread'] or model in MODELS:
+                    # The native lead can delegate. Do not send this owner's text
+                    # to the separate Codex intent classifier after a vendor switch.
+                    await self.route_direct(row,msg,text)
+                    return
         if not intent and not ref and not pending and text.strip() and self.cfg.get('isolated_runner_enabled'):
             if self.direct_notice(row,'running','已收到，正在确认任务归属。'):
                 self.flush(cleanup=False)
@@ -151,7 +161,7 @@ class Worker:
             if choice:
                 intent,role,title,ref = choice
                 if intent=='chat' and self.cfg.get('steward_thread'):
-                    self.direct_chat(row,msg,text)
+                    await self.route_direct(row,msg,text)
                     return
         if intent == 'independent' and ref:
             previous = self.db.execute('select role from bindings where task=?',(ref,)).fetchone()
@@ -347,13 +357,25 @@ class Worker:
             self.db.execute('insert into notice_recalls(outgoing) values(?)',(outgoing,))
         return outgoing
 
-    def direct_chat(self, row, msg, text):
+    async def route_direct(self,row,msg,text):
+        thread=self.cfg['steward_thread']
+        if self.cfg.get('owner_id') and self.cfg['steward'].get('agent_id') and not self.db.execute(
+                "select 1 from inbox where state in ('direct_running','direct_submitting')").fetchone():
+            from .lead_chat import select_thread
+            key=row['app'],row['event']
+            prior=self.db.execute('select thread from direct_targets where app=? and event=?',key).fetchone()
+            thread=prior[0] if prior else await select_thread(self.cfg)
+            with self.db:
+                self.db.execute('insert or ignore into direct_targets values(?,?,?)',(*key,thread))
+        self.direct_chat(row,msg,text,thread=thread)
+
+    def direct_chat(self, row, msg, text, *, thread=None):
         items = parts(msg['message_type'], json.loads(msg['content']))
         resources = [part for part in items if 'key' in part]
         if len(resources) > 8 or (not text.strip() and not resources):
             self.respond(row,'held','请发送文字或最多 8 个附件。')
             return
-        thread = self.cfg['steward_thread']
+        thread = thread or self.cfg['steward_thread']
         if self.db.execute("select 1 from inbox where state in ('direct_running','direct_submitting')").fetchone():
             self.direct_notice(row,'queued','已排队，等上一条处理完就开始。')
             return
@@ -391,6 +413,7 @@ class Worker:
         direct_requests.send(self,row)
 
     async def tick(self):
+        from .lead_chat import publish_reports,register_report
         for row in self.db.execute("select i.*,d.thread,d.turn from inbox i join direct_turns d using(app,event) where i.state='direct_running'").fetchall():
             try:
                 response = self.api.get(f"threads/{row['thread']}")
@@ -399,9 +422,10 @@ class Worker:
                 if turn and turn.get('finished_at'):
                     with self.db:
                         timing.finished(self.db,row,turn)
-                    self.direct_final(row,'done' if turn['status']=='succeeded' else 'held',
-                                 turn.get('result') or turn.get('error') or '本轮已结束，请在本机查看详情。')
-            except httpx.HTTPError:
+                    if not await register_report(self,row,turn):
+                        self.direct_final(row,'done' if turn['status']=='succeeded' else 'held',
+                                     turn.get('result') or turn.get('error') or '本轮已结束，请在本机查看详情。')
+            except (httpx.HTTPError, SQLAlchemyError):
                 continue
         for row in self.db.execute("select * from inbox where state in ('received','bound','submitting','running','suggestion_deciding','direct_submitting') and not exists (select 1 from retry where retry.id=inbox.app||'|'||inbox.event and retry.after>unixepoch()) order by rowid").fetchall():
             try:
@@ -452,6 +476,10 @@ class Worker:
                 with self.db:
                     self.db.execute('update inbox set error=? where app=? and event=?',(reason,row['app'],row['event']))
         from .history import deliver_ready,resume_jobs
+        try:
+            await publish_reports(self)
+        except SQLAlchemyError:
+            pass  # Pending receipts are retried on the next poll.
         resume_jobs(self)
         await deliver_ready(self)
         self.flush()

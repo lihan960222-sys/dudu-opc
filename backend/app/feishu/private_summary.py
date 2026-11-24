@@ -40,8 +40,10 @@ def executable():
 async def select_model(exe,provider,configured):
     if provider!='codex':
         raise ValueError('所选员工需要使用 OpenAI Codex。')
-    if not configured:
-        from app.services.codex_adapter import CodexAdapter
+    from app.services.codex_adapter import CodexAdapter, DEEPSEEK_MODELS
+    # This opt-in authorizes only the isolated OpenAI summarizer. It retains its
+    # own native default when the steward's ordinary conversations use DeepSeek.
+    if not configured or (isinstance(configured,str) and configured in DEEPSEEK_MODELS):
         catalog=await CodexAdapter()._live_models(exe)
         defaults=[option.id for option in catalog or [] if option.default]
         if len(defaults)!=1:

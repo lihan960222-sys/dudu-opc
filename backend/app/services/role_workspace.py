@@ -46,7 +46,7 @@ def validate_configured_location(folder: Path) -> None:
     from app.core.config import settings
     base = settings.SQLITE_FILE.parent
     private = [Path(__file__).resolve().parents[3], settings.SQLITE_FILE,
-               *(base / n for n in ("key.dpapi", "feishu.json", "feishu-state", "decisions",
+               *(base / n for n in ("key.dpapi", "steward-deepseek.dpapi", "deepseek-codex", "feishu.json", "feishu-state", "decisions",
                                     "attachments", "engine-processes", "auth-limits"))]
     private.extend(Path(v) for v in (settings.ATTACHMENTS_DIR, settings.DECISION_LOG_DIR,
                                       settings.ENGINE_PROCESS_DIR, settings.AUTH_LIMITS_DIR) if v)
@@ -104,6 +104,9 @@ def inventory(root: Path, task_id: str | None = None) -> list[dict]:
 async def validate_model(runtime, provider: str, model: str) -> None:
     runtime.check_engine_model(provider, model)
     if provider == "codex":
+        from app.services.codex_adapter import DEEPSEEK_MODELS
+        if model in DEEPSEEK_MODELS:
+            return
         entries = await runtime.engines.describe(only=provider)
         models = {m["id"] for entry in entries for m in entry["models"]}
         if model not in models and not any(entry.get("custom_models") for entry in entries):

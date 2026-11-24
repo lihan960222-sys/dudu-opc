@@ -90,6 +90,53 @@ async def test_review_card_model_and_custom_workspace(sessions, owner, team, tmp
         assert load(directory).instructions == 'Develop extensions'
 
 
+@pytest.mark.parametrize("tool, explicit", [
+    ("create_agent", None),
+    ("propose_team_setup", None),
+    ("propose_team_setup", "custom-worker"),
+])
+async def test_deepseek_lead_hires_with_employee_model(tool, explicit, sessions, owner, team, tmp_path, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from app.services import agent_memory, role_workspace
+    monkeypatch.setattr(setup.settings, "STEWARD_STRICT_OWNER", owner)
+    monkeypatch.setattr(setup.settings, "TEAM_ENABLED", True)
+    monkeypatch.setattr(agent_memory, "agent_home", lambda agent_id: tmp_path / str(agent_id))
+    async with sessions() as db:
+        lead = await db.get(Agent, team[0])
+        lead.provider, lead.model = "codex", "deepseek-flash"
+        thread = Thread(owner_id=owner, provider="codex", agent_id=lead.id)
+        db.add(thread)
+        await db.flush()
+        turn = Turn(thread_id=thread.id, seq=1, status="running", origin="person", owner_token="test",
+                    prompt_text="请招一名校对，先检查演示文稿的错别字。")
+        db.add(turn)
+        await db.commit()
+        run = SimpleNamespace(agent_id=lead.id, thread_id=thread.id, turn_id=turn.id, owner_token="test",
+            recorder=Mock(), ctx=SimpleNamespace(steward_deepseek=True, aborted=False, approval_mode="ask",
+            team=SimpleNamespace(origin="person", setup_allowed=True, configuration_allowed=True)))
+    # This host's native Codex registry supplies its current default; no hardcoded published model.
+    engines = SimpleNamespace(describe=AsyncMock(return_value=[{"id":"codex","default_model":"gpt-host-default"}]))
+    rt = SimpleNamespace(owner_id=owner, session=sessions, engines=engines, check_engine_model=Mock())
+    args = {"name":"Proofreader", "instructions":"Proofread slides.", "first_task":"Check spelling."}
+    if explicit:
+        args["model"] = explicit
+    if tool == "propose_team_setup":
+        args = {"operations":[{"op":"create", **args}]}
+    card = await setup.call(rt, run, tool, args)
+    expected = explicit or "gpt-host-default"
+    assert card["plan"]["operations"][0]["model"] == expected
+    assert engines.describe.await_count == (0 if explicit else 1)
+    async with sessions() as db:
+        assert not await db.scalar(select(Agent.id).where(Agent.owner_id == owner, Agent.name == "Proofreader"))
+        await setup.decide_pending(db, owner, card["request_id"], card["version"], approve=True,
+                                   check_engine=rt.check_engine_model)
+        worker = await db.scalar(select(Agent).where(Agent.owner_id == owner, Agent.name == "Proofreader"))
+        assert worker.provider == "codex" and worker.model == expected
+        assert role_workspace.load(Path(worker.role_path)).model == expected
+
+
 @pytest.mark.parametrize('operations,code', [
     ([], 'invalid_input'),
     ([{'op': 'create', 'name': 'X', 'provider': 'nope'}], 'unknown_provider'),
