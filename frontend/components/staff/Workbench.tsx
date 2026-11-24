@@ -18,6 +18,7 @@ import { planner, type WorkBoard, type WorkItem } from "@/lib/planner-api";
 import type { TeamSetupPlan } from "@/lib/transcript";
 import { TeamSetupCard } from "../chat/TeamCards";
 import { StaffEditor } from "./StaffEditor";
+import { ReportingBoard } from "./ReportingBoard";
 import { Face } from "./ProfileControls";
 import { FEISHU_RETURN_EMPLOYEE, feishuEntry } from "@/lib/feishu-employee";
 import "./workbench.css";
@@ -670,6 +671,7 @@ export function Workbench({ page, onChanged }: { page: ManagementSection; onChan
           )}
           {page === "people" && (
             <>
+              <ReportingBoard currentTeam={team} openProfile={id => { setActive(id); void refresh(); }} />
               <div className="dp-directory">
               <nav className="dp-roster" aria-label="员工名册">
                 {ordered.map((a) => (

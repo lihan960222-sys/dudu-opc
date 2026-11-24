@@ -230,3 +230,20 @@
   #workbench :is(.dp-button,.dp-link,.dp-tabs button,.dp-person,.dp-avatar-options button,summary) {min-height:44px}
   #workbench :is(input,textarea,select) {font-size:16px}
 }
+
+#workbench .dp-org {margin:16px 0;border:1px solid var(--line);border-radius:var(--r);background:var(--paper)}
+#workbench .dp-org summary {display:flex;align-items:center;gap:10px;padding:13px 16px;cursor:pointer;font-weight:600;list-style:none}
+#workbench .dp-org summary::-webkit-details-marker {display:none}
+#workbench .dp-org summary::after {content:"";width:7px;height:7px;margin-left:auto;border:solid var(--sub);border-width:0 1.5px 1.5px 0;transform:rotate(45deg)}
+#workbench .dp-org[open] summary::after {transform:rotate(225deg)}
+#workbench .dp-org-body {display:grid;gap:16px;padding:4px 16px 16px}
+#workbench .dp-org-body h3,#workbench .dp-org-node small {color:var(--sub);font-size:12px}
+#workbench .dp-org-node,#workbench .dp-org-person {display:flex;align-items:center;gap:8px;min-height:34px}
+#workbench .dp-org-person {border-radius:6px;padding:3px 6px;text-align:start;overflow-wrap:anywhere}
+#workbench .dp-org-person:hover {background:var(--selected)}
+#workbench .dp-org-tree,#workbench .dp-org-tree ul {list-style:none;padding:0;margin:0}
+#workbench .dp-org-tree ul {margin-left:14px}
+#workbench .dp-org-tree ul>li {position:relative;padding:4px 0 0 20px}
+#workbench .dp-org-tree ul>li::before {content:"";position:absolute;left:0;top:0;height:100%;border-left:1px solid var(--line)}
+#workbench .dp-org-tree ul>li:last-child::before {height:21px}
+#workbench .dp-org-tree ul>li::after {content:"";position:absolute;left:0;top:21px;width:15px;border-top:1px solid var(--line)}
