@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { api, type VersionInfo } from "@/lib/api";
+import { useT } from "@/lib/use-i18n";
 
 export type UpdateState = {
   status: "idle" | "checking" | "available" | "downloading" | "downloaded" | "installing" | "error";
@@ -19,19 +20,26 @@ export type UpdatesBridge = {
   onState(listener: (state: UpdateState) => void): () => void;
 };
 
-function summary(state: UpdateState) {
+function summary(state: UpdateState, t: ReturnType<typeof useT>) {
+  const version = state.version ?? "";
   switch (state.status) {
-    case "checking": return "Checking for updates…";
-    case "available": return `Version ${state.version} is available.`;
-    case "downloading": return `Downloading version ${state.version}… ${state.percent ?? 0}%`;
-    case "downloaded": return `Version ${state.version} is ready${state.verified ? " and verified" : ""}. Restart to finish updating.`;
-    case "installing": return state.message ?? "Restarting to finish the update…";
-    case "error": return state.message ?? "The update failed.";
-    default: return state.message ?? "Suparagent checks for new versions in the background.";
+    case "checking": return t("generalUi.checking");
+    case "available": return t("generalUi.available", {version});
+    case "downloading": return t("generalUi.downloading", {version, percent:state.percent ?? 0});
+    case "downloaded": return t(state.verified ? "generalUi.verified" : "generalUi.ready", {version});
+    case "installing": return t("generalUi.installing");
+    case "error": {
+      if (!state.message) return t("generalUi.failed");
+      const key = `updateError.${state.message}`;
+      const label = t(key);
+      return label === key ? state.message : label;
+    }
+    default: return state.message === "You have the latest version." ? t("generalUi.latest") : state.message ?? t("generalUi.background");
   }
 }
 
 function DesktopAppUpdates({ bridge }: { bridge: UpdatesBridge }) {
+  const t = useT();
   const [state, setState] = useState<UpdateState | null>(null);
 
   useEffect(() => {
@@ -48,22 +56,23 @@ function DesktopAppUpdates({ bridge }: { bridge: UpdatesBridge }) {
   return (
     <section aria-labelledby="app-updates" className="space-y-3 rounded-card border border-line bg-raised p-5">
       <div>
-        <h3 id="app-updates" className="font-semibold">App updates</h3>
-        <p className="mt-1 text-xs text-muted">You have version {state.current}. Updates come from the project&apos;s GitHub releases; nothing downloads or installs without your click.</p>
+        <h3 id="app-updates" className="font-semibold">{t("generalUi.updates")}</h3>
+        <p className="mt-1 text-xs text-muted">{t("generalUi.desktopIntro", {version:state.current})}</p>
       </div>
-      <p role={state.status === "error" ? "alert" : "status"} className={`text-sm ${state.status === "error" ? "text-danger" : ""}`}>{summary(state)}</p>
+      <p role={state.status === "error" ? "alert" : "status"} className={`text-sm ${state.status === "error" ? "text-danger" : ""}`}>{summary(state, t)}</p>
       <div className="flex flex-wrap gap-2">
-        {state.status === "available" && state.canDownload && <Button onClick={() => act("download")}>Download version {state.version}</Button>}
-        {state.status === "downloaded" && <Button onClick={() => act("install")}>Restart to update</Button>}
-        {(state.status === "available" || state.status === "downloaded") && <Button onClick={() => act("release-page")}>Release notes</Button>}
-        {state.status === "error" && state.canDownload && <Button onClick={() => act("download")}>Try the download again</Button>}
-        <Button disabled={working} onClick={() => act("check")}>{state.status === "checking" ? "Checking…" : "Check for updates"}</Button>
+        {state.status === "available" && state.canDownload && <Button onClick={() => act("download")}>{t("generalUi.download", {version:state.version ?? ""})}</Button>}
+        {state.status === "downloaded" && <Button onClick={() => act("install")}>{t("generalUi.restart")}</Button>}
+        {(state.status === "available" || state.status === "downloaded") && <Button onClick={() => act("release-page")}>{t("generalUi.release")}</Button>}
+        {state.status === "error" && state.canDownload && <Button onClick={() => act("download")}>{t("generalUi.retryDownload")}</Button>}
+        <Button disabled={working} onClick={() => act("check")}>{state.status === "checking" ? t("generalUi.checking") : t("generalUi.check")}</Button>
       </div>
     </section>
   );
 }
 
 function WebAppUpdates() {
+  const t = useT();
   const [info, setInfo] = useState<VersionInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -100,8 +109,8 @@ function WebAppUpdates() {
     return (
       <section aria-labelledby="app-updates" className="space-y-3 rounded-card border border-line bg-raised p-5">
         <div>
-          <h3 id="app-updates" className="font-semibold">App updates</h3>
-          <p className="mt-1 text-xs text-muted">Checking version…</p>
+          <h3 id="app-updates" className="font-semibold">{t("generalUi.updates")}</h3>
+          <p className="mt-1 text-xs text-muted">{t("generalUi.versionCheck")}</p>
         </div>
       </section>
     );
@@ -111,10 +120,10 @@ function WebAppUpdates() {
     return (
       <section aria-labelledby="app-updates" className="space-y-3 rounded-card border border-line bg-raised p-5">
         <div>
-          <h3 id="app-updates" className="font-semibold">App updates</h3>
-          <p className="mt-1 text-xs text-danger">Could not check for updates: {error}</p>
+          <h3 id="app-updates" className="font-semibold">{t("generalUi.updates")}</h3>
+          <p className="mt-1 text-xs text-danger">{t("generalUi.fetchError", {error})}</p>
         </div>
-        <Button size="sm" onClick={handleCheck}>Try again</Button>
+        <Button size="sm" onClick={handleCheck}>{t("generalUi.retry")}</Button>
       </section>
     );
   }
@@ -134,31 +143,31 @@ function WebAppUpdates() {
   return (
     <section aria-labelledby="app-updates" className="space-y-3 rounded-card border border-line bg-raised p-5">
       <div>
-        <h3 id="app-updates" className="font-semibold">App updates</h3>
+        <h3 id="app-updates" className="font-semibold">{t("generalUi.updates")}</h3>
         <p className="mt-1 text-xs text-muted">
-          You have version {info.current_version}{info.commit ? ` (${info.commit})` : ""}.
-          {info.install_kind ? ` Installed via ${info.install_kind}.` : ""}
+          {t("generalUi.current", {version:info.current_version})}{info.commit ? ` (${info.commit})` : ""}
+          {info.install_kind && ` · ${t("generalUi.install", {kind:t(`generalUi.${info.install_kind}`)})}`}
         </p>
       </div>
 
       {info.update_available ? (
         <div className="space-y-3">
           <p role="status" className="text-sm font-medium text-accent">
-            Version {info.latest_version} is available.
+            {t("generalUi.available", {version:info.latest_version ?? ""})}
           </p>
           <div className="space-y-1.5">
-            <p className="text-xs text-muted">Run this command to update:</p>
+            <p className="text-xs text-muted">{t("generalUi.command")}</p>
             <div className="flex items-center justify-between gap-3 rounded-field border border-line bg-surface p-2.5 font-mono text-xs">
               <span className="overflow-x-auto whitespace-pre">{info.update_command}</span>
               <Button size="sm" variant="secondary" onClick={copyCommand}>
-                {copied ? "Copied!" : "Copy"}
+                {t(copied ? "generalUi.copied" : "generalUi.copy")}
               </Button>
             </div>
           </div>
         </div>
       ) : (
         <p role="status" className="text-sm text-muted">
-          {info.latest_version ? "Suparagent is up to date." : "Suparagent checks for new versions in the background."}
+          {t(info.latest_version ? "generalUi.latest" : "generalUi.background")}
         </p>
       )}
 
@@ -170,11 +179,11 @@ function WebAppUpdates() {
             rel="noopener noreferrer"
             className="inline-flex h-9 items-center justify-center rounded-field border border-line bg-raised px-4 text-sm font-medium text-ink transition-colors hover:bg-hover"
           >
-            Release notes
+            {t("generalUi.release")}
           </a>
         )}
         <Button disabled={loading} loading={loading} onClick={handleCheck}>
-          {loading ? "Checking…" : "Check for updates"}
+          {loading ? t("generalUi.checking") : t("generalUi.check")}
         </Button>
       </div>
     </section>

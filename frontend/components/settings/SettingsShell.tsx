@@ -1,5 +1,6 @@
 "use client";
 
+import { useT } from "@/lib/use-i18n";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Component, Fragment, useCallback, useEffect, useRef, type ErrorInfo, type ReactNode } from "react";
@@ -40,10 +41,10 @@ function firstControl(scope: HTMLElement): HTMLElement | null {
 }
 
 class SettingsErrorBoundary extends Component<
-  { children: ReactNode },
+  { children: ReactNode; retry: string; failure: string },
   { hasError: boolean; error: Error | null }
 > {
-  constructor(props: { children: ReactNode }) {
+  constructor(props: { children: ReactNode; retry: string; failure: string }) {
     super(props);
     this.state = { hasError: false, error: null };
   }
@@ -61,10 +62,10 @@ class SettingsErrorBoundary extends Component<
       return (
         <div className="space-y-4">
           <Banner tone="danger">
-            {this.state.error?.message || "An unexpected error occurred in this settings panel."}
+            {this.state.error?.message || this.props.failure}
           </Banner>
           <Button variant="secondary" onClick={() => this.setState({ hasError: false, error: null })}>
-            Try again
+            {this.props.retry}
           </Button>
         </div>
       );
@@ -76,8 +77,10 @@ class SettingsErrorBoundary extends Component<
 // The frame every Settings page shares: a list of the pages beside (above, on a
 // phone) the page that is open.
 export function SettingsShell({ children }: { children: ReactNode }) {
+  const t = useT();
   const pathname = usePathname() ?? "";
   const active = activeSettingsPage(pathname);
+  useEffect(() => { document.title = t(`settingsPage.${active.id}`) + " · " + t("sidebar.settings") + " · Suparagent"; }, [active.id, t]);
   const { updateAvailable } = useVersionUpdate();
   const pendingFocus = useRef<(() => void) | null>(null);
   const focusAnchor = useCallback((anchorId: string) => {
@@ -104,7 +107,7 @@ export function SettingsShell({ children }: { children: ReactNode }) {
         ?? (anchor.matches("[data-setting-container]") ? anchor : anchor.closest<HTMLElement>("[data-setting-container]"))
         ?? (anchor.classList.contains("sr-only") ? root : anchor);
       const control = entry?.focusLabel
-        ? matchingControl(targetSection, entry.focusLabel)
+        ? matchingControl(targetSection, entry.focusLabel) ?? matchingControl(targetSection, t(`settingsSearch.${entry.id}`))
         : firstControl(targetSection);
       const expander = [...root.querySelectorAll<HTMLElement>("[data-setting-expand-for]")]
         .find((candidate) => candidate.dataset.settingExpandFor?.split(/\s+/).includes(anchorId));
@@ -113,7 +116,7 @@ export function SettingsShell({ children }: { children: ReactNode }) {
         return false;
       }
       if (entry?.focusLabel && !control && !allowFallback) return false;
-      const focusTarget = control ?? targetSection;
+      const focusTarget = control ?? (row && firstControl(row)) ?? targetSection;
       targetSection.scrollIntoView({ block: "start" });
       if (!focusTarget.hasAttribute("tabindex") && !focusTarget.matches("input, select, textarea, button, a[href], [tabindex]")) {
         focusTarget.tabIndex = -1;
@@ -129,7 +132,7 @@ export function SettingsShell({ children }: { children: ReactNode }) {
     observer.observe(document.body, { childList: true, subtree: true, attributes: true });
     timeout = setTimeout(() => { attempt(true); stop(); }, 5000);
     pendingFocus.current = stop;
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     const focusHash = () => {
@@ -156,27 +159,27 @@ export function SettingsShell({ children }: { children: ReactNode }) {
       <header className="flex h-12 items-center justify-between border-b border-line px-4">
         <div className="flex items-center gap-4">
           <Link href="/chat/" className="text-sm text-muted hover:underline">
-            ← Chat
+            ← {t("workspace.name")}
           </Link>
-          <h1 className="text-sm font-semibold">Settings</h1>
+          <h1 className="text-sm font-semibold">{t("sidebar.settings")}</h1>
         </div>
         <Link
           href="/docs/"
           className="text-xs text-muted transition-colors hover:text-ink hover:underline"
         >
-          Documentation ↗
+          {t("settingsShell.docs")} ↗
         </Link>
       </header>
       <div className="mx-auto max-w-4xl px-5 pt-4">
         <SettingsSearch />
       </div>
       <div className="mx-auto flex max-w-4xl flex-col gap-6 px-5 py-8 md:flex-row">
-        <nav aria-label="Settings" className="md:w-52 md:shrink-0">
+        <nav aria-label={t("sidebar.settings")} className="md:w-52 md:shrink-0">
           <ul className="flex gap-1 overflow-x-auto md:flex-col">
             {SETTINGS_NAV_GROUPS.map((group) => (
               <Fragment key={group.label}>
                 <li aria-hidden="true" className="hidden shrink-0 px-3 pt-3 text-xs font-semibold uppercase tracking-wide text-muted first:pt-0 md:block">
-                  {group.label}
+                  {t(`settingsShell.${group.label}`)}
                 </li>
                 {group.items.map((item) => (
                   <li key={item.href} className="shrink-0">
@@ -188,10 +191,10 @@ export function SettingsShell({ children }: { children: ReactNode }) {
                         item.pageId === active.id ? "bg-hover font-medium text-ink" : "text-muted"
                       )}
                     >
-                      <span>{item.label}</span>
+                      <span>{item.pageId ? t(`settingsPage.${item.pageId}`) : t("sidebar.apps") + " ↗"}</span>
                       {item.pageId === "general" && updateAvailable && (
                         <span className="ml-2 inline-flex items-center rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
-                          Update
+                          {t("workspace.update")}
                         </span>
                       )}
                     </Link>
@@ -203,10 +206,10 @@ export function SettingsShell({ children }: { children: ReactNode }) {
         </nav>
         <main className="min-w-0 flex-1 space-y-6">
           <div>
-            <h2 className="text-heading font-semibold">{active.label}</h2>
-            <p className="mt-1.5 text-body text-muted">{active.summary}</p>
+            <h2 className="text-heading font-semibold">{t(`settingsPage.${active.id}`)}</h2>
+            <p className="mt-1.5 text-body text-muted">{t(`settingsPage.${active.id}.summary`)}</p>
           </div>
-          <SettingsErrorBoundary key={active.href}>{children}</SettingsErrorBoundary>
+          <SettingsErrorBoundary key={active.href} retry={t("portal.retry")} failure={t("settingsShell.failed")}>{children}</SettingsErrorBoundary>
         </main>
       </div>
     </div>

@@ -71,15 +71,22 @@ export const SETTINGS_REGISTRY = [
 
 export type RankedSetting = { entry: SettingsRegistryEntry; score: number };
 
+export function localizedSettingsEntries(t: (key: string) => string): SettingsRegistryEntry[] {
+  return SETTINGS_REGISTRY.map(entry => ({
+    ...entry, title: t(`settingsSearch.${entry.id}`), section: t(`settingsSection.${entry.section}`),
+    keywords: [...entry.keywords, entry.title, entry.section],
+  }));
+}
+
 const normalize = (value: string) => value.toLocaleLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").trim();
 
 /** Return matching rows in relevance order, requiring every query word to match. */
-export function rankSettings(query: string): RankedSetting[] {
+export function rankSettings(query: string, entries: readonly SettingsRegistryEntry[] = SETTINGS_REGISTRY): RankedSetting[] {
   const normalized = normalize(query);
   if (!normalized) return [];
   const terms = normalized.split(/\s+/).filter(Boolean);
   const wholeTitleMatches = (entry: SettingsRegistryEntry) => normalize(entry.title) === normalized;
-  const scored = SETTINGS_REGISTRY.flatMap((entry, order) => {
+  const scored = entries.flatMap((entry, order) => {
     const title = normalize(entry.title);
     const section = normalize(entry.section);
     const keywords = entry.keywords.map(normalize);

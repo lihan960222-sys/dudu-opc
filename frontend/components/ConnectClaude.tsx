@@ -1,4 +1,5 @@
 "use client";
+import { useT } from "@/lib/use-i18n";
 
 import { useEffect, useState } from "react";
 import { api, ApiError } from "@/lib/api";
@@ -16,6 +17,7 @@ export function ConnectClaude({
   // The sandbox exists (Claude may not be signed in yet): enough for GitHub login.
   onSandbox?: (boxId: string) => void;
 }) {
+  const t = useT();
   const [boxId, setBoxId] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [loginUrl, setLoginUrl] = useState<string | null>(null);
@@ -44,7 +46,7 @@ export function ConnectClaude({
         setStatus("idle");
       } catch (err) {
         if (cancelled) return;
-        setError(err instanceof ApiError ? `Could not set up sandbox. ${err.message}` : "Could not set up sandbox.");
+        setError(err instanceof ApiError ? `Could not set up sandbox. ${err.message}` : t("settingsPage.couldNotSetUpSandbox"));
         setStatus("idle");
       }
     })();
@@ -64,7 +66,7 @@ export function ConnectClaude({
       setLoginUrl(login_url);
       setStatus("idle");
     } catch (err) {
-      setError(err instanceof ApiError ? `Could not start login. ${err.message}` : "Could not start login.");
+      setError(err instanceof ApiError ? `Could not start login. ${err.message}` : t("settingsPage.couldNotStartLogin"));
       setStatus("idle");
     }
   };
@@ -79,7 +81,7 @@ export function ConnectClaude({
       setLoginUrl(null);
       onReady(boxId);
     } catch (err) {
-      setError(err instanceof ApiError ? `Login failed. ${err.message}` : "Login failed.");
+      setError(err instanceof ApiError ? `Login failed. ${err.message}` : t("settingsPage.loginFailed"));
     } finally {
       setStatus("idle");
     }
@@ -87,27 +89,27 @@ export function ConnectClaude({
 
   if (status === "loading") {
     return (
-      <Card step={2} title="Connect Claude">
-        <p className="text-sm text-muted">Setting up your sandbox…</p>
+      <Card step={2} title={t("settingsPage.connectClaude")}>
+        <p className="text-sm text-muted">{t("settingsPage.settingUpYourSandbox")}</p>
       </Card>
     );
   }
 
   if (connected) {
     return (
-      <Card step={2} title="Connect Claude" done>
+      <Card step={2} title={t("settingsPage.connectClaude")} done>
         <p className="text-sm text-muted">
-          Claude is connected for this account.
+          {t("settingsPage.claudeIsConnectedForThisAccount")}
         </p>
       </Card>
     );
   }
 
   return (
-    <Card step={2} title="Connect Claude">
+    <Card step={2} title={t("settingsPage.connectClaude")}>
       {!loginUrl && (
         <Button onClick={startLogin} disabled={status === "starting" || !boxId}>
-          {status === "starting" ? "Starting…" : "Start login"}
+          {status === "starting" ? t("settingsPage.starting") : t("settingsPage.startLogin")}
         </Button>
       )}
 
@@ -119,21 +121,21 @@ export function ConnectClaude({
             rel="noopener noreferrer"
             className="block text-sm font-medium text-accent underline hover:opacity-80"
           >
-            Open Claude login →
+            {t("settingsPage.openClaudeLogin")}
           </a>
           <p className="text-sm text-muted">
-            After logging in, paste the code it gives you:
+            {t("settingsPage.afterLoggingInPasteTheCodeItGives")}
           </p>
           <div className="flex gap-2">
             <Input
               value={code}
               onChange={(e) => setCode(e.target.value)}
-              placeholder="paste code here"
-              aria-label="Claude login code"
+              placeholder={t("settingsPage.pasteCodeHere")}
+              aria-label={t("settingsPage.claudeLoginCode")}
               className="max-w-xs"
             />
             <Button onClick={submitCode} disabled={status === "submitting" || !code.trim()}>
-              {status === "submitting" ? "Submitting…" : "Submit"}
+              {status === "submitting" ? t("settingsPage.submitting") : t("settingsPage.submit")}
             </Button>
           </div>
         </div>

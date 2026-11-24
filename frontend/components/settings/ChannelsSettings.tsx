@@ -23,7 +23,7 @@ function ChannelsContent() {
       const { user_id } = await auth.setIdentity(identity);
       setUserId(user_id);
     } catch (err) {
-      setIdentityError(err instanceof ApiError ? `Could not save who you are. ${err.message}` : "Could not save who you are.");
+      setIdentityError(err instanceof ApiError ? `${t("personalSettings.identity")} ${err.message}` : t("personalSettings.identity"));
     }
   };
 
@@ -32,7 +32,7 @@ function ChannelsContent() {
     try {
       await auth.clearIdentity();
     } catch (err) {
-      setIdentityError(err instanceof ApiError ? `Could not start over. ${err.message}` : "Could not start over.");
+      setIdentityError(err instanceof ApiError ? `${t("personalSettings.reset")} ${err.message}` : t("personalSettings.reset"));
       return;
     }
     setUserId(null);

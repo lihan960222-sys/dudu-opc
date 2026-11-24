@@ -1,4 +1,6 @@
 "use client";
+import { translateNow, useT } from "@/lib/use-i18n";
+import { settingsTerm } from "@/lib/locales/settings-pages";
 
 import { useCallback, useEffect, useState } from "react";
 import { ApiError } from "@/lib/api";
@@ -33,6 +35,7 @@ function failure(err: unknown, fallback: string): string {
 
 // Shown once, right after an invitation is made: the secret is not kept in readable form.
 function NewInvite({ invite, onDone }: { invite: Invite & { token: string }; onDone: () => void }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   const link = inviteLink(window.location.origin, BASE_PATH, invite);
   const copy = async () => {
@@ -46,13 +49,12 @@ function NewInvite({ invite, onDone }: { invite: Invite & { token: string }; onD
   return (
     <div className="space-y-3 rounded-md border border-line p-4" aria-live="polite" data-testid="new-invite">
       <p className="text-sm">
-        Send this link to <strong>{invite.email}</strong>. It works once, only for that address, and expires {when(invite.expires_at)}.
-        It is shown only now.
+        {t("settingsPage.sendThisLinkTo")} <strong>{invite.email}</strong>{t("settingsPage.itWorksOnceOnlyForThatAddressAnd")} {when(invite.expires_at)}{t("settingsPage.itIsShownOnlyNow")}
       </p>
       <p className="break-all rounded bg-inset p-2 font-mono text-xs" data-testid="invite-link">{link}</p>
       <div className="flex gap-2">
-        <Button type="button" onClick={copy}>{copied ? "Copied" : "Copy link"}</Button>
-        <Button type="button" variant="ghost" onClick={onDone}>Done</Button>
+        <Button type="button" onClick={copy}>{copied ? t("settingsPage.copied") : t("settingsPage.copyLink")}</Button>
+        <Button type="button" variant="ghost" onClick={onDone}>{t("settingsPage.done")}</Button>
       </div>
     </div>
   );
@@ -66,6 +68,7 @@ export function PeopleSection() {
 }
 
 function LocalPeopleSection() {
+  const t = useT();
   const { session } = useSession();
   const [roster, setRoster] = useState<Person[] | null>(null);
   const [invites, setInvites] = useState<Invite[]>([]);
@@ -93,7 +96,7 @@ function LocalPeopleSection() {
       setError(null);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) setUnavailable(true);
-      else setError(failure(err, "Could not load the people in this workspace."));
+      else setError(failure(err, translateNow("settingsPage.couldNotLoadThePeopleInThisWorkspace")));
     }
   }, [admin]);
 
@@ -123,20 +126,20 @@ function LocalPeopleSection() {
     setCreated(made as Invite & { token: string });
     setEmail("");
     setAccess(DEFAULT_ACCESS);
-  }, "Could not create the invitation.");
+  }, t("settingsPage.couldNotCreateTheInvitation"));
 
   const toggleAudit = async () => {
     const next = !showAudit;
     setShowAudit(next);
     if (next) {
-      try { setAudit(await people.audit()); } catch (err) { setError(failure(err, "Could not load the history.")); }
+      try { setAudit(await people.audit()); } catch (err) { setError(failure(err, t("settingsPage.couldNotLoadTheHistory"))); }
     }
   };
 
   const remove = (person: Person) => {
     if (confirming !== person.id) { setConfirming(person.id); return; }
     setConfirming(null);
-    void act(() => people.remove(person.id), `Could not remove ${person.display_name}.`);
+    void act(() => people.remove(person.id), t("settingsPage.removeFailed",{name:person.display_name}));
   };
 
   const saveAccess = (person: Person) => act(async () => {
@@ -144,17 +147,17 @@ function LocalPeopleSection() {
       ? { role: draft.role }
       : { role: draft.role, ...(draft.role === "member" ? { permissions: draft.permissions } : {}) });
     setEditing(null);
-  }, "Could not change that access.");
+  }, t("settingsPage.couldNotChangeThatAccess"));
 
   // An admin changes members and viewers; only the owner touches admins.
   const canManage = (person: Person) => admin && !person.is_you && person.role !== "owner" && (person.role !== "admin" || isOwner);
 
   return (
     <section className="space-y-4 rounded-lg border border-line p-5" aria-labelledby="people-heading">
-      <h3 id="people-heading" className="font-semibold">People</h3>
+      <h3 id="people-heading" className="font-semibold">{t("settingsPage.people")}</h3>
       <p className="text-xs text-muted">
-        Everyone here works in the same workspace and sees the same agents, rooms and conversations.
-        {session?.display_name ? ` You are signed in as ${session.display_name}${session.role ? ` (${ROLE_LABELS[session.role]})` : ""}.` : ""}
+        {t("settingsPage.everyoneHereWorksInTheSameWorkspaceAnd")}
+        {session?.display_name ? " " + t("settingsPage.signedInAs",{name:session.display_name}) + (session.role ? ` (${settingsTerm(t,ROLE_LABELS[session.role])})` : "") : ""}
       </p>
       {error && <Banner tone="danger">{error}</Banner>}
 
@@ -167,33 +170,33 @@ function LocalPeopleSection() {
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium">
                   {person.display_name}
-                  {person.is_you && <span className="ml-2 rounded bg-inset px-1.5 py-0.5 text-xs font-normal">you</span>}
+                  {person.is_you && <span className="ml-2 rounded bg-inset px-1.5 py-0.5 text-xs font-normal">{t("settingsPage.you")}</span>}
                 </p>
                 <p className="text-xs text-muted">
                   {[
                     person.email, // only admins are shown addresses
-                    `joined ${when(person.joined_at)}`,
-                    person.last_login_at ? `last sign-in ${when(person.last_login_at)}` : null,
+                    t("settingsPage.joinedDate",{date:when(person.joined_at)}),
+                    person.last_login_at ? t("settingsPage.lastLogin",{date:when(person.last_login_at)}) : null,
                   ].filter(Boolean).join(" · ")}
                 </p>
               </div>
               <div className="flex items-center gap-2">
                 {canManage(person) ? (
                   <Button type="button" disabled={busy} aria-expanded={editing === person.id}
-                    aria-label={`Change what ${person.display_name} may do (now: ${describePermissions(person.role, person.permissions)})`}
+                    aria-label={t("settingsPage.changeAccess",{name:person.display_name,access:describePermissions(person.role,person.permissions).split(", ").map(label => settingsTerm(t,label)).join(" / ")})}
                     onClick={() => {
                       if (editing === person.id) { setEditing(null); return; }
                       setDraft({ role: person.role as Access["role"], permissions: [...person.permissions] });
                       setEditing(person.id);
                     }}>
-                    {describePermissions(person.role, person.permissions)}
+                    {describePermissions(person.role, person.permissions).split(", ").map(label => settingsTerm(t,label)).join(" / ")}
                   </Button>
                 ) : (
-                  <Badge>{describePermissions(person.role, person.permissions)}</Badge>
+                  <Badge>{describePermissions(person.role, person.permissions).split(", ").map(label => settingsTerm(t,label)).join(" / ")}</Badge>
                 )}
                 {canManage(person) && (
-                  <Button type="button" disabled={busy} onClick={() => remove(person)} aria-label={confirming === person.id ? `Confirm removing ${person.display_name}` : `Remove ${person.display_name}`}>
-                    {confirming === person.id ? "Confirm remove" : "Remove"}
+                  <Button type="button" disabled={busy} onClick={() => remove(person)} aria-label={confirming === person.id ? t("settingsPage.confirmRemoveName",{name:person.display_name}) : t("settingsPage.removeName",{name:person.display_name})}>
+                    {confirming === person.id ? t("settingsPage.confirmRemove") : t("settingsPage.remove")}
                   </Button>
                 )}
               </div>
@@ -201,8 +204,8 @@ function LocalPeopleSection() {
                 <div className="w-full space-y-3 rounded-md border border-line p-3" data-testid="access-editor">
                   <AccessPicker value={draft} onChange={setDraft} isOwner={isOwner} disabled={busy} />
                   <div className="flex gap-2">
-                    <Button type="button" variant="primary" disabled={busy} onClick={() => void saveAccess(person)}>Save</Button>
-                    <Button type="button" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
+                    <Button type="button" variant="primary" disabled={busy} onClick={() => void saveAccess(person)}>{t("settingsPage.save")}</Button>
+                    <Button type="button" variant="ghost" onClick={() => setEditing(null)}>{t("settingsPage.cancel")}</Button>
                   </div>
                 </div>
               )}
@@ -213,33 +216,33 @@ function LocalPeopleSection() {
 
       {admin && (
         <div className="space-y-3">
-          <h4 className="text-sm font-medium">Invite someone</h4>
+          <h4 className="text-sm font-medium">{t("settingsPage.inviteSomeone")}</h4>
           {created ? (
             <NewInvite invite={created} onDone={() => setCreated(null)} />
           ) : (
             <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); void invite(); }}>
               <div className="space-y-1">
-                <label htmlFor="invite-email" className="block text-sm font-medium">Email</label>
+                <label htmlFor="invite-email" className="block text-sm font-medium">{t("settingsPage.email")}</label>
                 <Input id="invite-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)}
                   placeholder="teammate@example.com" required maxLength={254} autoComplete="off" />
               </div>
               <AccessPicker value={access} onChange={setAccess} isOwner={isOwner} disabled={busy} />
-              <Button type="submit" disabled={busy || !email.trim()}>Create invitation link</Button>
+              <Button type="submit" disabled={busy || !email.trim()}>{t("settingsPage.createInvitationLink")}</Button>
             </form>
           )}
 
           {invites.length > 0 && (
             <div>
-              <h4 className="mb-1 text-sm font-medium">Waiting to join</h4>
+              <h4 className="mb-1 text-sm font-medium">{t("settingsPage.waitingToJoin")}</h4>
               <ul className="divide-y divide-line" data-testid="invite-list">
                 {invites.map((item) => (
                   <li key={item.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
                     <p className="min-w-0 truncate text-sm">
-                      {item.email} <span className="text-xs text-muted">· {describePermissions(item.role, item.permissions)} · expires {when(item.expires_at)}</span>
+                      {item.email} <span className="text-xs text-muted">· {describePermissions(item.role, item.permissions).split(", ").map(label => settingsTerm(t,label)).join(" / ")} {t("settingsPage.expires")} {when(item.expires_at)}</span>
                     </p>
-                    <Button type="button" disabled={busy || (item.role === "admin" && !isOwner)} aria-label={`Revoke the invitation for ${item.email}`}
-                      onClick={() => void act(() => people.revokeInvite(item.id), "Could not revoke that invitation.")}>
-                      Revoke
+                    <Button type="button" disabled={busy || (item.role === "admin" && !isOwner)} aria-label={t("settingsPage.revokeName",{name:item.email})}
+                      onClick={() => void act(() => people.revokeInvite(item.id), t("settingsPage.couldNotRevokeThatInvitation"))}>
+                      {t("settingsPage.revoke")}
                     </Button>
                   </li>
                 ))}
@@ -251,15 +254,15 @@ function LocalPeopleSection() {
 
           <div>
             <Button type="button" variant="ghost" onClick={toggleAudit} aria-expanded={showAudit}>
-              {showAudit ? "Hide history" : "Show history"}
+              {showAudit ? t("settingsPage.hideHistory") : t("settingsPage.showHistory")}
             </Button>
             {showAudit && (audit === null ? <SkeletonList rows={3} /> : audit.length === 0 ? (
-              <p className="mt-2 text-sm text-muted">Nothing has changed yet.</p>
+              <p className="mt-2 text-sm text-muted">{t("settingsPage.nothingHasChangedYet")}</p>
             ) : (
               <ul className="mt-2 divide-y divide-line" data-testid="audit-list">
                 {audit.map((row) => (
                   <li key={row.id} className="py-1.5 text-sm">
-                    <span className="font-medium">{row.actor || "Someone"}</span> {AUDIT_LABELS[row.action] ?? row.action} <span className="font-medium">{row.subject}</span>
+                    <span className="font-medium">{row.actor || t("settingsPage.someone")}</span> {AUDIT_LABELS[row.action] ?? row.action} <span className="font-medium">{row.subject}</span>
                     {row.detail && <span className="text-muted"> ({row.detail})</span>}
                     <span className="block text-xs text-muted">{when(row.at)}</span>
                   </li>

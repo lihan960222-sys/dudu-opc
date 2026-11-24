@@ -1,4 +1,6 @@
 "use client";
+import { translateNow, useT } from "@/lib/use-i18n";
+import { settingsTerm } from "@/lib/locales/settings-pages";
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -20,14 +22,15 @@ function when(iso: string): string {
   return new Date(iso).toLocaleString();
 }
 
-function QrCode({ text, label = "Pairing QR code", testId = "pairing-qr" }: { text: string; label?: string; testId?: string }) {
+function QrCode({ text, label, testId = "pairing-qr" }: { text: string; label?: string; testId?: string }) {
+  const t = useT();
   const qr = useMemo(() => {
     const matrix = encodeQr(text);
     return matrix ? qrSvgPath(matrix) : null;
   }, [text]);
   if (!qr) return null;
   return (
-    <svg role="img" aria-label={label} viewBox={`0 0 ${qr.size} ${qr.size}`} width={192} height={192}
+    <svg role="img" aria-label={label ?? t("settingsPage.pairingQrCode")} viewBox={`0 0 ${qr.size} ${qr.size}`} width={192} height={192}
       shapeRendering="crispEdges" className="rounded bg-white" data-testid={testId}>
       <rect width={qr.size} height={qr.size} fill="#fff" />
       <path d={qr.path} fill="#000" />
@@ -36,6 +39,7 @@ function QrCode({ text, label = "Pairing QR code", testId = "pairing-qr" }: { te
 }
 
 function OpenCode({ code, onDone }: { code: PairingCode; onDone: () => void }) {
+  const t = useT();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -48,33 +52,34 @@ function OpenCode({ code, onDone }: { code: PairingCode; onDone: () => void }) {
     <div className="space-y-3 rounded-md border border-line p-4" aria-live="polite">
       {left > 0 ? (
         <>
-          <p className="text-sm">On the other device, scan the code or open <span className="break-all font-mono text-xs">{link}</span></p>
+          <p className="text-sm">{t("settingsPage.onTheOtherDeviceScanTheCodeOr")} <span className="break-all font-mono text-xs">{link}</span></p>
           <div className="flex flex-wrap items-center gap-4">
             <QrCode text={link} />
             <div>
               <p className="font-mono text-2xl font-semibold tracking-widest" data-testid="pairing-code">{code.display_code}</p>
-              <p className="text-xs text-muted">{codeAccess(code.scope)} · works once · {Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")} left</p>
+              <p className="text-xs text-muted">{settingsTerm(t,codeAccess(code.scope))} {t("settingsPage.worksOnce")} {Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")} {t("settingsPage.left")}</p>
             </div>
           </div>
           {code.scope !== "admin" ? (
             <div className="space-y-2" data-testid="app-pairing">
-              <p className="text-sm">In the phone app, scan this code instead, or open <span className="break-all font-mono text-xs">{appLink}</span></p>
-              <QrCode text={appLink} label="Phone app pairing QR code" testId="app-pairing-qr" />
+              <p className="text-sm">{t("settingsPage.inThePhoneAppScanThisCodeInstead")} <span className="break-all font-mono text-xs">{appLink}</span></p>
+              <QrCode text={appLink} label={t("settingsPage.phoneAppPairingQrCode")} testId="app-pairing-qr" />
             </div>
           ) : (
-            <p className="text-xs text-muted">The phone app does not accept a Full access code. Create a Chat only, Chat and files, or Chat, files and agents code to pair the app.</p>
+            <p className="text-xs text-muted">{t("settingsPage.thePhoneAppDoesNotAcceptAFull")}</p>
           )}
         </>
       ) : (
-        <p className="text-sm text-muted">That code has expired.</p>
+        <p className="text-sm text-muted">{t("settingsPage.thatCodeHasExpired")}</p>
       )}
-      <Button type="button" onClick={onDone}>Done</Button>
+      <Button type="button" onClick={onDone}>{t("settingsPage.done")}</Button>
     </div>
   );
 }
 
 // Signed-in browsers and paired devices: pair a new one, see and revoke them (docs/AUTH.md).
 export function DevicesSection() {
+  const t = useT();
   const { session } = useSession();
   const router = useRouter();
   const [devices, setDevices] = useState<Device[] | null>(null);
@@ -92,7 +97,7 @@ export function DevicesSection() {
       setDevices(await auth.devices());
       setError(null);
     } catch (err) {
-      setError(err instanceof ApiError ? `Could not load devices. ${err.message}` : "Could not load devices.");
+      setError(err instanceof ApiError ? `${translateNow("settingsPage.couldNotLoadDevices")} ${err.message}` : translateNow("settingsPage.couldNotLoadDevices"));
     }
   }, []);
 
@@ -110,7 +115,7 @@ export function DevicesSection() {
       setCode(await auth.createPairingCode(scope, label));
       setLabel("");
     } catch (err) {
-      setError(err instanceof ApiError ? `Could not create a pairing code. ${err.message}` : "Could not create a pairing code.");
+      setError(err instanceof ApiError ? `${t("settingsPage.couldNotCreateAPairingCode")} ${err.message}` : t("settingsPage.couldNotCreateAPairingCode"));
     } finally {
       setBusy(false);
     }
@@ -131,7 +136,7 @@ export function DevicesSection() {
       }
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? `Could not revoke that device. ${err.message}` : "Could not revoke that device.");
+      setError(err instanceof ApiError ? `${t("settingsPage.couldNotRevokeThatDevice")} ${err.message}` : t("settingsPage.couldNotRevokeThatDevice"));
     } finally {
       setBusy(false);
     }
@@ -144,13 +149,13 @@ export function DevicesSection() {
   return (
     <section className="space-y-4 rounded-lg border border-line p-5" aria-labelledby="devices-heading">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 id="devices-heading" className="font-semibold">Devices</h3>
-        {session.kind === "browser" && <Button type="button" onClick={signOut}>Sign out</Button>}
+        <h3 id="devices-heading" className="font-semibold">{t("settingsPage.devices")}</h3>
+        {session.kind === "browser" && <Button type="button" onClick={signOut}>{t("settingsPage.signOut")}</Button>}
       </div>
       <p className="text-xs text-muted">
         {session.kind === "loopback"
-          ? "This request is trusted because it comes from this machine (LOOPBACK_TRUST)."
-          : `Signed in as ${session.label ?? "this browser"} · ${deviceAccess(session.scopes)}.`}
+          ? t("settingsPage.thisRequestIsTrustedBecauseItComesFrom")
+          : t("settingsPage.signedInAs",{name:session.label ?? t("settingsPage.thisBrowser")}) + " · " + settingsTerm(t,deviceAccess(session.scopes))}
       </p>
       {error && <Banner tone="danger">{error}</Banner>}
       {admin && (
@@ -159,36 +164,36 @@ export function DevicesSection() {
             <OpenCode code={code} onDone={() => { setCode(null); void load(); }} />
           ) : (
             <div className="space-y-3">
-              <p className="text-sm text-muted">Pair a phone, tablet or another browser with a one-time code.</p>
+              <p className="text-sm text-muted">{t("settingsPage.pairAPhoneTabletOrAnotherBrowserWith")}</p>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1">
-                  <label htmlFor="pair-scope" className="block text-sm font-medium">Access</label>
+                  <label htmlFor="pair-scope" className="block text-sm font-medium">{t("settingsPage.access")}</label>
                   <Select id="pair-scope" value={scope} onChange={(e) => setScope(e.target.value as PairingScope)}>
-                    {PAIRING_CHOICES.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+                    {PAIRING_CHOICES.map((choice) => <option key={choice.value} value={choice.value}>{settingsTerm(t,choice.label)}</option>)}
                   </Select>
                 </div>
                 <div className="space-y-1">
-                  <label htmlFor="pair-label" className="block text-sm font-medium">Name (optional)</label>
-                  <Input id="pair-label" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="My phone" maxLength={80} />
+                  <label htmlFor="pair-label" className="block text-sm font-medium">{t("settingsPage.nameOptional")}</label>
+                  <Input id="pair-label" value={label} onChange={(e) => setLabel(e.target.value)} placeholder={t("settingsPage.myPhone")} maxLength={80} />
                 </div>
               </div>
-              <Button type="button" onClick={create} disabled={busy}>Create pairing code</Button>
+              <Button type="button" onClick={create} disabled={busy}>{t("settingsPage.createPairingCode")}</Button>
             </div>
           )}
           <div>
-            <h4 className="mb-2 text-sm font-medium">Signed in</h4>
+            <h4 className="mb-2 text-sm font-medium">{t("settingsPage.signedIn")}</h4>
             {devices === null ? <SkeletonList rows={3} /> : devices.length === 0 ? (
-              <EmptyState title="No signed-in browsers or paired devices." description="Create a pairing code above to add your phone." className="py-6" />
+              <EmptyState title={t("settingsPage.noSignedInBrowsersOrPairedDevices")} description={t("settingsPage.createAPairingCodeAboveToAddYour")} className="py-6" />
             ) : (
               <ul className="divide-y divide-line">
                 {devices.map((device) => (
                   <li key={device.id} className="flex flex-wrap items-center justify-between gap-2 py-2" data-testid="device-row">
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-medium">{device.label}{device.current && <span className="ml-2 rounded bg-inset px-1.5 py-0.5 text-xs font-normal">this browser</span>}</p>
-                      <p className="text-xs text-muted">{device.kind === "browser" ? "Browser" : "Device token"} · {deviceAccess(device.scopes)} · last seen {when(device.last_seen_at)} · since {when(device.created_at)}</p>
+                      <p className="truncate text-sm font-medium">{device.label}{device.current && <span className="ml-2 rounded bg-inset px-1.5 py-0.5 text-xs font-normal">{t("settingsPage.thisBrowser")}</span>}</p>
+                      <p className="text-xs text-muted">{device.kind === "browser" ? t("settingsPage.browser") : t("settingsPage.deviceToken")} · {settingsTerm(t,deviceAccess(device.scopes))} {t("settingsPage.lastSeen")} {when(device.last_seen_at)} {t("settingsPage.since")} {when(device.created_at)}</p>
                     </div>
-                    <Button type="button" disabled={busy} onClick={() => revoke(device)} aria-label={`Revoke ${device.label}`}>
-                      {confirming === device.id ? "Confirm revoke" : "Revoke"}
+                    <Button type="button" disabled={busy} onClick={() => revoke(device)} aria-label={t("settingsPage.revokeName",{name:device.label})}>
+                      {confirming === device.id ? t("settingsPage.confirmRevoke") : t("settingsPage.revoke")}
                     </Button>
                   </li>
                 ))}

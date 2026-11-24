@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { settingsSearchKeyAction } from "./settings-registry.ts";
+import { localizedSettingsEntries, rankSettings, settingsSearchKeyAction } from "./settings-registry.ts";
+import { settingsGeneralMessages } from "./locales/settings-general-extra.ts";
+
+test("translated names and English keywords find the same setting and keep its anchor", () => {
+  const entries = localizedSettingsEntries(key => settingsGeneralMessages.zh[key] ?? key);
+  for (const query of ["更新", "check for updates"]) {
+    const [first] = rankSettings(query, entries);
+    assert.equal(first.entry.title, "检查更新");
+    assert.equal(first.entry.anchorId, "setting-general-updates");
+  }
+  assert.ok(entries.every(entry => !entry.title.startsWith("settingsSearch.") && !entry.section.startsWith("settingsSection.")));
+});
 
 test("settings search supports wrapped arrow navigation and Home/End", () => {
   assert.deepEqual(settingsSearchKeyAction("ArrowDown", 2, 3), { type: "move", active: 0 });

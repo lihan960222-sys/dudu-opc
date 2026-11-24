@@ -67,6 +67,12 @@ export function useLanguageChoice(): LanguageChoice {
   return useSyncExternalStore(subscribe, currentChoice, () => "en");
 }
 
+// For asynchronous status/error messages: read the language when the operation
+// reports back. A language change must not restart sign-in or reload drafts.
+export function translateNow(key: string, params?: Record<string, string | number>): string {
+  return translate(currentLocale(), key, params);
+}
+
 export function useT() {
   const locale = useSyncExternalStore(subscribe, currentLocale, (): Locale => "en");
   return useCallback(

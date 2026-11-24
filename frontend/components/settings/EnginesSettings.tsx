@@ -1,4 +1,6 @@
 "use client";
+import { translateNow, useT } from "@/lib/use-i18n";
+import { settingsTerm } from "@/lib/locales/settings-pages";
 
 import { useEffect, useState } from "react";
 import { api, ApiError, isLaunchTokenMissing, type ApplicationSetting, type DesktopSettings } from "@/lib/api";
@@ -30,12 +32,12 @@ declare global {
 }
 
 const fields: Record<string, { label: string; help: string; type: "file" | "folder" | "checkbox" | "number"; min?: number; max?: number }> = {
-  LOCAL_CLAUDE_CLI_PATH: { label: "Claude executable", help: "Leave empty for automatic detection from PATH. A selected executable runs as your account. Windows npm claude.cmd shims are supported.", type: "file" },
-  LOCAL_WORKSPACE_ROOT: { label: "Workspace root", help: "New conversations use a workspace subfolder here. Existing conversations keep their original folder. Leave empty for the app default.", type: "folder" },
-  LOCAL_TOOLS_ENABLED: { label: "Allow local tools", help: "Allows file reads, file changes and commands on this computer. Calls Claude asks about still require Allow or Deny; your existing Claude permission rules also apply. When off, Claude can only chat.", type: "checkbox" },
-  LOCAL_TASK_TIMEOUT_SECONDS: { label: "Answer timeout (seconds)", help: "0 disables the hard time limit. Silent turns are still stopped by the inactivity watchdog. Waiting for approval pauses this timer.", type: "number", min: 0, max: 3600 },
-  LOCAL_APPROVAL_TIMEOUT_SECONDS: { label: "Approval timeout (seconds)", help: "New approvals use this limit. Questions already waiting keep their deadline. Unanswered questions are denied.", type: "number", min: 30, max: 3600 },
-  LOCAL_MAX_OUTPUT_BYTES: { label: "Answer output limit (bytes)", help: "Bounds the answer text retained from each run.", type: "number", min: 1024, max: 16000000 },
+  LOCAL_CLAUDE_CLI_PATH: { label: "settingsPage.claudeExecutable", help: "settingsPage.leaveEmptyForAutomaticDetectionFromPathA", type: "file" },
+  LOCAL_WORKSPACE_ROOT: { label: "settingsPage.workspaceRoot", help: "settingsPage.newConversationsUseAWorkspaceSubfolderHereExisting", type: "folder" },
+  LOCAL_TOOLS_ENABLED: { label: "settingsPage.allowLocalTools", help: "settingsPage.allowsFileReadsFileChangesAndCommandsOn", type: "checkbox" },
+  LOCAL_TASK_TIMEOUT_SECONDS: { label: "settingsPage.answerTimeoutSeconds", help: "settingsPage.0DisablesTheHardTimeLimitSilentTurns", type: "number", min: 0, max: 3600 },
+  LOCAL_APPROVAL_TIMEOUT_SECONDS: { label: "settingsPage.approvalTimeoutSeconds", help: "settingsPage.newApprovalsUseThisLimitQuestionsAlreadyWaiting", type: "number", min: 30, max: 3600 },
+  LOCAL_MAX_OUTPUT_BYTES: { label: "settingsPage.answerOutputLimitBytes", help: "settingsPage.boundsTheAnswerTextRetainedFromEachRun", type: "number", min: 1024, max: 16000000 },
 };
 
 const settingAnchors: Record<string, string> = {
@@ -47,10 +49,12 @@ const settingAnchors: Record<string, string> = {
   LOCAL_MAX_OUTPUT_BYTES: "setting-engine-output-limit",
 };
 
-const display = (value: unknown) => value === null || value === undefined ? "Unavailable" : value === "" ? "Automatic / app default" : typeof value === "string" ? value : JSON.stringify(value);
-const applies = (row: ApplicationSetting) => row.key === "LOCAL_WORKSPACE_ROOT" ? "New conversations" : row.key === "LOCAL_APPROVAL_TIMEOUT_SECONDS" ? "New approvals" : row.applies === "next_run" ? "Next turn" : row.applies === "restart" ? "After restart" : "Immediately";
-
 export function EnginesSettings() {
+  const t = useT();
+  const display = (value: unknown) => value === null || value === undefined ? t("settingsPage.unavailable") : value === "" ? t("settingsPage.automaticAppDefault") : typeof value === "string" ? value : JSON.stringify(value);
+  const applies = (row: ApplicationSetting) => row.key === "LOCAL_WORKSPACE_ROOT" ? t("settingsPage.newConversations") : row.key === "LOCAL_APPROVAL_TIMEOUT_SECONDS" ? t("settingsPage.newApprovals") : row.applies === "next_run" ? t("settingsPage.nextTurn") : row.applies === "restart" ? t("settingsPage.afterRestart") : t("settingsPage.immediately");
+
+
   const [data, setData] = useState<DesktopSettings | null>(null);
   const [drafts, setDrafts] = useState<Record<string, unknown>>({});
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
@@ -75,7 +79,7 @@ export function EnginesSettings() {
     }).catch((err: unknown) => {
       if (cancelled) return;
       if (err instanceof ApiError && err.status === 404) { setHeadless(true); setError(null); }
-      else setError(isLaunchTokenMissing(err) ? "Open Settings inside the Suparagent app window." : err instanceof ApiError ? err.message : "Could not reach the backend. Check that the app is running.");
+      else setError(isLaunchTokenMissing(err) ? translateNow("settingsPage.openSettingsInsideTheSuparagentAppWindow") : err instanceof ApiError ? err.message : translateNow("settingsPage.couldNotReachTheBackendCheckThatThe"));
     });
     return () => { cancelled = true; };
   }, [loadTick]);
@@ -92,9 +96,9 @@ export function EnginesSettings() {
       const saved = await api.saveDesktopSetting(row.key, drafts[row.key], row.version);
       updateSavedRow(row, saved);
       confirmation.showSaved(row.key);
-      toast(`${fields[row.key].label} saved. Applies to ${applies(saved).toLowerCase()}. Running turns and existing approval deadlines stay unchanged.`);
+      toast(t("settingsPage.savedWhen",{field:t(fields[row.key].label),when:applies(saved)}));
       if (row.key === "LOCAL_CLAUDE_CLI_PATH") setStatus(null);
-    } catch (err) { setRowErrors((previous) => ({ ...previous, [row.key]: err instanceof ApiError ? err.message : "Could not save. Your changes remain in the form." })); }
+    } catch (err) { setRowErrors((previous) => ({ ...previous, [row.key]: err instanceof ApiError ? err.message : t("settingsPage.couldNotSaveYourChangesRemainInThe") })); }
     finally { setBusy(null); }
   };
 
@@ -106,24 +110,24 @@ export function EnginesSettings() {
       const saved = await api.saveDesktopSetting(row.key, value, row.version);
       updateSavedRow(row, saved);
       confirmation.showSaved(row.key);
-      toast(`${fields[row.key].label} saved. Applies to ${applies(saved).toLowerCase()}.`);
+      toast(t("settingsPage.savedWhen",{field:t(fields[row.key].label),when:applies(saved)}));
     } catch (err) {
       setDrafts((previous) => ({ ...previous, [row.key]: row.value }));
-      setRowErrors((previous) => ({ ...previous, [row.key]: err instanceof ApiError ? err.message : "Could not save this change." }));
+      setRowErrors((previous) => ({ ...previous, [row.key]: err instanceof ApiError ? err.message : t("settingsPage.couldNotSaveThisChange") }));
     } finally { setBusy(null); }
   };
 
   const browse = async (row: ApplicationSetting) => {
     setBusy(row.key); setError(null);
     try {
-      if (!window.suparagent) throw new Error("Browse is available inside the desktop app.");
+      if (!window.suparagent) throw new Error(t("settingsPage.browseIsAvailableInsideTheDesktopApp"));
       const selected = await window.suparagent.choosePath(fields[row.key].type === "file" ? "file" : "folder");
       if (selected !== null) {
         setDrafts((previous) => ({ ...previous, [row.key]: selected }));
         setRowErrors((previous) => ({ ...previous, [row.key]: "" }));
         confirmation.clearSaved(row.key);
       }
-    } catch (err) { setError(err instanceof Error ? err.message : "Could not open the picker."); }
+    } catch (err) { setError(err instanceof Error ? err.message : t("settingsPage.couldNotOpenThePicker")); }
     finally { setBusy(null); }
   };
 
@@ -131,13 +135,13 @@ export function EnginesSettings() {
     setChecking(true);
     try {
       const result = await api.testDesktopClaude();
-      setStatus(result.available ? `Ready${result.version ? ` · ${result.version}` : ""}` : result.error || "Claude is not ready.");
-    } catch { setStatus("Could not check Claude. Try again."); }
+      setStatus(result.available ? `${t("settingsPage.ready")}${result.version ? ` · ${result.version}` : ""}` : result.error || t("settingsPage.claudeIsNotReady"));
+    } catch { setStatus(t("settingsPage.couldNotCheckClaudeTryAgain")); }
     finally { setChecking(false); }
   };
 
   return <div className="space-y-6" data-setting-root>
-      <div className="sr-only" aria-label="Engine setting anchors">
+      <div className="sr-only" aria-label={t("settingsPage.engineSettingAnchors")}>
         <span id="setting-engine-claude-executable" />
         <span id="setting-engine-workspace-root" />
         <span id="setting-engine-local-tools" />
@@ -145,10 +149,10 @@ export function EnginesSettings() {
         <span id="setting-engine-approval-timeout" />
         <span id="setting-engine-output-limit" />
       </div>
-      {error && <Banner tone="danger" action={!headless ? <Button size="sm" onClick={() => setLoadTick((n) => n + 1)}>Try again</Button> : undefined}>{error}</Banner>}
-      {headless && <p className="text-sm text-muted">Workspace, executable and timeout preferences use the backend environment configuration in this installation.</p>}
+      {error && <Banner tone="danger" action={!headless ? <Button size="sm" onClick={() => setLoadTick((n) => n + 1)}>{t("settingsPage.tryAgain")}</Button> : undefined}>{error}</Banner>}
+      {headless && <p className="text-sm text-muted">{t("settingsPage.workspaceExecutableAndTimeoutPreferencesUseTheBackend")}</p>}
       {!data && !error && !headless && <SkeletonList rows={4} />}
-      {!headless && data && <Button disabled={busy !== null} onClick={() => setLoadTick((n) => n + 1)}>Reload saved settings</Button>}
+      {!headless && data && <Button disabled={busy !== null} onClick={() => setLoadTick((n) => n + 1)}>{t("settingsPage.reloadSavedSettings")}</Button>}
       {data && !settingUp && <>
         <SettingsCard title="Claude Code" className="space-y-5">
           {data.settings.map((row) => {
@@ -158,16 +162,16 @@ export function EnginesSettings() {
             const dirty = JSON.stringify(value) !== JSON.stringify(row.value);
             const formId = `local-setting-${row.key}`;
             return <form key={row.key} id={formId} data-setting-id={settingAnchors[row.key]} onSubmit={(event) => { event.preventDefault(); void save(row); }} className="space-y-2 border-b border-line pb-5 last:border-0 last:pb-0">
-              <label htmlFor={row.key} className="block text-sm font-medium">{field.label}</label>
+              <label htmlFor={row.key} className="block text-sm font-medium">{t(field.label)}</label>
               <div className="flex items-center gap-2">
-                {field.type === "checkbox" ? <Checkbox id={row.key} label="On" disabled={busy !== null} checked={value === true} onChange={(event) => void saveInstant(row, event.target.checked)} /> : <Input id={row.key} disabled={busy !== null} type={field.type === "number" ? "number" : "text"} min={field.min} max={field.max} step={1} required={field.type === "number"} value={field.type === "number" ? typeof value === "number" ? value : "" : typeof value === "string" ? value : ""} onChange={(event) => { setDrafts((previous) => ({ ...previous, [row.key]: field.type === "number" ? event.target.value === "" ? null : Number(event.target.value) : event.target.value })); setRowErrors((previous) => ({ ...previous, [row.key]: "" })); confirmation.clearSaved(row.key); }} autoComplete="off" spellCheck={false} />}
-                {(field.type === "file" || field.type === "folder") && <Button aria-label={`Browse ${field.label}`} disabled={busy !== null} onClick={() => browse(row)}>Browse</Button>}
+                {field.type === "checkbox" ? <Checkbox id={row.key} label={t("settingsPage.on")} disabled={busy !== null} checked={value === true} onChange={(event) => void saveInstant(row, event.target.checked)} /> : <Input id={row.key} disabled={busy !== null} type={field.type === "number" ? "number" : "text"} min={field.min} max={field.max} step={1} required={field.type === "number"} value={field.type === "number" ? typeof value === "number" ? value : "" : typeof value === "string" ? value : ""} onChange={(event) => { setDrafts((previous) => ({ ...previous, [row.key]: field.type === "number" ? event.target.value === "" ? null : Number(event.target.value) : event.target.value })); setRowErrors((previous) => ({ ...previous, [row.key]: "" })); confirmation.clearSaved(row.key); }} autoComplete="off" spellCheck={false} />}
+                {(field.type === "file" || field.type === "folder") && <Button aria-label={t("settingsPage.browseField",{field:t(field.label)})} disabled={busy !== null} onClick={() => browse(row)}>{t("settingsPage.browse")}</Button>}
               </div>
-              <p className="text-xs text-muted">{field.help}{field.type === "number" ? ` Range: ${field.min}–${field.max}.` : ""}</p>
-              <div className="flex flex-wrap items-center gap-2 text-xs text-muted"><span className="rounded bg-inset px-2 py-1">Source: {row.source}</span><Applies when={applies(row)} /></div>
-              <p className="break-all text-xs text-muted">Effective: {display(row.effective_value)} · Default: {display(row.default)}</p>
-              {row.resolved_path && <p className="break-all font-mono text-xs text-muted">New conversation folder: {row.resolved_path}</p>}
-              {row.error && <p role="alert" className="text-xs text-danger">{row.error} Stored value: {display(row.value)}</p>}
+              <p className="text-xs text-muted">{t(field.help)}{field.type === "number" ? " " + t("settingsPage.range",{min:field.min!,max:field.max!}) : ""}</p>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted"><span className="rounded bg-inset px-2 py-1">{t("settingsPage.source")} {settingsTerm(t,row.source)}</span><Applies when={applies(row)} /></div>
+              <p className="break-all text-xs text-muted">{t("settingsPage.effective")} {display(row.effective_value)} {t("settingsPage.default")} {display(row.default)}</p>
+              {row.resolved_path && <p className="break-all font-mono text-xs text-muted">{t("settingsPage.newConversationFolder")} {row.resolved_path}</p>}
+              {row.error && <p role="alert" className="text-xs text-danger">{row.error} {t("settingsPage.storedValue")} {display(row.value)}</p>}
               {field.type === "checkbox" ? <>
                 <SavedConfirmation visible={confirmation.saved.has(row.key)} />
                 {rowErrors[row.key] && <p role="alert" className="text-xs text-danger">{rowErrors[row.key]}</p>}
@@ -179,16 +183,16 @@ export function EnginesSettings() {
               </>}
             </form>;
           })}
-          <Button loading={checking} disabled={busy !== null} onClick={check}>{checking ? "Checking…" : "Check Claude status"}</Button>
+          <Button loading={checking} disabled={busy !== null} onClick={check}>{checking ? t("settingsPage.checking") : t("settingsPage.checkClaudeStatus")}</Button>
           {status && <p role="status" className="text-sm">{status}</p>}
-          <p className="text-xs text-muted">Checks saved settings. To sign in, use Sign in to Claude under Engines (or run <code>claude auth login</code> in a terminal), then check again.</p>
+          <p className="text-xs text-muted">{t("settingsPage.checksSavedSettingsToSignInUseSign")} <code>claude auth login</code> {t("settingsPage.inATerminalThenCheckAgain")}</p>
         </SettingsCard>
         <div id="setting-engine-storage" data-setting-id="setting-engine-storage" data-setting-container tabIndex={-1}>
-          <SettingsCard title="Storage" description="Managed by the desktop app. These locations cannot be changed here."><dl className="space-y-3 text-sm">{Object.entries(data.storage).map(([name, value]) => <div key={name}><dt className="font-medium capitalize">{name.replaceAll("_", " ")}</dt><dd className="mt-1 break-all text-xs text-muted">{value}</dd></div>)}</dl></SettingsCard>
+          <SettingsCard title={t("settingsPage.storage")} description={t("settingsPage.managedByTheDesktopAppTheseLocationsCannot")}><dl className="space-y-3 text-sm">{Object.entries(data.storage).map(([name, value]) => <div key={name}><dt className="font-medium capitalize">{settingsTerm(t,name.replaceAll("_", " "))}</dt><dd className="mt-1 break-all text-xs text-muted">{name === "encryption_key" ? settingsTerm(t,value) : value}</dd></div>)}</dl></SettingsCard>
         </div>
       </>}
       {!settingUp && <div className="space-y-3" data-setting-root data-setting-container data-setting-id="setting-engine-connections" tabIndex={-1}>
-        <div className="sr-only" aria-label="Engine connection anchors">
+        <div className="sr-only" aria-label={t("settingsPage.engineConnectionAnchors")}>
           <span id="setting-engine-connections" />
           <span id="setting-engine-api-key" />
           <span id="setting-engine-endpoint" />

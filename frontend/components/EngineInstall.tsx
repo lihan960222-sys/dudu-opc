@@ -1,4 +1,5 @@
 "use client";
+import { translateNow, useT } from "@/lib/use-i18n";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { request } from "@/lib/api";
@@ -23,6 +24,7 @@ export function EngineInstall({ engine, installed, onChanged }: {
   installed: boolean;
   onChanged: () => void;
 }) {
+  const t = useT();
   const [operation, setOperation] = useState<Operation | null>(null);
   const [managedInstalled, setManagedInstalled] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,7 +46,7 @@ export function EngineInstall({ engine, installed, onChanged }: {
         onChangedRef.current();
       }
     } catch (err) {
-      setError(err instanceof Error ? `Could not check install status. ${err.message}` : "Could not check install status.");
+      setError(err instanceof Error ? `${translateNow("settingsPage.couldNotCheckInstallStatus")} ${err.message}` : translateNow("settingsPage.couldNotCheckInstallStatus"));
     }
   }, [engine]);
 
@@ -70,7 +72,7 @@ export function EngineInstall({ engine, installed, onChanged }: {
         method: "POST", body: JSON.stringify({ action }),
       }));
     } catch (err) {
-      setError(err instanceof Error ? `Could not start the install. ${err.message}` : "Could not start the install.");
+      setError(err instanceof Error ? `${t("settingsPage.couldNotStartTheInstall")} ${err.message}` : t("settingsPage.couldNotStartTheInstall"));
     } finally { setBusy(false); }
   };
 
@@ -80,21 +82,21 @@ export function EngineInstall({ engine, installed, onChanged }: {
       await request<void>(`/engine-install/${engine}`, { method: "DELETE" });
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? `Could not cancel the install. ${err.message}` : "Could not cancel the install.");
+      setError(err instanceof Error ? `${t("settingsPage.couldNotCancelTheInstall")} ${err.message}` : t("settingsPage.couldNotCancelTheInstall"));
     } finally { setBusy(false); }
   };
 
   return <section className="space-y-2">
     <div className="flex flex-wrap gap-2">
-      {!managedInstalled ? <Button type="button" disabled={busy || running} onClick={() => void start("install")}>{installed ? "Install app-managed copy" : "Install"}</Button>
-        : <Button type="button" disabled={busy || running} onClick={() => void start("update")}>Update</Button>}
-      {running && <Button type="button" disabled={busy} onClick={() => void cancel()}>Cancel</Button>}
-      {operation?.status === "failed" && <Button type="button" disabled={busy} onClick={() => void start(managedInstalled ? "update" : "install")}>Retry</Button>}
+      {!managedInstalled ? <Button type="button" disabled={busy || running} onClick={() => void start("install")}>{installed ? t("settingsPage.installAppManagedCopy") : t("settingsPage.install")}</Button>
+        : <Button type="button" disabled={busy || running} onClick={() => void start("update")}>{t("settingsPage.update")}</Button>}
+      {running && <Button type="button" disabled={busy} onClick={() => void cancel()}>{t("settingsPage.cancel")}</Button>}
+      {operation?.status === "failed" && <Button type="button" disabled={busy} onClick={() => void start(managedInstalled ? "update" : "install")}>{t("settingsPage.retry")}</Button>}
     </div>
-    {installed && !managedInstalled && <p className="text-xs text-muted">The app-managed copy is stored in its own runtime folder. Existing CLI installs outside the app data folder are left in place.</p>}
+    {installed && !managedInstalled && <p className="text-xs text-muted">{t("settingsPage.theAppManagedCopyIsStoredInIts")}</p>}
     {operation && <p role="status" className="text-xs text-muted">{operation.progress}</p>}
     {operation?.error && <Banner tone="warning">{operation.error}</Banner>}
     {error && <Banner tone="warning">{error}</Banner>}
-    {operation?.output && <details className="text-xs"><summary className="cursor-pointer">Installer output</summary><pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words text-muted">{operation.output}</pre></details>}
+    {operation?.output && <details className="text-xs"><summary className="cursor-pointer">{t("settingsPage.installerOutput")}</summary><pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words text-muted">{operation.output}</pre></details>}
   </section>;
 }

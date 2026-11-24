@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ENGINE_SETTINGS, SETTINGS_PAGES, activeSettingsPage, isSetupPage } from "./settings-nav.ts";
+import { translate } from "./i18n.ts";
+
+test("all eight settings routes have Chinese navigation, headings and descriptions", () => {
+  const labels = ["常规", "通知", "个人资料", "执行引擎", "消息渠道", "服务集成", "操作审批", "账号与隐私"];
+  assert.deepEqual(SETTINGS_PAGES.map(page => translate("zh", `settingsPage.${page.id}`)), labels);
+  for (const page of SETTINGS_PAGES) {
+    assert.match(translate("zh", `settingsPage.${page.id}.summary`), /\p{Script=Han}/u);
+    assert.equal(translate("en", `settingsPage.${page.id}`), page.label);
+  }
+});
 
 test("each Settings page has a unique address, and the engine address is one of them", () => {
   assert.equal(new Set(SETTINGS_PAGES.map((page) => page.href)).size, SETTINGS_PAGES.length);

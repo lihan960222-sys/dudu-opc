@@ -1,5 +1,8 @@
 "use client";
 
+import { resolveLocale } from "@/lib/i18n";
+import { useLanguageChoice, useT } from "@/lib/use-i18n";
+
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   Activity,
@@ -40,7 +43,6 @@ const PROVIDER_COLORS: Record<string, string> = {
   codex: "#059669",
 };
 
-const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 function formatCompact(num: number): string {
   if (num >= 1_000_000_000) return `${(num / 1_000_000_000).toFixed(1).replace(/\.0$/, "")}B`;
@@ -49,18 +51,18 @@ function formatCompact(num: number): string {
   return String(num);
 }
 
-function formatDateShort(iso: string): string {
+function formatDateShort(iso: string, locale: string): string {
   const date = new Date(iso);
   return Number.isNaN(date.getTime())
     ? iso
-    : date.toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" });
+    : date.toLocaleDateString(locale, { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
-function formatDateLong(iso: string): string {
+function formatDateLong(iso: string, locale: string): string {
   const date = new Date(iso);
   return Number.isNaN(date.getTime())
     ? iso
-    : date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+    : date.toLocaleDateString(locale, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
 }
 
 function providerColor(provider: string): string {
@@ -81,7 +83,8 @@ function UserAvatar({
   size?: number;
   className?: string;
 }) {
-  const displayName = user.name?.trim() || user.email?.split("@")[0] || "User";
+  const t = useT();
+  const displayName = user.name?.trim() || user.email?.split("@")[0] || t("personalSettings.user");
   const initials =
     displayName
       .split(/\s+/)
@@ -114,8 +117,9 @@ function UserAvatar({
 
 /* ─── Skeleton Component ─── */
 function ProfileSettingsSkeleton() {
+  const t = useT();
   return (
-    <div className="space-y-8 animate-pulse" aria-label="Loading profile">
+    <div className="space-y-8 animate-pulse" aria-label={t("personalSettings.loading")}>
       {/* 1. Hero Skeleton */}
       <div className="flex flex-col gap-4 rounded-xl border border-line bg-raised p-6 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4 min-w-0">
@@ -183,6 +187,8 @@ function defaultEmptyStats(): ProfileStats {
 
 /* ─── Main Profile Settings Component ─── */
 export function ProfileSettings() {
+  const locale = resolveLocale(useLanguageChoice());
+  const t = useT();
   const confirmation = useSavedConfirmation();
   const mounted = useSyncExternalStore(
     () => () => {},
@@ -250,7 +256,7 @@ export function ProfileSettings() {
       await request("/desktop-account/logout", { method: "POST" });
       window.location.reload();
     } catch (err) {
-      setError(err instanceof Error ? `Could not sign out: ${err.message}` : "Could not sign out.");
+      setError(err instanceof Error ? t("personalSettings.signoutDetail", { detail: err.message }) : t("personalSettings.signoutError"));
       setSigningOut(false);
       setSignOutOpen(false);
     }
@@ -260,7 +266,7 @@ export function ProfileSettings() {
     return <ProfileSettingsSkeleton />;
   }
 
-  const accountName = profile?.name?.trim() || profile?.email?.split("@")[0] || "User";
+  const accountName = profile?.name?.trim() || profile?.email?.split("@")[0] || t("personalSettings.user");
   const displayStats = stats ?? (statsLoading ? null : defaultEmptyStats());
 
   return (
@@ -276,7 +282,7 @@ export function ProfileSettings() {
 
       {/* 1. Profile Hero Section */}
       <section
-        aria-label="Profile Header"
+        aria-label={t("personalSettings.header")}
         data-setting-id="setting-profile-details"
         className="flex flex-col gap-4 rounded-xl border border-line bg-raised p-6 sm:flex-row sm:items-center sm:justify-between"
       >
@@ -285,7 +291,7 @@ export function ProfileSettings() {
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h3 className="truncate text-xl font-semibold text-ink">{accountName}</h3>
-              {profile?.is_admin && <Badge tone="accent">Admin</Badge>}
+              {profile?.is_admin && <Badge tone="accent">{t("personalSettings.admin")}</Badge>}
             </div>
             {profile?.email && <p className="truncate text-sm text-muted">{profile.email}</p>}
             {profile?.bio && <p className="mt-1 text-xs text-muted/80">{profile.bio}</p>}
@@ -296,49 +302,49 @@ export function ProfileSettings() {
         <div className="flex shrink-0 items-center gap-2">
           <Button variant="secondary" onClick={() => setShareOpen(true)}>
             <Share2 size={15} aria-hidden="true" />
-            <span>Share</span>
+            <span>{t("personalSettings.share")}</span>
           </Button>
           <Button variant="secondary" onClick={() => setEditOpen(true)}>
             <Pencil size={15} aria-hidden="true" />
-            <span>Edit profile</span>
+            <span>{t("personalSettings.edit")}</span>
           </Button>
         </div>
       </section>
 
       {/* 2. KPI Summary Tiles */}
       {statsLoading ? (
-        <section aria-label="Loading statistics" data-setting-id="setting-profile-summary" className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5 animate-pulse">
+        <section aria-label={t("personalSettings.loadingStats")} data-setting-id="setting-profile-summary" className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5 animate-pulse">
           {[...Array(5)].map((_, i) => (
             <div key={i} className="h-24 rounded-xl border border-line bg-raised/50 p-4" />
           ))}
         </section>
       ) : displayStats ? (
-        <section aria-label="Annual summary statistics" data-setting-id="setting-profile-summary">
+        <section aria-label={t("personalSettings.annual")} data-setting-id="setting-profile-summary">
           <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
             <div className="group rounded-xl border border-line bg-raised p-4 transition-colors hover:border-line/80">
               <dt className="flex items-center gap-1.5 text-xs font-medium text-muted">
                 <Zap size={14} className="text-accent" />
-                <span>Tokens</span>
+                <span>{t("personalSettings.tokens")}</span>
               </dt>
               <dd className="mt-2">
                 <span className="text-2xl font-bold tracking-tight text-ink">
                   {formatCompact(displayStats.tokens)}
                 </span>
-                <span className="block text-[11px] text-faint mt-0.5">Past year</span>
+                <span className="block text-[11px] text-faint mt-0.5">{t("personalSettings.pastYear")}</span>
               </dd>
             </div>
 
             <div className="group rounded-xl border border-line bg-raised p-4 transition-colors hover:border-line/80">
               <dt className="flex items-center gap-1.5 text-xs font-medium text-muted">
                 <Activity size={14} className="text-emerald-500" />
-                <span>Peak day</span>
+                <span>{t("personalSettings.peak")}</span>
               </dt>
               <dd className="mt-2">
                 <span className="text-2xl font-bold tracking-tight text-ink">
                   {displayStats.peak ? formatCompact(displayStats.peak.tokens) : "–"}
                 </span>
                 <span className="block text-[11px] text-faint mt-0.5">
-                  {displayStats.peak ? formatDateShort(displayStats.peak.date) : "None yet"}
+                  {displayStats.peak ? formatDateShort(displayStats.peak.date, locale) : t("personalSettings.noneYet")}
                 </span>
               </dd>
             </div>
@@ -346,27 +352,27 @@ export function ProfileSettings() {
             <div className="group rounded-xl border border-line bg-raised p-4 transition-colors hover:border-line/80">
               <dt className="flex items-center gap-1.5 text-xs font-medium text-muted">
                 <Calendar size={14} className="text-sky-500" />
-                <span>Messages</span>
+                <span>{t("personalSettings.messages")}</span>
               </dt>
               <dd className="mt-2">
                 <span className="text-2xl font-bold tracking-tight text-ink">
                   {formatCompact(displayStats.messages)}
                 </span>
-                <span className="block text-[11px] text-faint mt-0.5">Past year</span>
+                <span className="block text-[11px] text-faint mt-0.5">{t("personalSettings.pastYear")}</span>
               </dd>
             </div>
 
             <div className="group rounded-xl border border-line bg-raised p-4 transition-colors hover:border-line/80">
               <dt className="flex items-center gap-1.5 text-xs font-medium text-muted">
                 <Flame size={14} className="text-amber-500" />
-                <span>Current streak</span>
+                <span>{t("personalSettings.current")}</span>
               </dt>
               <dd className="mt-2">
                 <span className="text-2xl font-bold tracking-tight text-ink">
-                  {displayStats.currentStreak} {displayStats.currentStreak === 1 ? "day" : "days"}
+                  {displayStats.currentStreak} {displayStats.currentStreak === 1 ? t("personalSettings.day") : t("personalSettings.days")}
                 </span>
                 <span className="block text-[11px] text-faint mt-0.5">
-                  {displayStats.currentStreakStart ? `Since ${formatDateShort(displayStats.currentStreakStart)}` : "Start working today"}
+                  {displayStats.currentStreakStart ? t("personalSettings.since", { date: formatDateShort(displayStats.currentStreakStart, locale) }) : t("personalSettings.startToday")}
                 </span>
               </dd>
             </div>
@@ -374,16 +380,16 @@ export function ProfileSettings() {
             <div className="group rounded-xl border border-line bg-raised p-4 transition-colors hover:border-line/80">
               <dt className="flex items-center gap-1.5 text-xs font-medium text-muted">
                 <Flame size={14} className="text-rose-500" />
-                <span>Longest streak</span>
+                <span>{t("personalSettings.longest")}</span>
               </dt>
               <dd className="mt-2">
                 <span className="text-2xl font-bold tracking-tight text-ink">
-                  {displayStats.longestStreak} {displayStats.longestStreak === 1 ? "day" : "days"}
+                  {displayStats.longestStreak} {displayStats.longestStreak === 1 ? t("personalSettings.day") : t("personalSettings.days")}
                 </span>
                 <span className="block text-[11px] text-faint mt-0.5 truncate">
                   {displayStats.longestStreakDates
-                    ? `${formatDateShort(displayStats.longestStreakDates.start)} – ${formatDateShort(displayStats.longestStreakDates.end)}`
-                    : "No streaks yet"}
+                    ? `${formatDateShort(displayStats.longestStreakDates.start, locale)} – ${formatDateShort(displayStats.longestStreakDates.end, locale)}`
+                    : t("personalSettings.noStreaks")}
                 </span>
               </dd>
             </div>
@@ -394,14 +400,14 @@ export function ProfileSettings() {
       {/* 3. GitHub-Style Activity Heatmap */}
       {displayStats && (
         <section
-          aria-label="Activity on this computer"
+          aria-label={t("personalSettings.activity")}
           data-setting-id="setting-profile-activity"
           className="space-y-3 rounded-xl border border-line bg-raised p-5"
         >
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-ink">Activity on this computer</h3>
+            <h3 className="text-sm font-semibold text-ink">{t("personalSettings.activity")}</h3>
             <span className="text-xs text-muted">
-              {displayStats.activeDays} active {displayStats.activeDays === 1 ? "day" : "days"} in the past year
+              {t("personalSettings.activeDays", { count: displayStats.activeDays, unit: displayStats.activeDays === 1 ? t("personalSettings.day") : t("personalSettings.days") })}
             </span>
           </div>
 
@@ -414,10 +420,10 @@ export function ProfileSettings() {
         <div className="grid gap-6 md:grid-cols-2">
           {/* Insights Box */}
           <section data-setting-id="setting-profile-insights" className="space-y-3 rounded-xl border border-line bg-raised p-5">
-            <h3 className="text-sm font-semibold text-ink">Insights</h3>
+            <h3 className="text-sm font-semibold text-ink">{t("personalSettings.insights")}</h3>
             <dl className="divide-y divide-line/60 text-sm">
               <div className="flex items-center justify-between py-2.5">
-                <dt className="text-muted">Most used provider</dt>
+                <dt className="text-muted">{t("personalSettings.provider")}</dt>
                 <dd className="font-medium text-ink">
                   {displayStats.providers[0] ? (
                     <span className="flex items-center gap-1.5">
@@ -431,29 +437,29 @@ export function ProfileSettings() {
                       </span>
                     </span>
                   ) : (
-                    "None yet"
+                    t("personalSettings.noneYet")
                   )}
                 </dd>
               </div>
 
               <div className="flex items-center justify-between py-2.5">
-                <dt className="text-muted">Top model</dt>
+                <dt className="text-muted">{t("personalSettings.model")}</dt>
                 <dd className="font-mono text-xs font-medium text-ink">
-                  {displayStats.models[0]?.model || "None yet"}
+                  {displayStats.models[0]?.model || t("personalSettings.noneYet")}
                 </dd>
               </div>
 
               <div className="flex items-center justify-between py-2.5">
-                <dt className="text-muted">Busiest day</dt>
+                <dt className="text-muted">{t("personalSettings.weekday")}</dt>
                 <dd className="font-medium text-ink">
-                  {displayStats.busiestWeekday !== null ? WEEKDAYS[displayStats.busiestWeekday] : "None yet"}
+                  {displayStats.busiestWeekday !== null ? new Intl.DateTimeFormat(locale, { weekday: "long", timeZone: "UTC" }).format(Date.UTC(2024, 0, 7 + displayStats.busiestWeekday)) : t("personalSettings.noneYet")}
                 </dd>
               </div>
 
               <div className="flex items-center justify-between py-2.5">
-                <dt className="text-muted">Estimated cost</dt>
+                <dt className="text-muted">{t("personalSettings.cost")}</dt>
                 <dd className="font-medium text-ink">
-                  {displayStats.cost !== null ? `$${displayStats.cost.toFixed(2)}` : "Free / API key"}
+                  {displayStats.cost !== null ? `$${displayStats.cost.toFixed(2)}` : t("personalSettings.free")}
                 </dd>
               </div>
             </dl>
@@ -462,7 +468,7 @@ export function ProfileSettings() {
           {/* Most Active Teammates */}
           <section data-setting-id="setting-profile-teammates" className="space-y-3 rounded-xl border border-line bg-raised p-5">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-ink">Most active teammates</h3>
+              <h3 className="text-sm font-semibold text-ink">{t("personalSettings.active")}</h3>
               <Bot size={16} className="text-muted" />
             </div>
 
@@ -477,14 +483,14 @@ export function ProfileSettings() {
                       <span className="truncate font-medium text-ink">{row.agent.name}</span>
                     </div>
                     <span className="text-xs font-medium text-muted tabular-nums">
-                      {formatCompact(row.tokens)} tokens
+                      {formatCompact(row.tokens)} {t("personalSettings.units")}
                     </span>
                   </li>
                 ))}
               </ul>
             ) : (
               <p className="py-6 text-center text-xs text-muted">
-                No agent teammates have turns recorded yet.
+                {t("personalSettings.noEmployees")}
               </p>
             )}
           </section>
@@ -493,9 +499,9 @@ export function ProfileSettings() {
 
       {/* 5. Model Distribution Breakdown */}
       {displayStats && displayStats.models && displayStats.models.length > 0 && (
-        <section aria-label="Model usage distribution" data-setting-id="setting-profile-models" className="space-y-3 rounded-xl border border-line bg-raised p-5">
+        <section aria-label={t("personalSettings.distributionLabel")} data-setting-id="setting-profile-models" className="space-y-3 rounded-xl border border-line bg-raised p-5">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-ink">Model Distribution</h3>
+            <h3 className="text-sm font-semibold text-ink">{t("personalSettings.distribution")}</h3>
             <Cpu size={16} className="text-muted" />
           </div>
 
@@ -505,7 +511,7 @@ export function ProfileSettings() {
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-mono font-medium text-ink">{m.model}</span>
                   <span className="text-muted">
-                    {formatCompact(m.tokens)} tokens ({Math.round(m.share * 100)}%)
+                    {formatCompact(m.tokens)} {t("personalSettings.units")} ({Math.round(m.share * 100)}%)
                   </span>
                 </div>
                 <div className="h-1.5 w-full overflow-hidden rounded-full bg-line/50">
@@ -525,23 +531,23 @@ export function ProfileSettings() {
 
       {/* 6. Connected Account Section */}
       <section data-setting-id="setting-profile-account" className="space-y-3 rounded-xl border border-line bg-raised p-5">
-        <h3 className="text-sm font-semibold text-ink">Connected Account</h3>
+        <h3 className="text-sm font-semibold text-ink">{t("personalSettings.account")}</h3>
         <p className="text-xs text-muted">
-          Your profile, conversations, and engine credentials remain bound to your local device.
+          {t("personalSettings.accountHint")}
         </p>
 
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line/60 bg-surface p-3.5">
           <div>
             <div className="text-sm font-medium text-ink">
-              {profile?.email || "Local Profile"}
+              {profile?.email || t("personalSettings.local")}
             </div>
             <div className="text-xs text-muted">
-              {profile?.email ? "Signed in with email account" : "Local instance"}
+              {profile?.email ? t("personalSettings.email") : t("personalSettings.instance")}
             </div>
           </div>
           {profile?.email && (
             <Button variant="secondary" onClick={() => setSignOutOpen(true)}>
-              Sign out
+              {t("personalSettings.signout")}
             </Button>
           )}
         </div>
@@ -589,9 +595,9 @@ export function ProfileSettings() {
       <ConfirmDialog
         open={signOutOpen}
         onOpenChange={setSignOutOpen}
-        title="Sign out of Suparagent"
-        description="Signing out locks your local profile. Your conversations and engine credentials remain safe on this computer."
-        confirmLabel="Sign out"
+        title={t("personalSettings.signoutTitle")}
+        description={t("personalSettings.signoutHint")}
+        confirmLabel={t("personalSettings.signout")}
         danger
         loading={signingOut}
         onConfirm={handleSignOut}
@@ -602,6 +608,8 @@ export function ProfileSettings() {
 
 /* ─── Heatmap Component ─── */
 function ProfileHeatmap({ days }: { days: ProfileDay[] }) {
+  const locale = resolveLocale(useLanguageChoice());
+  const t = useT();
   const [hovered, setHovered] = useState<ProfileDay | null>(null);
 
   // Group into columns of 7 days (Sunday to Saturday)
@@ -639,13 +647,13 @@ function ProfileHeatmap({ days }: { days: ProfileDay[] }) {
         const d = new Date(firstValid.date);
         mLabels.push({
           col: idx,
-          label: d.toLocaleDateString([], { month: "short", timeZone: "UTC" }),
+          label: d.toLocaleDateString(locale, { month: "short", timeZone: "UTC" }),
         });
       }
     });
 
     return { columns: cols, months: mLabels, maxTokens: max };
-  }, [days]);
+  }, [days, locale]);
 
   function getHeatClass(day: ProfileDay | null): string {
     if (!day) return "opacity-0 pointer-events-none";
@@ -704,22 +712,22 @@ function ProfileHeatmap({ days }: { days: ProfileDay[] }) {
       {/* Floating Tooltip */}
       {hovered && (
         <div className="mt-2 text-xs text-ink bg-surface border border-line px-2.5 py-1 rounded-md shadow-sm inline-flex items-center gap-2">
-          <strong>{formatDateLong(hovered.date)}</strong>
+          <strong>{formatDateLong(hovered.date, locale)}</strong>
           <span className="text-muted">
-            {formatCompact(hovered.tokens)} tokens · {hovered.messages} {hovered.messages === 1 ? "turn" : "turns"}
+            {formatCompact(hovered.tokens)} {t("personalSettings.units")} · {hovered.messages} {hovered.messages === 1 ? t("personalSettings.turn") : t("personalSettings.turns")}
           </span>
         </div>
       )}
 
       {/* Legend */}
       <div className="mt-3 flex items-center justify-end gap-1.5 text-xs text-muted">
-        <span>Less</span>
+        <span>{t("personalSettings.less")}</span>
         <div className="size-[11px] rounded-xs bg-line/40" />
         <div className="size-[11px] rounded-xs bg-accent/35" />
         <div className="size-[11px] rounded-xs bg-accent/55" />
         <div className="size-[11px] rounded-xs bg-accent/80" />
         <div className="size-[11px] rounded-xs bg-accent" />
-        <span>More</span>
+        <span>{t("personalSettings.more")}</span>
       </div>
     </div>
   );
@@ -737,6 +745,7 @@ function ProfileEditDialog({
   profile: UserProfile | null;
   onSaved: (updated: Partial<UserProfile>) => void;
 }) {
+  const t = useT();
   const [name, setName] = useState(profile?.name || "");
   const [bio, setBio] = useState(profile?.bio || "");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(profile?.avatar_url || null);
@@ -783,7 +792,7 @@ function ProfileEditDialog({
       onSaved(res);
       onOpenChange(false);
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "Could not save your profile.");
+      setSaveError(err instanceof Error ? err.message : t("personalSettings.saveError"));
     } finally {
       setSaving(false);
     }
@@ -793,8 +802,8 @@ function ProfileEditDialog({
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      title="Edit profile"
-      description="Update your display name, avatar, and personal bio."
+      title={t("personalSettings.edit")}
+      description={t("personalSettings.editHint")}
       size="sm"
     >
       <form id="profile-edit-form" onSubmit={handleSave} className="space-y-4">
@@ -808,7 +817,7 @@ function ProfileEditDialog({
               size="sm"
               onClick={() => fileInputRef.current?.click()}
             >
-              Change photo
+              {t("personalSettings.photo")}
             </Button>
             {avatarUrl && (
               <Button
@@ -817,7 +826,7 @@ function ProfileEditDialog({
                 size="sm"
                 onClick={() => { setAvatarUrl(null); setSaveError(null); }}
               >
-                Remove
+                {t("personalSettings.remove")}
               </Button>
             )}
           </div>
@@ -831,23 +840,23 @@ function ProfileEditDialog({
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-muted mb-1">Display Name</label>
+          <label className="block text-xs font-medium text-muted mb-1">{t("personalSettings.name")}</label>
           <input
             type="text"
             value={name}
             onChange={(e) => { setName(e.target.value); setSaveError(null); }}
-            placeholder="e.g. Alice Developer"
+            placeholder={t("personalSettings.nameExample")}
             maxLength={120}
             className="w-full rounded-field border border-line bg-raised px-3 py-1.5 text-sm placeholder:text-faint focus:border-accent focus:outline-none"
           />
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-muted mb-1">Bio / Role</label>
+          <label className="block text-xs font-medium text-muted mb-1">{t("personalSettings.bio")}</label>
           <textarea
             value={bio}
             onChange={(e) => { setBio(e.target.value); setSaveError(null); }}
-            placeholder="What you're building with Suparagent…"
+            placeholder={t("personalSettings.bioExample")}
             rows={2}
             maxLength={500}
             className="w-full rounded-field border border-line bg-raised px-3 py-1.5 text-sm placeholder:text-faint focus:border-accent focus:outline-none"
@@ -860,7 +869,7 @@ function ProfileEditDialog({
           saving={saving}
           error={saveError}
           saved={false}
-          saveLabel="Save changes"
+          saveLabel={t("personalSettings.save")}
           onSave={() => {
             const form = document.getElementById("profile-edit-form");
             if (form instanceof HTMLFormElement) form.requestSubmit();
@@ -890,21 +899,22 @@ function ProfileShareDialog({
   profile: UserProfile | null;
   stats: ProfileStats;
 }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
-  const name = profile?.name || "User";
+  const name = profile?.name || t("personalSettings.user");
 
   const shareText = useMemo(() => {
     return [
-      `🚀 Suparagent Activity for ${name}`,
-      `⚡ ${formatCompact(stats.tokens)} Tokens consumed`,
-      `🔥 ${stats.currentStreak} Day current streak (Longest: ${stats.longestStreak} days)`,
-      `🏆 Peak Day: ${stats.peak ? `${formatCompact(stats.peak.tokens)} tokens` : "N/A"}`,
-      stats.models[0] ? `🤖 Top Model: ${stats.models[0].model} (${Math.round(stats.models[0].share * 100)}%)` : "",
-      `💬 ${stats.messages} messages in past year`,
+      t("personalSettings.shareUser", { name }),
+      t("personalSettings.shareTokens", { count: formatCompact(stats.tokens) }),
+      t("personalSettings.shareStreak", { count: stats.currentStreak, max: stats.longestStreak }),
+      t("personalSettings.sharePeak", { value: stats.peak ? `${formatCompact(stats.peak.tokens)} ${t("personalSettings.units")}` : t("personalSettings.noneYet") }),
+      stats.models[0] ? t("personalSettings.shareModel", { model: stats.models[0].model, percent: Math.round(stats.models[0].share * 100) }) : "",
+      t("personalSettings.shareMessages", { count: stats.messages }),
     ]
       .filter(Boolean)
       .join("\n");
-  }, [name, stats]);
+  }, [name, stats, t]);
 
   async function copySummary() {
     const ok = await copyToClipboard(shareText);
@@ -918,8 +928,8 @@ function ProfileShareDialog({
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      title="Share activity summary"
-      description="Share your Suparagent AI accomplishments and usage milestones."
+      title={t("personalSettings.shareTitle")}
+      description={t("personalSettings.shareHint")}
       size="sm"
     >
       <div className="space-y-4">
@@ -929,29 +939,29 @@ function ProfileShareDialog({
             <UserAvatar user={{ name, avatar_url: profile?.avatar_url }} size={44} />
             <div>
               <div className="font-semibold text-ink leading-tight">{name}</div>
-              <div className="text-xs text-muted">Suparagent Milestones</div>
+              <div className="text-xs text-muted">{t("personalSettings.milestones")}</div>
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-2 text-xs pt-1">
             <div className="rounded-lg bg-raised p-2.5 border border-line/60">
-              <div className="text-muted">Tokens</div>
+              <div className="text-muted">{t("personalSettings.tokens")}</div>
               <div className="text-base font-bold text-ink">{formatCompact(stats.tokens)}</div>
             </div>
             <div className="rounded-lg bg-raised p-2.5 border border-line/60">
-              <div className="text-muted">Streak</div>
-              <div className="text-base font-bold text-ink">{stats.currentStreak} Days</div>
+              <div className="text-muted">{t("personalSettings.streak")}</div>
+              <div className="text-base font-bold text-ink">{stats.currentStreak} {t("personalSettings.days")}</div>
             </div>
             <div className="rounded-lg bg-raised p-2.5 border border-line/60">
-              <div className="text-muted">Peak Day</div>
+              <div className="text-muted">{t("personalSettings.peakDay")}</div>
               <div className="text-base font-bold text-ink">
                 {stats.peak ? formatCompact(stats.peak.tokens) : "–"}
               </div>
             </div>
             <div className="rounded-lg bg-raised p-2.5 border border-line/60">
-              <div className="text-muted">Top Model</div>
+              <div className="text-muted">{t("personalSettings.topModel")}</div>
               <div className="text-xs font-semibold text-ink truncate mt-0.5">
-                {stats.models[0]?.model || "None"}
+                {stats.models[0]?.model || t("personalSettings.none")}
               </div>
             </div>
           </div>
@@ -959,11 +969,11 @@ function ProfileShareDialog({
 
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={() => onOpenChange(false)}>
-            Close
+            {t("personalSettings.close")}
           </Button>
           <Button onClick={copySummary}>
             {copied ? <Check size={14} /> : <Copy size={14} />}
-            <span>{copied ? "Copied!" : "Copy text"}</span>
+            <span>{copied ? t("personalSettings.copied") : t("personalSettings.copy")}</span>
           </Button>
         </div>
       </div>

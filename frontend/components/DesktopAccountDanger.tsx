@@ -1,5 +1,5 @@
 "use client";
-
+import { useT } from "@/lib/use-i18n";
 import { useState } from "react";
 import { request } from "@/lib/api";
 import { Banner } from "@/components/ui/Banner";
@@ -10,21 +10,22 @@ type Kind = "reset" | "delete";
 
 const COPY: Record<Kind, { open: string; word: string; path: string; warning: string }> = {
   reset: {
-    open: "Reset this profile",
+    open: "personalSettings.resetAction",
     word: "RESET",
     path: "/desktop-account/reset-profile",
-    warning: "This permanently erases the agents, conversations, memory, routines, settings and saved provider keys on this computer and unlinks it from its account. Remove all cloud computers first; they are separate resources and may incur charges. Your cloud account is not deleted. Engine sign-ins (Claude, Codex) are kept.",
+    warning: "personalSettings.resetWarning",
   },
   delete: {
-    open: "Delete my account",
+    open: "personalSettings.deleteAction",
     word: "DELETE",
     path: "/desktop-account/delete-account",
-    warning: "This permanently deletes your cloud account, then erases everything saved on this computer, including provider keys. Remove all cloud computers first; they are separate resources and may incur charges. It cannot be undone.",
+    warning: "personalSettings.deleteWarning",
   },
 };
 
 // Explicit, typed confirmation for the two actions that erase local data. Sign-out never does.
 export function DesktopAccountDanger({ kind, onDone }: { kind: Kind; onDone: () => void }) {
+  const t = useT();
   const copy = COPY[kind];
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
@@ -37,19 +38,19 @@ export function DesktopAccountDanger({ kind, onDone }: { kind: Kind; onDone: () 
       await request(copy.path, { method: "POST", body: JSON.stringify({ confirm: copy.word }) });
       onDone();
     } catch (err) {
-      setError(err instanceof Error ? `Could not finish. Nothing was lost; try again. ${err.message}` : "Could not finish. Nothing was lost; try again.");
+      setError(err instanceof Error ? `${t("personalSettings.dangerError")} ${err.message}` : t("personalSettings.dangerError"));
       setBusy(false);
     }
   }
 
-  if (!open) return <Button variant="ghost" onClick={() => setOpen(true)}>{copy.open}</Button>;
+  if (!open) return <Button variant="ghost" onClick={() => setOpen(true)}>{t(copy.open)}</Button>;
   return <div className="space-y-3 rounded-md border border-line p-4">
-    <Banner tone="warning">{copy.warning}</Banner>
-    <Field label={`Type ${copy.word} to confirm`}>{(props) => <Input {...props} autoComplete="off" value={typed} disabled={busy} onChange={event => setTyped(event.target.value)} />}</Field>
+    <Banner tone="warning">{t(copy.warning)}</Banner>
+    <Field label={t("personalSettings.confirmWord", { word: copy.word })}>{(props) => <Input {...props} autoComplete="off" value={typed} disabled={busy} onChange={event => setTyped(event.target.value)} />}</Field>
     {error && <Banner tone="danger">{error}</Banner>}
     <div className="flex gap-3">
-      <Button variant="danger" disabled={busy || typed !== copy.word} onClick={() => void run()}>{busy ? "Please wait…" : copy.open}</Button>
-      <Button variant="ghost" disabled={busy} onClick={() => { setOpen(false); setTyped(""); setError(null); }}>Cancel</Button>
+      <Button variant="danger" disabled={busy || typed !== copy.word} onClick={() => void run()}>{busy ? t("personalSettings.wait") : t(copy.open)}</Button>
+      <Button variant="ghost" disabled={busy} onClick={() => { setOpen(false); setTyped(""); setError(null); }}>{t("personalSettings.cancel")}</Button>
     </div>
   </div>;
 }

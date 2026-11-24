@@ -1,4 +1,5 @@
 "use client";
+import { useT } from "@/lib/use-i18n";
 
 import { DesktopAccountSection } from "@/components/DesktopAccountSection";
 import { HostedWorkspaceCard } from "@/components/HostedWorkspaceCard";
@@ -10,11 +11,12 @@ import { Applies } from "./Applies";
 import { useSession } from "@/components/AuthGate";
 
 export function AccountSettings() {
+  const t = useT();
   // The app account and the hosted-workspace card are the owner's; a member's session is refused them.
   const { session } = useSession();
   const fullAccess = session === null || session.scopes.includes("admin");
   return <div className="space-y-6">
-    <p className="text-xs text-muted"><Applies when="now" /> Account, device and permission changes take effect as you make them.</p>
+    <p className="text-xs text-muted"><Applies when="now" /> {t("settingsPage.accountDeviceAndPermissionChangesTakeEffectAs")}</p>
     <div id="setting-account-app" data-setting-id="setting-account-app" data-setting-root data-setting-container tabIndex={-1}>
       {fullAccess && <DesktopAccountSection />}
       {fullAccess && <HostedWorkspaceCard />}

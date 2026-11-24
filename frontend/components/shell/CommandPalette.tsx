@@ -8,7 +8,7 @@ import { cn } from "@/lib/cn";
 import { useT } from "@/lib/use-i18n";
 import { sidebarAgents } from "@/lib/sidebar";
 import { SETTINGS_PAGES } from "@/lib/settings-nav";
-import { SETTINGS_REGISTRY, settingsEntryHref } from "@/lib/settings-registry";
+import { localizedSettingsEntries, settingsEntryHref } from "@/lib/settings-registry";
 import { Dialog } from "@/components/ui/Dialog";
 import { Kbd } from "@/components/ui/Kbd";
 
@@ -55,13 +55,13 @@ export function CommandPalette({
       { id: "new", group: t("palette.groupActions"), label: t("palette.newChat"), icon: <MessageSquarePlus size={16} />, run: go(() => onNewChat()) },
       { id: "settings", group: t("palette.groupActions"), label: t("palette.settings"), icon: <Settings size={16} />, run: go(() => router.push("/settings/")) },
     ];
-    for (const entry of SETTINGS_REGISTRY) {
+    for (const entry of localizedSettingsEntries(t)) {
       const page = SETTINGS_PAGES.find((item) => item.id === entry.page);
       list.push({
         id: `setting-${entry.id}`,
         group: t("palette.settings"),
         label: `${t("palette.settings")}: ${entry.title}`,
-        hint: page ? `${page.label} · ${entry.section}` : entry.section,
+        hint: page ? `${t(`settingsPage.${page.id}`)} · ${entry.section}` : entry.section,
         keywords: entry.keywords,
         icon: <Settings size={16} />,
         run: go(() => {

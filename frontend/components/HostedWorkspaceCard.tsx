@@ -1,4 +1,5 @@
 "use client";
+import { useT } from "@/lib/use-i18n";
 
 import { useEffect, useState } from "react";
 import { Banner } from "@/components/ui/Banner";
@@ -10,6 +11,7 @@ type Bridge = { hostedWorkspace?(action: "status" | "open"): Promise<HostedState
 // Desktop app only, and only while the app offers it: the shell answers "unavailable" otherwise,
 // so this card never shows in a browser or in a build with the feature off.
 export function HostedWorkspaceCard() {
+  const t = useT();
   const [state, setState] = useState<HostedState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,14 +26,14 @@ export function HostedWorkspaceCard() {
   if (!state?.available || !bridge?.hostedWorkspace) return null;
   const open = bridge.hostedWorkspace;
   return <section className="mt-6 space-y-3 rounded-lg border border-line p-5">
-    <h3 className="font-semibold">Hosted workspace</h3>
-    <p className="text-sm">Open your cloud workspace in this window. It uses your hosted agents, conversations and files, not the ones on this computer.</p>
-    <p className="text-xs text-muted">You sign in to it separately with your hosted account email and password. Switch back any time from the Workspace menu (Ctrl or Cmd+1 for this computer, +2 for hosted). Nothing is copied between the two.</p>
-    {!state.signedIn && <Banner tone="info">Sign in to your app account above first.</Banner>}
+    <h3 className="font-semibold">{t("settingsPage.hostedWorkspace")}</h3>
+    <p className="text-sm">{t("settingsPage.openYourCloudWorkspaceInThisWindowIt")}</p>
+    <p className="text-xs text-muted">{t("settingsPage.youSignInToItSeparatelyWithYour")}</p>
+    {!state.signedIn && <Banner tone="info">{t("settingsPage.signInToYourAppAccountAboveFirst")}</Banner>}
     {error && <Banner tone="danger">{error}</Banner>}
     <Button disabled={busy || !state.signedIn} onClick={() => {
       setBusy(true); setError(null);
-      void open("open").then(setState).catch(err => setError(err instanceof Error ? `Could not open the hosted workspace. ${err.message}` : "Could not open the hosted workspace.")).finally(() => setBusy(false));
-    }}>{busy ? "Opening…" : "Open hosted workspace"}</Button>
+      void open("open").then(setState).catch(err => setError(err instanceof Error ? `${t("settingsPage.couldNotOpenTheHostedWorkspace")} ${err.message}` : t("settingsPage.couldNotOpenTheHostedWorkspace"))).finally(() => setBusy(false));
+    }}>{busy ? t("settingsPage.opening") : t("settingsPage.openHostedWorkspace")}</Button>
   </section>;
 }

@@ -1,5 +1,7 @@
 "use client";
 
+import { useT } from "@/lib/use-i18n";
+
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { SettingsCard } from "./SettingsCard";
 import { Switch } from "@/components/ui/Checkbox";
@@ -41,6 +43,7 @@ function subscribeToPermission(callback: () => void): () => void {
 }
 
 export function NotificationsSettings() {
+  const t = useT();
   const [prefs, setPrefs] = useState<NotificationPreferences>(defaultPrefs);
   const browserPermission = useSyncExternalStore(
     subscribeToPermission,
@@ -74,8 +77,8 @@ export function NotificationsSettings() {
       playNotificationSound();
     }
     const success = showNotificationAlert({
-      title: "Suparagent Notification",
-      body: "Desktop notifications are working! You will be alerted when agents need you or routines fail.",
+      title: t("personalSettings.noticeTitle"),
+      body: t("personalSettings.noticeBody"),
       silent: !prefs.sound_enabled,
     });
     if (success) {
@@ -90,18 +93,18 @@ export function NotificationsSettings() {
     <div className="space-y-6" data-setting-root data-setting-container tabIndex={-1}>
       <div id="setting-notifications-desktop" data-setting-id="setting-notifications-desktop" data-setting-container tabIndex={-1}>
         <SettingsCard
-          title="Desktop notifications"
-          description="Receive native operating system alerts when agents need your input or background tasks encounter issues."
+          title={t("personalSettings.desktop")}
+          description={t("personalSettings.desktopHint")}
           action={
             <Button size="sm" variant="secondary" onClick={handleTestNotification}>
-              {testSent ? "Test sent!" : "Send test alert"}
+              {testSent ? t("personalSettings.sent") : t("personalSettings.test")}
             </Button>
           }
         >
           <div className="space-y-3">
             <Switch
-              label="Enable desktop notifications"
-              description="Show OS notifications when Suparagent is running in the background."
+              label={t("personalSettings.enable")}
+              description={t("personalSettings.enableHint")}
               checked={prefs.desktop_enabled}
               onChange={(e) => saveOption("desktop_enabled", e.target.checked)}
             />
@@ -109,10 +112,10 @@ export function NotificationsSettings() {
             {!isDesktop && canRequestBrowserPermission() && browserPermission !== "granted" && (
               <div className="flex items-center justify-between rounded-field border border-line bg-surface p-3 text-xs">
                 <span className="text-muted">
-                  Browser notification permission is currently <strong>{browserPermission}</strong>.
+                  {t("personalSettings.permission", { status: t(`personalSettings.permission.${browserPermission}`) })}
                 </span>
                 <Button size="sm" onClick={handleRequestPermission}>
-                  Allow notifications
+                  {t("personalSettings.allow")}
                 </Button>
               </div>
             )}
@@ -127,37 +130,37 @@ export function NotificationsSettings() {
 
       <div id="setting-notifications-categories" data-setting-id="setting-notifications-categories" data-setting-container tabIndex={-1}>
         <SettingsCard
-          title="What notifies you"
-          description="Choose which categories of agent events should trigger desktop alerts."
+          title={t("personalSettings.categories")}
+          description={t("personalSettings.categoriesHint")}
         >
           <div className="space-y-4">
             <Switch
-              label="Agent input & approvals"
-              description="Notify when an agent asks a question, requests tool approval, or needs human guidance."
+              label={t("personalSettings.input")}
+              description={t("personalSettings.inputHint")}
               disabled={!prefs.desktop_enabled}
               checked={prefs.notify_needs_you}
               onChange={(e) => saveOption("notify_needs_you", e.target.checked)}
             />
 
             <Switch
-              label="Failures & errors"
-              description="Notify when a background routine or delegated task fails or encounters an unhandled error."
+              label={t("personalSettings.errors")}
+              description={t("personalSettings.errorsHint")}
               disabled={!prefs.desktop_enabled}
               checked={prefs.notify_failures}
               onChange={(e) => saveOption("notify_failures", e.target.checked)}
             />
 
             <Switch
-              label="Task deadlines & reminders"
-              description="Notify when a scheduled task reaches its reminder deadline."
+              label={t("personalSettings.deadlines")}
+              description={t("personalSettings.deadlinesHint")}
               disabled={!prefs.desktop_enabled}
               checked={prefs.notify_task_due}
               onChange={(e) => saveOption("notify_task_due", e.target.checked)}
             />
 
             <Switch
-              label="Agent responses & completions"
-              description="Notify when an agent completes a reply while Suparagent is in the background or minimized."
+              label={t("personalSettings.replies")}
+              description={t("personalSettings.repliesHint")}
               disabled={!prefs.desktop_enabled}
               checked={prefs.notify_turn_completed ?? true}
               onChange={(e) => saveOption("notify_turn_completed", e.target.checked)}
@@ -180,13 +183,13 @@ export function NotificationsSettings() {
 
       <div id="setting-notifications-sound" data-setting-id="setting-notifications-sound" data-setting-container tabIndex={-1}>
         <SettingsCard
-          title="Alert sound"
-          description="Control audio alerts accompanying desktop notifications."
+          title={t("personalSettings.sound")}
+          description={t("personalSettings.soundHint")}
         >
           <div className="space-y-3">
             <Switch
-              label="Notification chime"
-              description="Play a subtle chime sound when a desktop notification arrives."
+              label={t("personalSettings.chime")}
+              description={t("personalSettings.chimeHint")}
               disabled={!prefs.desktop_enabled}
               checked={prefs.sound_enabled}
               onChange={(e) => saveOption("sound_enabled", e.target.checked)}
@@ -202,13 +205,13 @@ export function NotificationsSettings() {
 
       <div id="setting-notifications-quiet" data-setting-id="setting-notifications-quiet" data-setting-container tabIndex={-1}>
         <SettingsCard
-          title="Quiet hours"
-          description="Automatically silence desktop alerts and chime sounds during your chosen resting hours."
+          title={t("personalSettings.quiet")}
+          description={t("personalSettings.quietHint")}
         >
           <div className="space-y-4">
             <Switch
-              label="Enable quiet hours"
-              description="Do not disturb during scheduled hours."
+              label={t("personalSettings.quietEnable")}
+              description={t("personalSettings.quietEnableHint")}
               disabled={!prefs.desktop_enabled}
               checked={prefs.quiet_hours_enabled ?? false}
               onChange={(e) => saveOption("quiet_hours_enabled", e.target.checked)}
@@ -217,7 +220,7 @@ export function NotificationsSettings() {
             {(prefs.quiet_hours_enabled ?? false) && (
               <div className="flex flex-wrap items-center gap-4 pt-1 text-xs">
                 <label className="flex items-center gap-2">
-                  <span className="text-muted">From:</span>
+                  <span className="text-muted">{t("personalSettings.from")}</span>
                   <input
                     type="time"
                     disabled={!prefs.desktop_enabled}
@@ -227,7 +230,7 @@ export function NotificationsSettings() {
                   />
                 </label>
                 <label className="flex items-center gap-2">
-                  <span className="text-muted">To:</span>
+                  <span className="text-muted">{t("personalSettings.to")}</span>
                   <input
                     type="time"
                     disabled={!prefs.desktop_enabled}
