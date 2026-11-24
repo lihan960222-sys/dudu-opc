@@ -1,6 +1,7 @@
 """Steward-only suggestions. Every choice names one previously delivered offer."""
 import json
 import logging
+import re
 import time
 from urllib.parse import quote
 
@@ -16,6 +17,11 @@ def initialize(db):
     db.execute("""create table if not exists suggestion_offers(
         id text, revision integer, outgoing text unique not null, decision_event text,
         choice text, options text, state text not null default 'offered', primary key(id,revision))""")
+    columns = {r[1] for r in db.execute("pragma table_info(suggestion_offers)")}
+    if "digest" not in columns:
+        db.execute("alter table suggestion_offers add column digest text")
+    if "position" not in columns:
+        db.execute("alter table suggestion_offers add column position integer")
     db.execute("""create table if not exists suggestion_delivery_clock(
         singleton integer primary key check(singleton=1), sent real not null)""")
 
@@ -23,12 +29,41 @@ def initialize(db):
 def delivered(db, outgoing):
     """Called in the same transaction as the successful outgoing receipt."""
     db.execute("""insert or replace into suggestion_delivery_clock(singleton,sent)
-        select 1,? from suggestion_offers where outgoing=?""", (time.time(), outgoing))
+        select 1,? from suggestion_offers where coalesce(digest,outgoing)=? limit 1""", (time.time(), outgoing))
 
 
 def offered_options(item):
     return [option for option in item.get('options',[])
             if isinstance(option,dict) and option.get('id') in ('brief','followup') and isinstance(option.get('label'),str)][:2]
+
+
+STATUS = {
+    "有任务在等待": "等待中", "有成果等待验收": "待验收", "已过计划日期": "已延期",
+    "交付条件尚未写清": "验收条件待定", "有可开始的任务尚无负责人": "待指派",
+}
+
+
+def digest_text(items):
+    lines = []
+    for n, item in enumerate(items, 1):
+        prefix, sep, subject = item["title"].partition(" · ")
+        title = subject if sep and prefix in STATUS else item["title"]
+        title = " ".join(title.split())
+        title = title if len(title) <= 52 else title[:51] + "…"
+        lines.append(f"{n}. {title}：{STATUS.get(prefix, '待确认')}。")
+    if len(items) == 1:
+        options = offered_options(items[0])
+        menu = "，".join(f"「{n}」{opt['label']}" for n, opt in enumerate(options,1))
+        lines.append("引用回复" + (menu or "「采纳」「稍后」或「忽略」") + "。")
+    else:
+        waiting = next((n for n, item in enumerate(items, 1)
+                        if item["title"].startswith("有任务在等待 · ")
+                        and any(o["id"] == "followup" for o in offered_options(item))), None)
+        if waiting:
+            lines.append(f"建议先查第 {waiting} 项卡在哪里。要我跟进，引用回复「跟进{waiting}」。")
+        else:
+            lines.append("需要我跟进哪项？引用回复「跟进」加序号。")
+    return "\n".join(lines)
 
 
 def poll(worker, *, wall_now=None):
@@ -42,7 +77,7 @@ def poll(worker, *, wall_now=None):
     # owner's quiet period starts when Feishu actually accepted the last offer.
     last, pending = worker.db.execute("""select max(mark),max(pending) from (
         select max(o.created) as mark,max(o.state='pending') as pending from suggestion_offers s
-        join outbox o on o.id=s.outgoing
+        join outbox o on o.id=coalesce(s.digest,s.outgoing)
         union all select sent,0 from suggestion_delivery_clock)""").fetchone()
     if pending:
         return
@@ -52,23 +87,22 @@ def poll(worker, *, wall_now=None):
         response = worker.api.get('steward/suggestions',timeout=5)
         response.raise_for_status()
         items = response.json()['items']
-        new = 0
+        fresh = []
         for item in items:
-            if item.get('state')!='pending':
+            if item.get('state') != 'pending':
                 continue
             key = str(item['id']), int(item['revision'])
-            if worker.db.execute('select 1 from suggestion_offers where id=? and revision=?',key).fetchone():
-                continue
-            with worker.db:
-                options = offered_options(item)
-                menu = '\n'.join(f"{n}. {opt['label'][:180]}" for n,opt in enumerate(options,1))
-                guide = '引用本条回复选项序号，或回复「稍后」「忽略」。' if options else '引用本条回复「采纳」「稍后」或「忽略」。'
-                text = f"嘟嘟的建议：{item['title'][:200]}\n{item['detail'][:1600]}\n{menu}\n{guide}"
-                outgoing = enqueue(worker.db,item.get('task_id'),'steward',{'text':text})
-                worker.db.execute('insert into suggestion_offers(id,revision,outgoing,options) values(?,?,?,?)',(*key,outgoing,json.dumps(options)))
-            new += 1
-            if new >= 3:
+            if not worker.db.execute('select 1 from suggestion_offers where id=? and revision=?',key).fetchone():
+                fresh.append(item)
+            if len(fresh) == 3:
                 break
+        if fresh:
+            with worker.db:
+                outgoing = enqueue(worker.db, None, 'steward', {'text': digest_text(fresh)})
+                for n, item in enumerate(fresh, 1):
+                    worker.db.execute("""insert into suggestion_offers(id,revision,outgoing,digest,position,options)
+                        values(?,?,?,?,?,?)""", (str(item['id']), int(item['revision']), outgoing if n == 1 else f"{outgoing}:{n}",
+                                                outgoing, n, json.dumps(offered_options(item))))
     except (httpx.HTTPError,TypeError,ValueError,KeyError) as error:
         LOG.warning('Suggestion listing unavailable: %s',type(error).__name__)
 
@@ -77,21 +111,37 @@ def answer(worker,row,msg,text):
     if row['app']!=worker.cfg['steward']['app_id'] or msg.get('chat_type')!='p2p':
         return False
     db = worker.db
-    offer = db.execute("""select s.* from suggestion_offers s join outbox o on o.id=s.outgoing
-        where o.role='steward' and o.state='sent' and o.remote=?""",(msg.get('parent_id'),)).fetchone()
+    offers = db.execute("""select s.* from suggestion_offers s join outbox o on o.id=coalesce(s.digest,s.outgoing)
+        where o.role='steward' and o.state='sent' and o.remote=? order by s.position""",(msg.get('parent_id'),)).fetchall()
     choice = CHOICES.get(text.strip()) if msg.get('message_type')=='text' else None
-    if not offer:
+    if not offers:
         if choice:
-            worker.respond(row,'done','请直接引用嘟嘟发来的那条建议，再选择如何处理。')
+            worker.respond(row,'done','请直接引用原建议，再选择如何处理。')
         return bool(choice)
-    options = json.loads(offer['options'] or '[]')
-    selection = text.strip()
     option = None
-    if msg.get('message_type')=='text' and selection in ('1','2') and int(selection)<=len(options):
-        choice = 'approve'
-        option = options[int(selection)-1]['id']
-    elif choice=='approve' and options:
-        option = options[0]['id']
+    selection = text.strip() if msg.get('message_type')=='text' else ''
+    if len(offers) > 1:
+        match = re.fullmatch(r'(跟进|摘要|稍后|忽略)\s*([1-3])', selection)
+        if not match or int(match[2]) > len(offers):
+            worker.respond(row, 'done', '请引用原消息，回复「跟进」「摘要」「稍后」或「忽略」加序号。')
+            return True
+        offer = offers[int(match[2])-1]
+        action = match[1]
+        choice = CHOICES.get(action, 'approve')
+        if choice == 'approve':
+            available = json.loads(offer['options'] or '[]')
+            option = 'followup' if action == '跟进' else 'brief'
+            if not any(o['id'] == option for o in available):
+                worker.respond(row, 'done', '这项建议没有这个选项。')
+                return True
+    else:
+        offer = offers[0]
+        options = json.loads(offer['options'] or '[]')
+        if selection in ('1','2') and int(selection)<=len(options):
+            choice = 'approve'
+            option = options[int(selection)-1]['id']
+        elif choice=='approve' and options:
+            option = options[0]['id']
     if not choice:
         worker.respond(row,'done','请引用这条建议，回复其中一个选项，或选择「稍后」「忽略」。')
         return True
@@ -100,7 +150,7 @@ def answer(worker,row,msg,text):
             worker.respond(row,'done','这条建议已处理。')
         return True
     if offer['decision_event'] and offer['decision_event']!=row['event']:
-        worker.respond(row,'done','嘟嘟已经收到这条建议的选择，正在核对处理结果。')
+        worker.respond(row,'done','已收到你的选择，正在核对处理结果。')
         return True
     with db:
         db.execute("update suggestion_offers set state='deciding',choice=?,decision_event=? where outgoing=?",
@@ -127,10 +177,10 @@ def answer(worker,row,msg,text):
             resp.raise_for_status()
             result = resp.json()
             message = {'approve':'已采纳。','defer':'已选择稍后处理。','dismiss':'已忽略这条建议。'}[choice]
-            if result.get('report'):
+            if result.get('report') and not result.get('followup_task_id'):
                 message += '\n'+str(result['report'])[:3500]
             if result.get('followup_task_id'):
-                message += f"\n后续任务 #{result['followup_task_id']}。"
+                message += f"\n已建立跟进任务 #{result['followup_task_id']}。"
 
     except httpx.HTTPError as error:
         with db:

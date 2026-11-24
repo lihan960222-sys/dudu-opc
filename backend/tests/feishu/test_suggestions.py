@@ -84,3 +84,37 @@ def test_numbered_choice_replayed_after_timeout(tmp_path):
         suggestions.answer(worker,row,msg,'2')
         assert request_bodies==[{'choice':'approve','revision':3,'option':'followup'}]*2
         assert '#81' in json.loads(db.execute('select body from outbox order by rowid desc limit 1').fetchone()[0])['text']
+
+def test_two_patrol_signals_produce_one_short_actionable_reply(tmp_path):
+    cfg = {'proactive_suggestions': True, 'steward': {'app_id': 'boss'}}
+    data = [
+        ('有任务在等待', 'Omniverse 开发现状盘点（只读）'),
+        ('有成果等待验收', '焊接方向与 Omniverse 的接口/依赖盘点（只读）'),
+    ]
+    items = [dict(id=str(i), revision=1, state='pending', title=f'{status} · {title}',
+                  detail='验收条件和原始任务长文' * 100,
+                  options=[dict(id='brief',label='摘要'),dict(id='followup',label='跟进')])
+             for i, (status, title) in enumerate(data, 1)]
+    decisions = []
+    def backend(req):
+        if req.method == 'GET':
+            return httpx.Response(200,json={'items':items})
+        decisions.append((req.url.path, json.loads(req.content)))
+        return httpx.Response(200,json={'followup_task_id':81,'report':'详细记录'*300})
+    with closing(journal(tmp_path/'j')) as db:
+        worker = Worker(cfg,Publisher(cfg,db,tmp_path))
+        with httpx.Client(base_url='http://local/', transport=httpx.MockTransport(backend)) as api:
+            worker.api = api
+            suggestions.poll(worker)
+            messages = db.execute('select body from outbox').fetchall()
+            assert len(messages) == 1
+            text = json.loads(messages[0]['body'])['text']
+            assert '等待中' in text and '待验收' in text and '跟进1' in text
+            assert len(text) < 135 and '验收条件' not in text
+            db.execute("update outbox set state='sent',remote='om_digest'")
+            msg = {'chat_type':'p2p','message_type':'text','parent_id':'om_digest'}
+            row = {'app':'boss','event':'reply','message':'om_choice'}
+            db.execute("insert into inbox(app,event,message) values(:app,:event,:message)",row)
+            assert suggestions.answer(worker,row,msg,'跟进2')
+            assert decisions == [('/steward/suggestions/2/decision',{'choice':'approve','revision':1,'option':'followup'})]
+            assert len(json.loads(db.execute("select body from outbox where state='pending'").fetchone()[0])['text']) < 30
