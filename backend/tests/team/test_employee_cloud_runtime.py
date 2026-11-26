@@ -7,7 +7,7 @@ from app.team import feishu_tools_bridge as bridge, policy
 def test_authorized_employee_can_choose_how_to_deliver(monkeypatch):
     identity = {"_employee_oauth": True, "steward": {"app_id": "worker"}}
     monkeypatch.setattr(bridge.owner_oauth, "employee_config", lambda *_: identity)
-    monkeypatch.setattr(bridge.owner_oauth, "status", lambda *_: {"actions": {"doc": True, "history": True}})
+    monkeypatch.setattr(bridge.owner_oauth, "status", lambda *_: {"actions": {"doc": True, "history": True, "folder": True}})
     monkeypatch.setattr(bridge.workspace_access, "settings_for", lambda *_: {
         "history_sources": {"客户": {"agent_id": 4, "oauth_app": "worker"}}, "allow_codex_summary": True})
     monkeypatch.setattr(bridge.knowledge_document, "target", lambda *_: ({}, "知识库"))

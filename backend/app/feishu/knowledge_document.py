@@ -24,7 +24,10 @@ def target(cfg, employee, alias=None):
     if not folder:
         raise ValueError("知识库文件夹链接无效。")
     dest = workspace_access.validate_document_target(dict(folder_token=folder[1], tenant_origin=f"{url.scheme}://{url.netloc}"))
-    return dest, task["document_name"]
+    title=task.get("document_name")
+    if not isinstance(title,str) or not title.strip() or len(title)>200:
+        raise ValueError("请核对该员工登记的知识库文档名称。")
+    return dest,title
 
 
 def collect(client, auth, source, cutoff, *, start=None, count=None, keyword=None):
@@ -95,21 +98,35 @@ def inspect_document(client,auth,doc):
         raise ValueError("无法确认原知识库文档的身份。")
     return meta
 
-def resolve_document(db,client,auth,key,dest,title):
+def resolve_document(db,client,auth,key,dest,title,*,folder_auth=None,resolution=None):
+    from . import knowledge_folder
     saved=db.execute("select document from knowledge_documents where binding=?",(key,)).fetchone()
     previous=saved[0] if saved else None
     if saved and not previous:
         raise ValueError("创建文档的结果待核对，暂不重复创建。")
     if previous:
-        missing=inspect_document(client,auth,previous) is None
+        metadata=inspect_document(client,auth,previous)
         # Legacy rows used the employee/contact binding alone. They belong to
         # this exact old document even when Feishu confirms it was deleted.
         with db:
             for table in ("knowledge_entries","knowledge_revisions"):
                 if db.execute("select 1 from sqlite_master where type='table' and name=?",(table,)).fetchone():
                     db.execute(f"update {table} set binding=? where binding=?",(key+"/"+previous,key))
-        if not missing:
+        if metadata is not None:
+            if folder_auth:
+                folder=knowledge_folder.inspect(client,folder_auth,dest["folder_token"],title,previous)
+                blocker=knowledge_folder.existing_blocker(folder,metadata.get("title")==title)
+                if blocker:
+                    raise ValueError(blocker)
+            if resolution is not None:
+                resolution["document_resolution"]="existing"
             return previous
+    if folder_auth:
+        folder=knowledge_folder.inspect(client,folder_auth,dest["folder_token"],title)
+        blocker=knowledge_folder.creation_blocker(folder)
+        if blocker:
+            raise ValueError(blocker)
+        folder_auth()
     headers=auth()
     with db:
         if previous:
@@ -121,7 +138,9 @@ def resolve_document(db,client,auth,key,dest,title):
     try:
         response=client.post(API+"/docx/v1/documents",headers=headers,
             json={"folder_token":dest["folder_token"],"title":title},timeout=15)
-        created=checked(response)["data"]["document"]["document_id"]
+        data=checked(response).get("data")
+        document=data.get("document") if isinstance(data,dict) else None
+        created=document.get("document_id") if isinstance(document,dict) else None
     except httpx.HTTPStatusError as exc:
         # Explicit request rejection can be retried; ambiguous outcomes keep
         # the durable claim to prevent creating a second cloud document.
@@ -132,15 +151,17 @@ def resolve_document(db,client,auth,key,dest,title):
                 else:
                     db.execute("delete from knowledge_documents where binding=? and document is null",(key,))
         raise
-    if not documents.TOKEN.fullmatch(created):
-        raise ValueError("云盘返回的文档编号无效。")
+    if not isinstance(created,str) or not documents.TOKEN.fullmatch(created):
+        raise ValueError("云盘未确认新文档编号，创建结果待核对。")
     with db:
         db.execute("update knowledge_documents set document=? where binding=? and document is null",(created,key))
+    if resolution is not None:
+        resolution["document_resolution"]="created"
     return created
 
 
 async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False,instructions="",
-                  employee_draft=None,assignment=None):
+                  employee_draft=None,assignment=None,verification=None):
     def stage(name, count=None):
         if "event" not in row.keys():
             return
@@ -162,9 +183,12 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
     if not cfg.get("_employee_oauth") or cfg["steward"]["app_id"] != source["oauth_app"]:
         raise ValueError("当前飞书授权与员工身份不匹配。")
     def auth(scopes):
-        if (workspace_access.settings_for(worker.cfg)["history_sources"].get(alias)!=source or
+        settings=workspace_access.settings_for(worker.cfg)
+        if (settings["history_sources"].get(alias)!=source or
                 target(worker.cfg,employee,alias)!=(dest,title)):
             raise ValueError("联系人或目标文件夹已变更，请重新发起整理。")
+        if employee_draft is not None and not workspace_access.permits_model(settings,profile,assignment):
+            raise ValueError("该员工的模型读取授权已变更，无法继续本次整理。")
         return history.headers(cfg,scopes)
     client = worker.pub.http
     if history.peer_for(client,auth(history.SCOPES),source["chat_id"],cfg["steward"]["open_id"])!=source["peer_open_id"]:
@@ -191,8 +215,34 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
     key=binding_key(row["app"],employee,alias,source,dest,title)
     db.executescript("""create table if not exists knowledge_documents(binding text primary key,document text);
         create table if not exists knowledge_entries(binding text,id text,primary key(binding,id));""")
+    from . import knowledge_folder, owner_oauth
+    def folder_auth():
+        return auth(owner_oauth.ACTIONS["doc"] | owner_oauth.ACTIONS["folder"])
+    def verify_target(doc):
+        folder=knowledge_folder.inspect(client,folder_auth,dest["folder_token"],title,doc)
+        meta=inspect_document(client,folder_auth,doc)
+        blocker=knowledge_folder.existing_blocker(folder,meta is not None and meta.get("title")==title)
+        if blocker:
+            raise ValueError(blocker)
+        return folder
+    def verify_draft(doc, plan, resolution):
+        from . import knowledge_revision, weekly_knowledge
+        if verification is not None:
+            actual=knowledge_revision.root_blocks(client,folder_auth,doc)
+            if not knowledge_revision.matches(actual,plan):
+                raise ValueError("飞书正文与本次整理稿不符，无法确认交付。")
+            sources=weekly_knowledge.source_ids(actual[:len(plan)],source["chat_id"])
+            if not set(records)<=sources:
+                raise ValueError("飞书正文未覆盖本次读取的来源消息。")
+        folder=verify_target(doc)
+        if verification is not None:
+            verification.update(resolution, title=title, url=dest["tenant_origin"]+"/docx/"+doc,
+                folder_url=dest["tenant_origin"]+"/drive/folder/"+dest["folder_token"],
+                parent_verified=True, body_verified=True, source_messages_verified=len(sources),
+                same_title_entries=folder["same_title_entries_seen"])
     if not records:
         if weekly:
+            verify_draft(weekly["document"],prior,{"document_resolution":"existing"})
             return f"已核对原知识库，本周没有新增消息。\n《{title}》{dest['tenant_origin']}/docx/{weekly['document']}", 0
         return f"{staff}查完了，当前可读取的全部历史里有 0 条消息。",0
     draft_blocks = employee_draft(records) if employee_draft is not None else None
@@ -200,14 +250,11 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
         if not draft_blocks:
             raise ValueError("本周更新需要员工提交包含新消息来源的综述。")
         draft_blocks = weekly_knowledge.merged_draft(db, assignment, prior, draft_blocks)
-    def verify_target(doc):
-        from . import document_access, owner_oauth
-        folder_auth = lambda: auth(documents.SCOPES | owner_oauth.ACTIONS["folder"])
-        document_access.verify_destination(client,folder_auth,dest["folder_token"],doc,title)
     if draft_blocks is not None:
-        from . import owner_oauth
-        auth(documents.SCOPES | owner_oauth.ACTIONS["folder"])
-    created=weekly["document"] if weekly else resolve_document(db,client,lambda:auth(documents.SCOPES),key,dest,title)
+        folder_auth()
+    resolution={"document_resolution":"existing"} if weekly else {}
+    created=weekly["document"] if weekly else resolve_document(db,client,lambda:auth(documents.SCOPES),key,dest,title,
+        folder_auth=folder_auth if draft_blocks is not None else None,resolution=resolution)
     if draft_blocks is not None:
         verify_target(created)
     layout_key=key
@@ -229,7 +276,7 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
         result=await revise_document(db,client,lambda:auth(documents.SCOPES),authorized,profile,key,created,
             dest["tenant_origin"],title,source["chat_id"],records,stage=stage,instructions=instructions,layout_key=layout_key,**opts)
         if draft_blocks is not None:
-            verify_target(created)
+            verify_draft(created,draft_blocks,resolution)
         stage("revision_confirmed",result[1])
         return result
     known={r[0] for r in db.execute("select id from knowledge_entries where binding=?",(key,))}
