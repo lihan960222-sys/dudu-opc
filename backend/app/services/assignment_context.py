@@ -152,7 +152,7 @@ async def resolve_assignment_context(db, owner_id, turn_id):
         if project:
             query = query.where(steward_task_scope(owner_id, project, thread.id))
         if set(await db.scalars(query)) != set(ids):
-            raise ValueError("任务编号不属于当前老板或项目。")
+            raise service.TeamError("assignment_reference_scope", "任务编号不属于当前老板或项目。")
     members = await db.execute(select(Agent.id, Agent.name).where(Agent.owner_id == owner_id,
         Agent.team_id == team.id, Agent.id != team.lead_agent_id, Agent.archived_at.is_(None)))
     first = text.strip().partition("\n")[0]

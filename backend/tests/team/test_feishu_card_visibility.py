@@ -6,6 +6,7 @@ import pytest
 from app.db.models import AgentJob, FeishuLeadChat
 from app.feishu import lead_chat
 from app.services import agent_store, assignment_context, feature_tasks, thread_store
+from app.team.service import TeamError
 from tests.services.thread_harness import owner, sessions  # noqa: F401
 
 
@@ -60,7 +61,8 @@ async def test_private_steward_continues_its_own_numbered_or_quoted_card_across_
             assert f'#{expected} ' in await assignment_context.status_text(db, owner, ctx)
 
         turn = await ask(f'续办工单 #{foreign_card}')
-        with pytest.raises(ValueError, match='不属于'):
+        with pytest.raises(TeamError, match='不属于') as denied:
             await assignment_context.resolve_assignment_context(db, owner, turn.id)
+        assert denied.value.code == 'assignment_reference_scope'
         facts = await lead_chat.project_context(db, owner, 'default project', current.id)
         assert json.loads(facts.partition('：')[2]) == [[expected, worker.id]]
