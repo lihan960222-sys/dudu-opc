@@ -33,7 +33,7 @@ async def test_pages_scope_and_repeat_publication(tmp_path, monkeypatch):
         elif req.method=="GET":
             assert "start_time" not in req.url.params
             second = "page_token" in req.url.params
-            row = dict(chat_id="oc_one",message_id="b" if second else "a",create_time="1000",msg_type="text",
+            row = dict(chat_id="oc_one",message_id="b" if second else "a",message_position=int(second),create_time="1000",msg_type="text",
                        body={"content":json.dumps({"text":"确认"})})
             data=dict(has_more=not second, page_token="cursor",items=[row,{**row,"chat_id":"oc_other"}])
         elif req.url.path.endswith("/documents"):

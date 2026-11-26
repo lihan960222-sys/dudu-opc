@@ -8,7 +8,6 @@ import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -215,24 +214,21 @@ async def claim(db, cfg, employee, now):
     return job.id
 
 
-def source_ids(plan, chat):
+def source_ids(plan, chat, *, records=None):
+    from . import knowledge_citations
     ids = set()
     for block in plan:
         for field in ("text", "heading1", "heading2"):
-            for element in block.get(field, {}).get("elements", []):
-                link = element.get("text_run", {}).get("text_element_style", {}).get("link")
-                if not link:
-                    continue
-                url = urlsplit(link["url"])
-                params = parse_qs(url.query)
-                if (url.scheme != "https" or url.netloc != "applink.feishu.cn" or url.path != "/client/chat/open"
-                        or params.get("openChatId") != [chat] or len(params.get("messageId", [])) != 1):
-                    raise ValueError("原综述有无法对应到授权会话的来源。")
-                ids.add(params["messageId"][0])
+            for index, element in enumerate(block.get(field, {}).get("elements", [])):
+                run = element.get("text_run", {})
+                if index or run.get("text_element_style", {}).get("link"):
+                    found, _ = knowledge_citations.identify(run, chat, records=records)
+                    ids.update(found)
     return ids
 
 
 def merge_blocks(prior, added, chat):
+    from . import knowledge_citations
     from .knowledge_revision import text_block
     seen, new = source_ids(prior, chat), source_ids(added, chat)
     if not seen or not new or seen & new:
@@ -245,7 +241,7 @@ def merge_blocks(prior, added, chat):
                 title = block["heading2"]["elements"][0]["text_run"]["content"]
                 current = groups.setdefault(title, [block])
             elif block.get("block_type") == 2 and current is not None:
-                current.append(block)
+                current.append(knowledge_citations.archive_old_links(block, chat) if plan is prior else block)
             else:
                 raise ValueError("无法在保留原综述的前提下合并这一版。")
     return [prior[0], text_block("text", f"本版涵盖 {len(seen | new)} 条消息。"),

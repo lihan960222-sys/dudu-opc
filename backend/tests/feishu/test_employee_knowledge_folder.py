@@ -39,7 +39,9 @@ def employee(monkeypatch):
     calls=[]
     def entry(token="doc", name=title):
         return {"type":"docx","token":token,"parent_token":"assigned","name":name}
-    cloud = {"pages":[{"files":[entry("other","无关标题")],"has_more":False}], "docs":{}, "blocks":[]}
+    cloud = {"pages":[{"files":[entry("other","无关标题")],"has_more":False}], "docs":{}, "blocks":[],
+             "messages":[{"message_id":mid, "message_position":n, "chat_id":"oc_chat", "msg_type":"text", "create_time":"1000",
+                          "body":{"content":json.dumps({"text":mid})}} for n, mid in enumerate(("m1", "m2"))]}
     def transport(req):
         calls.append(req)
         assert req.headers.get("Authorization")=="Bearer employee-fixture"
@@ -54,8 +56,7 @@ def employee(monkeypatch):
             return httpx.Response(200,json={"code":0,"data":data})
         if req.url.path.endswith("/im/v1/messages"):
             assert req.url.params["container_id"]=="oc_chat"
-            data={"items":[{"message_id":mid,"chat_id":"oc_chat","msg_type":"text","create_time":"1000",
-                            "body":{"content":json.dumps({"text":mid})}} for mid in ("m1","m2")],"has_more":False}
+            data={"items":cloud["messages"],"has_more":False}
             return httpx.Response(200,json={"code":0,"data":data})
         if req.url.path.endswith("/blocks/new/children"):
             if req.method=="POST":
@@ -97,7 +98,7 @@ def employee(monkeypatch):
                 key,dest,title,folder_auth=lambda:headers(identity,required=owner_oauth.ACTIONS["folder"]))
         async def submit(name,args,**proof):
             return await employee_tools.execute(cfg,4,name,args,owner_id="owner",journal_db=db,client=client,
-                allowed_actions={"feishu_read_history","feishu_publish_knowledge"},contact=contact,invocation_id="job",
+                allowed_actions={"feishu_read_history","feishu_read_message","feishu_publish_knowledge"},contact=contact,invocation_id="job",
                 assignment={"employee":4,"contact":contact,"action":"update","runtime_vendor":"openai",**proof})
         cloud["submit"]=submit
         yield discover, bind, resolve, cloud, calls, scopes, entry
@@ -220,3 +221,31 @@ async def test_normal_employee_publish_requires_full_cloud_readback(employee,pro
         assert repeated["verification"]["document_resolution"]=="existing"
         assert repeated["verification"]["source_messages_verified"]==2
     assert sum(r.method=="POST" and r.url.path.endswith("/docx/v1/documents") for r in calls)==1
+
+
+async def test_27_positioned_sources_with_long_text_and_attachment(employee):
+    from app.feishu.weekly_knowledge import source_ids
+    _, bind, _, cloud, calls, _, _ = employee
+    bind("deleted")
+    rows = [{"message_id": f"om_test_{n}", "message_position": str(100 + n * 3), "chat_id": "oc_chat",
+             "msg_type": "file" if n == 12 else "text", "create_time": "1000",
+             "body": {"content": json.dumps({"file_name": "合成附件"} if n == 12 else {"text": "文" * (4200 if n == 0 else 8)})}}
+            for n in range(27)]
+    cloud["messages"] = rows
+    submit = cloud["submit"]
+    seen = {}
+    for offset in (0, 10, 20):
+        page = await submit("feishu_read_history", {"offset": offset})
+        seen.update({row["id"]: row for row in page["excerpts"]})
+    assert page["complete"] and not page["source_complete"] and seen["om_test_12"]["type"] == "file"
+    topics = {"topics": [{"title": "进展", "summary": "汇总合成消息和附件记录。", "sources": list(seen)}]}
+    with pytest.raises(ValueError, match="未读完"):
+        await submit("feishu_publish_knowledge", topics)
+    long = seen["om_test_0"]
+    while long["next_text_offset"] is not None:
+        long = await submit("feishu_read_message", {"id": "om_test_0", "offset": long["next_text_offset"]})
+    assert long["source_complete"]
+    receipt = await submit("feishu_publish_knowledge", topics)
+    assert receipt["confirmed"] and receipt["verification"]["source_messages_verified"] == 27
+    assert source_ids(cloud["blocks"], "oc_chat", records={row["message_id"]:row for row in rows}) == set(seen)
+    assert sum(call.method == "POST" and call.url.path.endswith("/docx/v1/documents") for call in calls) == 1

@@ -8,8 +8,8 @@ from app.feishu.knowledge_revision import employee_blocks
 
 
 def test_only_new_sources_join_the_prior_verified_topics():
-    old = employee_blocks([{"title":"交付", "summary":"原定周五验收", "sources":["om_old"]}], {"om_old":{}}, "oc_chat")
-    more = employee_blocks([{"title":"交付", "summary":"补充图纸已提交", "sources":["om_new"]}], {"om_new":{}}, "oc_chat")
+    old = employee_blocks([{"title":"交付", "summary":"原定周五验收", "sources":["om_old"]}], {"om_old":{"message_position":1}}, "oc_chat")
+    more = employee_blocks([{"title":"交付", "summary":"补充图纸已提交", "sources":["om_new"]}], {"om_new":{"message_position":2}}, "oc_chat")
     merged = weekly.merge_blocks(old, more, "oc_chat")
     assert merged[2:4] == old[2:4] and merged[-1] == more[-1]
     assert weekly.source_ids(merged, "oc_chat") == {"om_new", "om_old"}

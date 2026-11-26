@@ -21,7 +21,7 @@ async def test_employee_reconciles_lost_write_receipt_before_retry():
         writes.append(req)
         remote[0:0]=[{**block,"block_id":str(n)} for n,block in enumerate(json.loads(req.content)["children"])]
         raise httpx.ReadTimeout("lost write acknowledgement")
-    records={"m":{"body":{"content":"test"}}}
+    records={"m":{"message_position":0,"body":{"content":"test"}}}
     blocks=revision.employee_blocks([{"title":"进展","summary":"已核对","sources":["m"]}],records,"oc_demo")
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         async def run():
@@ -55,7 +55,7 @@ async def test_versioned_summary_tracks_edits_and_remote_confirmation(monkeypatc
         calls.append(body["children"])
         return httpx.Response(200,json={"code":0,"data":{"children":[] if failure=="write_unconfirmed" else
             [{"block_id":str(n)} for n,_ in enumerate(body["children"])]}})
-    records={"m1":{"body":{"content":"a"*9000+"尾端"},"msg_type":"text","create_time":"1"}}
+    records={"m1":{"message_position":7,"body":{"content":"a"*9000+"尾端"},"msg_type":"text","create_time":"1"}}
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         async def run():
             return await revision.revise_document(db,client,lambda:{},permitted,("employee",),"key","existing",
@@ -84,12 +84,13 @@ async def test_versioned_summary_tracks_edits_and_remote_confirmation(monkeypatc
         records["m1"]["body"]={"content":"编辑后的内容"}
         await run()
         assert len(calls)==2 and "编辑后的内容" in inputs[-1]
-        assert all("messageId=m1" in json.dumps(blocks) for blocks in calls)
+        from app.feishu.weekly_knowledge import source_ids
+        assert all(source_ids(blocks,"chat",records=records)=={"m1"} for blocks in calls)
 
 @pytest.mark.asyncio
 async def test_restructure_same_history_replaces_managed_summary_and_verifies(monkeypatch):
     db=sqlite3.connect(":memory:")
-    records={"m1":{"body":{"content":"项目 A"},"create_time":"1"}}
+    records={"m1":{"message_position":4,"body":{"content":"项目 A"},"create_time":"1"}}
     human=revision.text_block("text","老板的笔记")
     remote=[human]
     prompts=[]

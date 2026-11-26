@@ -29,13 +29,16 @@ def test_read_only_turn_can_actually_use_its_read_tools():
 
 
 def test_worker_draft_links_only_to_messages_observed_in_this_task():
+    from urllib.parse import unquote
     topics = [{"title": "交付", "summary": "周五核对交付。", "sources": ["m1", "m2"]}]
-    blocks = revision.employee_blocks(topics, {"m1": {}, "m2": {}}, "oc_example")
+    records = {"m1": {"message_position": 9}, "m2": {"message_position": 16}}
+    blocks = revision.employee_blocks(topics, records, "oc_example")
     assert blocks[-1]["text"]["elements"][0]["text_run"]["content"] == "周五核对交付。"
-    assert "messageId=m2" in blocks[-1]["text"]["elements"][-1]["text_run"]["text_element_style"]["link"]["url"]
+    source = blocks[-1]["text"]["elements"][-1]["text_run"]
+    assert "m2" in source["content"] and unquote(source["text_element_style"]["link"]["url"]).endswith("&position=16")
     for sources in (["m1"], ["m1", "invented"], ["m1", "m1"], [], [True, "m2"]):
         with pytest.raises(ValueError):
-            revision.employee_blocks([{**topics[0], "sources": sources}], {"m1": {}, "m2": {}}, "oc_example")
+            revision.employee_blocks([{**topics[0], "sources": sources}], records, "oc_example")
 
 
 def test_missing_write_grant_preserves_bound_read_and_blocks_unverifiable_creation(monkeypatch):

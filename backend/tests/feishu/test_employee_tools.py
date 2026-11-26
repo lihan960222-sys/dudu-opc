@@ -117,7 +117,7 @@ async def test_employee_read_checks_contact_and_requires_every_page(run,monkeypa
 @pytest.mark.asyncio
 async def test_pinned_worker_publishes_semantic_revision_and_returns_receipt(run,monkeypatch):
     call,_,_=run
-    records={"m1":{"msg_type":"text","create_time":"100","body":{"content":json.dumps({"text":"甲"*2600})}}}
+    records={"m1":{"message_position":15,"msg_type":"text","create_time":"100","body":{"content":json.dumps({"text":"甲"*2600})}}}
     monkeypatch.setattr(tools.history,"headers",lambda *_:{})
     monkeypatch.setattr(tools.history,"peer_for",lambda *_:"ou_peer")
     monkeypatch.setattr(tools.knowledge_document,"collect",lambda *_:records)
