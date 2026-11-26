@@ -238,7 +238,7 @@ async def execute(rt, run, name, args):
                 or "title" in args and proof.get("title") and args["title"]!=proof["title"]):
             await record(rt, job_id, run, name, "feishu_tool_failed", category="invalid_input")
             raise service.TeamError("invalid_input", "文档标题和正文由原派工提供。")
-        args = {"title":proof.get("title") or args.get("title"),"body":proof.get("body") or args.get("body")}
+        args = {"title":proof.get("title") or args.get("title"),"body":proof.get("body") or args.get("body","")}
     journal_path = Path(cfg["_access_config_path"]).parent / cfg["state_dir"] / "channel.sqlite3"
     try:
         with closing(sqlite3.connect(journal_path.as_uri() + "?mode=rw", uri=True)) as journal, httpx.Client(timeout=20) as client:

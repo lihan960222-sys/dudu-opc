@@ -38,7 +38,7 @@ def create_document(cfg,employee,identity,db,client,invocation_id,title,body):
     if not isinstance(title,str) or not 1<=len(title.strip())<=200 or not isinstance(body,str):
         raise ValueError("请提供文档标题（最多 200 字）及正文。")
     title=title.strip()
-    children=documents.blocks(body)
+    children=documents.blocks(body) if body else []
     destination,_=knowledge_document.target(cfg,employee)
     def headers():
         if knowledge_document.target(cfg,employee)[0]!=destination:
@@ -71,6 +71,12 @@ def create_document(cfg,employee,identity,db,client,invocation_id,title,body):
         doc,confirmed=prior[1],bool(prior[2])
     document_access.verify_destination(client,headers,destination["folder_token"],doc,title)
     actual=knowledge_revision.root_blocks(client,headers,doc)
+    if not children:
+        for block in actual:
+            elements=block.get("text",{}).get("elements",[])
+            if (block.get("block_type")!=2 or block.get("children") or
+                    any("text_run" not in el or el["text_run"].get("content") for el in elements)):
+                raise ValueError("云端正文已有内容，已保留当前内容。")
     if not knowledge_revision.matches(actual,children):
         if actual or confirmed:
             raise ValueError("云端正文与原稿不符，已保留当前内容。")
@@ -139,7 +145,7 @@ async def execute(cfg,employee_id,name,arguments,*,owner_id,journal_db,client,al
         return delete_owned(cfg, employee_id, identity, journal_db, client, assignment)
     if name=="feishu_create_document":
         return create_document(cfg,employee_id,identity,journal_db,client,invocation_id,
-                               arguments.get("title"),arguments.get("body"))
+                               arguments.get("title"),arguments.get("body",""))
     if name=="feishu_edit_document":
         if not assignment or assignment.get("action")!="edit_document":
             raise ValueError("此派工未指定编辑目标。")

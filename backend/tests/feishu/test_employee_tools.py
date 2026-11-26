@@ -87,6 +87,19 @@ async def test_general_doc_uses_employee_and_is_idempotent(run):
     assert sum(r.method=="POST" for r in calls)==2
 
 
+@pytest.mark.parametrize("args", [{"title":"空白"}, {"title":"空白","body":""}])
+async def test_blank_document_is_verified_without_writing_placeholder(run,args):
+    call,calls,settings=run
+    assert (await call("feishu_create_document",args))["confirmed"]
+    cloud=settings["test_cloud"]
+    cloud["children"]=[{"block_type":2,"text":{"elements":[{"text_run":{"content":""}}]}}]
+    assert (await call("feishu_create_document",args))["confirmed"]
+    cloud["children"]=[{"block_type":27,"image":{}}]
+    with pytest.raises(ValueError,match="正文"):
+        await call("feishu_create_document",args)
+    assert sum(r.method=="POST" for r in calls)==1
+
+
 async def test_create_document_recovers_written_body_after_lost_reply_without_a_second_write(run):
     call,calls,settings=run
     settings["test_lost_ack"]=True
