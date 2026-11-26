@@ -45,6 +45,9 @@ def _full_access(tool, run, arguments):
 
 
 def automatic(tool, mode, run, arguments):
+    recovery_call = getattr(run,"recovery_call",None)
+    if recovery_call is not None and (tool!="mcp__team__delegate" or arguments!=recovery_call):
+        return "denied","outside_recovered_dispatch"
     if getattr(run.ctx, "media_review_only", False):
         return "denied", "media_review_only"
     if getattr(run.ctx, "draft_only", False) and not tool.startswith(composio_policy.PREFIX):

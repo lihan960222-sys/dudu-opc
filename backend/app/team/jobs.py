@@ -87,6 +87,15 @@ class Jobs:
             if not turn or turn.status != 'running' or turn.owner_token != run.owner_token:
                 raise service.TeamError('parent_gone', 'The requester turn is no longer running.')
             thread = await db.get(Thread, run.thread_id)
+            from app.feishu import dispatch_recovery
+            if recovery_root := await db.scalar(select(AgentJob).where(AgentJob.owner_id==self.rt.owner_id,
+                    AgentJob.kind=="root",AgentJob.current_turn_id==turn.id,AgentJob.origin_ref==dispatch_recovery.MARK)):
+                try:
+                    existing=await dispatch_recovery.guard_child(db,recovery_root,args,target,reply)
+                except dispatch_recovery.RecoveryDenied as exc:
+                    raise service.TeamError("recovery_scope",str(exc)) from None
+                if existing:
+                    return existing
             from app.services.assignment_context import accepted_job, resolve_assignment_context, resolve_card, status_only, status_text
             scoped_command = (reply == 'resume' and mode == 'work' and
                 (settings.STEWARD_STRICT_OWNER == self.rt.owner_id or bool(command_fields.intersection(args))))
@@ -266,7 +275,8 @@ class Jobs:
                 assignment_epoch=parent.assignment_epoch if parent and parent.task_id else 1,
                 parent_id=parent.id if parent else None, depth=depth, origin_kind=parent.origin_kind if parent else run.ctx.team.origin,
                 origin_ref=parent.origin_ref if parent else None, origin_quote=parent.origin_quote if parent else turn.prompt_text[:400],
-                requester_agent_id=caller.id, requester_thread_id=run.thread_id, requester_turn_id=run.turn_id,
+                requester_agent_id=caller.id, requester_thread_id=run.thread_id,
+                requester_turn_id=recovery_root.requester_turn_id if recovery_root else run.turn_id,
                 assignee_agent_id=target, mode=mode, brief=brief.strip(), brief_hash=digest, done_when=args.get('done_when'),
                 reply=reply, rework=earlier is not None, assignee_thread_id=earlier.assignee_thread_id if earlier and not scoped_command else None,
                 approval_mode=approval_mode, budget_requests=settings.TEAM_MAX_JOBS_PER_ROOT - 1,
@@ -447,6 +457,14 @@ class Jobs:
             job = await db.get(AgentJob, job_id, with_for_update=True)
             if job is None or job.status in TERMINAL:
                 return
+            from app.feishu import dispatch_recovery
+            if dispatch_recovery.is_recovery(job) and status=="completed":
+                try:
+                    result=await dispatch_recovery.confirmed_result(db,job)
+                except dispatch_recovery.RecoveryDenied as exc:
+                    status,outcome,result,detail="failed","missing_delivery",None,str(exc)
+                await db.execute(update(AgentJobInbox).where(AgentJobInbox.holder_id==job.id,
+                    AgentJobInbox.delivered_at.is_(None)).values(delivered_at=service.now()))
             if job.task_id and job.kind == "job":
                 from app.services import feature_tasks
                 if not await feature_tasks.assignment_current(db, job, lock=True):
@@ -697,6 +715,9 @@ class Jobs:
             if await db.scalar(existing.limit(1)):
                 return
         db.add(AgentJobInbox(owner_id=job.owner_id, holder_id=holder.id, job_id=job.id, kind=kind))
+        from app.feishu.dispatch_recovery import is_recovery
+        if is_recovery(holder) and holder.status=="needs_input" and kind=="settled":
+            holder.status,holder.question="waiting",None
         root = await db.get(AgentJob, holder.root_id or holder.id)
         if root is not None and not kind.startswith(('hire:', 'review:')):
             root.budget_wakes = 48
@@ -923,7 +944,9 @@ class Jobs:
             if row.current_turn_id is not None or row.status not in EXECUTING or row.assignee_thread_id is None or row.last_activity_at is None:
                 await db.rollback()
                 return False
-            if row.task_id and row.mode == 'work':
+            from app.feishu.dispatch_recovery import is_recovery
+            first_recovery = is_recovery(row) and not await db.scalar(select(AgentJob.id).where(AgentJob.parent_id==row.id).limit(1))
+            if (row.task_id and row.mode == 'work') or first_recovery:
                 # Scoped work binds its exact turn in the same transaction as turn.started.
                 turn = await db.get(Turn,row.assignee_turn_id) if row.assignee_turn_id else None
             else:
@@ -1034,6 +1057,8 @@ class Jobs:
 
     async def _resume(self, job_id):
         claimed = None
+        from app.feishu import dispatch_recovery
+        recovery_job = None
         async with self.rt.session() as db:
             await begin_write(db)
             row = await db.get(AgentJob, job_id, with_for_update=True)
@@ -1051,7 +1076,30 @@ class Jobs:
                 await self.settle(job_id, 'failed', 'refused', detail='The requester is no longer available.')
                 return
             items = list((await db.execute(select(AgentJobInbox).where(AgentJobInbox.holder_id == row.id, AgentJobInbox.delivered_at.is_(None)).order_by(AgentJobInbox.id))).scalars())
-            text = await self._resume_text(db, row, items)
+            if dispatch_recovery.is_recovery(row) and items:
+                # The employee's receipt is the report. No second model turn may alter its result.
+                active=await db.scalar(select(AgentJob.id).where(AgentJob.parent_id==row.id,AgentJob.status.in_(LIVE)).limit(1))
+                if active:
+                    for item in items:
+                        item.delivered_at=service.now()
+                    row.status,row.current_turn_id="needs_input",None
+                    row.question="经办员工有待确认事项，请在工作台打开原工单查看。"
+                    await db.commit()
+                    return
+                await db.rollback()
+                await self.settle(job_id,"completed","done")
+                return
+            if dispatch_recovery.is_recovery(row) and not items:
+                try:
+                    await dispatch_recovery.checked_wake(db,row)
+                except (ValueError,OSError) as exc:
+                    await db.rollback()
+                    await self.settle(job_id,"failed","refused",detail=str(exc) if isinstance(exc,dispatch_recovery.RecoveryDenied)
+                                      else "原派工或权限已变化。")
+                    return
+                text, recovery_job = dispatch_recovery.PROMPT, row.id
+            else:
+                text = await self._resume_text(db, row, items)
             now = service.now()
             for item in items:
                 item.delivered_at = now
@@ -1063,8 +1111,15 @@ class Jobs:
             await db.commit()
         thread_id, mode, origin, inbox_ids, scoped_resume = claimed
         try:
-            turn = await self.rt.send_turn(thread_id, text, approval_mode=mode, team_origin=origin, internal=True, feature_resume_job=scoped_resume)
+            turn = await self.rt.send_turn(thread_id, text, approval_mode=mode, team_origin=origin, internal=True,
+                feature_resume_job=scoped_resume, **({"recovery_job":recovery_job} if recovery_job is not None else {}))
+        except dispatch_recovery.RecoveryDenied as exc:
+            await self.settle(job_id,"failed","refused",detail=str(exc))
+            return
         except Exception as exc:  # noqa: BLE001
+            if recovery_job is not None:
+                await self.settle(job_id,"failed","refused",detail="本次系统续办未能启动。请查看管家会话。")
+                return
             # Not now (the thread is busy, the engine is down): try next pass.
             logger.warning('resume could not start', job_id=job_id, error=exc.__class__.__name__)
             async with self.rt.session() as db:

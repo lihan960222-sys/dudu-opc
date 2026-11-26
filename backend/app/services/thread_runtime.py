@@ -213,6 +213,8 @@ class ActiveRun:
     # The person's typed message, and whether a finished turn may be read for
     # facts worth keeping (memory_capture.py): a 1:1 chat the person started.
     prompt_text: str = ""
+    recovery_call: dict | None = None
+    recovery_requested: bool = False
     capturable: bool = False
     # The agent's notes are on: the finished turn leaves a line in its daily log.
     log_memory: bool = False
@@ -343,6 +345,14 @@ class ThreadApprovalGate:
     ) -> ApprovalHandle | None:
         run, runtime = self._run, self._runtime
         run.accepted = True
+        first_recovery_request = True
+        if run.recovery_call is not None:
+            from app.feishu.dispatch_recovery import canonical_call
+            first_recovery_request = not run.recovery_requested
+            run.recovery_requested = True
+            recovered = canonical_call(run.recovery_call,tool,input)
+            if recovered is not None:
+                input, summary = recovered, f"续办原工单 #{recovered['task_id']}"
         from app.computers.native import durable_input
         stored_input = durable_input(tool, input)
         if tool.startswith("mcp__computer__native_"):
@@ -377,6 +387,8 @@ class ThreadApprovalGate:
             async with runtime.session() as db:
                 run.ctx.composio_first_use_hit = await composio_actions.first_use_hit(db, runtime.owner_id, run.agent_id, input)
         auto = tool_policy.automatic(tool, run.ctx.approval_mode or approval_modes.DEFAULT_MODE, run, input)
+        if not first_recovery_request:
+            auto = "denied","recovery_already_attempted"
         if auto is None or auto[0] != "denied":
             from app.services import routine_uninterrupted
             routine_auto = await routine_uninterrupted.automatic(runtime, run, tool, input)
@@ -394,6 +406,8 @@ class ThreadApprovalGate:
                 if status == "denied":
                     self._policy_denials[approval.id] = source
                 future.set_result(status)
+                if run.recovery_call is not None and status=="denied":
+                    run.ctx.abort()
                 self._log("auto_allowed" if status == "allowed" else "denied", approval.id, source=source)
             runtime.hub.notify(run.thread_id)
             return ApprovalHandle(approval_id=approval.id, request_id=request_id, tool=tool)
@@ -741,6 +755,7 @@ class ThreadRuntime:
         attachment_ids: list[str] | None = None,
         feature_event_key: str | None = None,
         feature_resume_job: int | None = None,
+        recovery_job: int | None = None,
         direct_event_key: str | None = None,
         assignment_source: dict | None = None,
         skills: list[str] | None = None,
@@ -781,6 +796,16 @@ class ThreadRuntime:
                 project_facts=await project_context(db,self.owner_id,managed.project,managed.thread_id)
         if thread is None or thread.owner_id != self.owner_id:
             raise store.ThreadNotFound(thread_id)
+        recovery = None
+        if recovery_job is not None:
+            from app.feishu import dispatch_recovery
+            from app.db.models import AgentJob
+            dispatch_recovery.require(internal and thread.kind=="chat" and prompt_text==dispatch_recovery.PROMPT
+                and not (direct_event_key or feature_event_key or skills or attachment_ids))
+            async with self.session() as db:
+                root=await db.get(AgentJob,recovery_job)
+                dispatch_recovery.require(dispatch_recovery.is_recovery(root) and root.owner_id==self.owner_id and root.assignee_thread_id==thread.id)
+                recovery=await dispatch_recovery.checked_wake(db,root)
         if direct_event_key is not None:
             from app.services import feature_tasks
             async with self.session() as db:
@@ -988,10 +1013,10 @@ class ThreadRuntime:
                     thread_id,
                     prompt_text,
                     owner_instance=self.instance_id,
-                    feature_event_key=feature_event_key, feature_resume_job=feature_resume_job,
+                    feature_event_key=feature_event_key, feature_resume_job=feature_resume_job, recovery_job=recovery_job,
                     direct_event_key=direct_event_key, direct_attachment_ids=attachment_ids, direct_skills=skills,
                     assignment_source=assignment_source, attachments=submitted_attachments or None,
-                    origin=team_origin, internal=internal,
+                    origin="harness" if recovery_job is not None else team_origin, internal=internal,
                     person_id=person_id,
                     person_label=person_label,
                 )
@@ -1175,7 +1200,7 @@ class ThreadRuntime:
             agent_id=agent.id if agent is not None else None,
             approval_timeout=approval_timeout,
             engine_id=thread.provider,
-            fallback=None if draft_only or feature or managed else _fallback_of(agent, thread.provider),
+            fallback=None if draft_only or feature or managed or recovery else _fallback_of(agent, thread.provider),
             continues=turn.seq > 1,
             prompt_text=prompt_text,
             log_memory=not draft_only and not feature and not isolated and agent is not None and agent.memory_enabled,
@@ -1277,6 +1302,15 @@ class ThreadRuntime:
         if thread.job_id is not None and not internal:
             await self.team_jobs.on_person_message(thread, turn, prompt_text)
         run.routine_run_id = routine_run_id
+        if recovery:
+            private_prompt = ("系统续办先前被拒的派工。请调用一次 delegate，给出下方的唯一员工和工单，"
+                "其余必填字段简述原意即可。服务会取回已批准的原派工内容并按当前权限办理。\n" +
+                json.dumps({"original_request":recovery.original,"task_id":recovery.arguments["task_id"],
+                            "agent_ids":recovery.arguments["agent_ids"]},ensure_ascii=False))
+            ctx.prompt += "\n"+private_prompt
+            ctx.codex_prompt.user_text += "\n"+private_prompt
+            run.recovery_call = recovery.arguments
+            run.log_memory = run.capturable = False
         run.routine_id = None
         run.routine_grants = None
         run.settings_snapshot = snapshot

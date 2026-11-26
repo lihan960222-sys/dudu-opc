@@ -98,6 +98,11 @@ class TeamBridge:
             name, args = request['name'], request['arguments']
             if not isinstance(name, str) or not isinstance(args, dict):
                 raise ValueError('Invalid request')
+            if getattr(self.run,"recovery_call",None) is not None:
+                from app.feishu.dispatch_recovery import canonical_call
+                args=canonical_call(self.run.recovery_call,"mcp__team__"+name,args)
+                if args is None:
+                    raise service.TeamError("recovery_scope","仅可续办原工单指定的派工。")
             async with self.runtime.session() as db:
                 allowed = await consume_allowed_approval(db, self.run.turn_id, self.run.owner_token, 'mcp__team__' + name, args)
             if not allowed:
@@ -113,6 +118,8 @@ class TeamBridge:
         tmp.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
         os.replace(tmp, response)
         path.unlink(missing_ok=True)
+        if getattr(self.run,"recovery_call",None) is not None and "error" in result:
+            self.run.ctx.abort()
 
     async def execute(self, name, args):
         rt, run = self.runtime, self.run

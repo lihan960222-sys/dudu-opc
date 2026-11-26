@@ -546,6 +546,7 @@ async def start_turn(
     owner_instance: str | None = None,
     feature_event_key: str | None = None,
     feature_resume_job: int | None = None,
+    recovery_job: int | None = None,
     direct_event_key: str | None = None,
     assignment_source: dict | None = None,
     direct_attachment_ids: list[str] | None = None,
@@ -634,6 +635,9 @@ async def start_turn(
         holder.current_turn_id = holder.assignee_turn_id = turn.id
     if feature_event_key is not None:
         await feature_tasks.bind_turn(db, thread.owner_id, feature_event_key, thread_id, turn.id)
+    if recovery_job is not None:
+        from app.feishu.dispatch_recovery import bind_wake
+        await bind_wake(db,recovery_job,thread,turn.id,internal=internal)
     start_event = await _add_event(db, thread_id, "turn.started", started, turn.id)
     if not internal and thread.kind=="chat" and (assignment_source or "#" in prompt_text or "工单" in prompt_text or "任务" in prompt_text):
         from app.db.models import FeatureScope
