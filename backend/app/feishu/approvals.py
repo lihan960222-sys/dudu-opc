@@ -73,9 +73,9 @@ def queue_notice(db, execution, task, approval, label):
         epoch, agent_id = execution.get("assignment_epoch"), execution.get("agent_id")
         detail = describe(approval, native=epoch is not None and agent_id is not None)
         if detail is None:
-            body = f"{label} 有一项操作需要核对完整请求，请在管理网页的团队派工记录中处理。"
+            body = f"老板，{label} 有一项操作需要您决定。完整请求在管理网页的团队派工记录里，您可以在那里核对和处理。"
         else:
-            body = f"{label} 请求一次操作许可。\n{detail}\n请引用本条私聊回复「确认」或「拒绝」。"
+            body = f"老板，{label} 有一项操作需要您的许可。\n{detail}\n您可以引用这条私聊，回复「确认」或「拒绝」。"
         notice = {"text":body}
         if execution.get("source_message"):
             notice["reply_to"] = execution["source_message"]
@@ -145,14 +145,14 @@ def answer(worker, row, msg, text):
     decision = {"确认":"allow", "拒绝":"deny"}.get(text.strip())
     if not binding:
         if decision:
-            worker.respond(row,"done","请直接引用需要审批的管家私聊消息。")
+            worker.respond(row,"done","老板，我还没对上您要处理的申请。您方便引用原来的审批消息吗？")
         return bool(decision)
     task = binding["task"]
     if not decision or msg.get("message_type") != "text":
-        worker.respond(row,"done","请直接引用原审批消息并回复「确认」或「拒绝」。",task)
+        worker.respond(row,"done","老板，我还不能确定您的选择。您可以引用原审批消息，回复「确认」或「拒绝」。",task)
         return True
     if binding["state"] != "pending":
-        worker.respond(row,"done","该请求已处理、需在本机核对或已失效。",task)
+        worker.respond(row,"done","老板，我没能再处理这份申请。它可能已经处理或失效，也可能需要在本机核对。",task)
         return True
     # Reserve the specific reply before posting. A crash after this point requires
     # reconciliation, never a second decision on a guessed or newer approval.
@@ -160,17 +160,17 @@ def answer(worker, row, msg, text):
         won = db.execute("""update approval_dm set state='verify',decision_event=?,decision=?,actor_open_id=?
             where approval=? and state='pending'""",(row["event"],decision,worker.cfg["steward"]["open_id"],binding["approval"])).rowcount
     if not won:
-        worker.respond(row,"done","该请求已由另一条回复处理。",task)
+        worker.respond(row,"done","老板，我查到这份申请已有另一条回复在处理。",task)
         return True
     payload = {"decision":decision, "remember":False, "expected_turn_id":binding["turn"]}
     if binding["assignment_epoch"] is not None:
         payload.update(expected_assignment_epoch=binding["assignment_epoch"], expected_employee_id=binding["agent_id"])
     resp = worker.api.post(f"threads/{binding['thread']}/approvals/{binding['approval']}", json=payload)
     if resp.status_code in (404,409):
-        state, message = "expired", "请求已失效，或该轮任务已结束。"
+        state, message = "expired", "老板，我没能提交这次决定。申请已经失效，或这轮任务已经结束。"
     else:
         resp.raise_for_status()
-        state, message = "answered", "已允许本次操作。" if decision == "allow" else "已拒绝本次操作。"
+        state, message = "answered", "老板，我已按您的选择允许本次操作。" if decision == "allow" else "老板，我已按您的选择拒绝本次操作。"
     with db:
         db.execute("update approval_dm set state=? where approval=?", (state,binding["approval"]))
         worker.respond(row,"done",message,task)

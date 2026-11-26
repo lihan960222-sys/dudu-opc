@@ -96,7 +96,7 @@ class Worker:
                 other = self.db.execute("""select 1 from knowledge_intent_candidates
                     where app=? and event=? and decision='other'""",(row["app"],row["event"])).fetchone()
                 if not other:
-                    self.respond(row,"done","你想更新哪份文档？请引用上次的任务，或告诉我联系人和文档名。")
+                    self.respond(row,"done","老板，我还没对上您要更新的文档。您方便引用上次的任务，或告诉我联系人和文档名吗？")
                     return
             else:
                 text = followup[0]
@@ -118,7 +118,7 @@ class Worker:
             agent = self.cfg["roles"][name]["agent_id"]
             contacts = [alias for alias, source in settings_for(self.cfg)["history_sources"].items()
                         if source.get("agent_id") == agent]
-            hint = (f"要整理{contacts[0]}的单聊，发「让{name}整理我和{contacts[0]}的聊天记录」。"
+            hint = (f"如果是整理{contacts[0]}的单聊，您可以回复「让{name}整理我和{contacts[0]}的聊天记录」。"
                     if len(contacts) == 1 else "")
             self.respond(row, "done", f"老板，您希望我请{name}重试哪件事？{hint}")
             return
@@ -144,13 +144,13 @@ class Worker:
                     job = self.db.execute("select state from private_history_jobs where app=? and event=?",
                                           (row["app"],receipt["event"])).fetchone()
                     status = {"assigned":"已登记","analyzing":"正在整理","failed":"读取未完成",
-                              "completed":"本机整理完成","codex_completed":"摘要已完成"}.get(job["state"],"尚未完成") if job else "尚未开始整理，请核对联系人绑定和读取授权"
+                              "completed":"本机整理完成","codex_completed":"摘要已完成"}.get(job["state"],"尚未完成") if job else "我还没查到开始整理的记录"
                     with self.db:
                         self.db.execute("insert or ignore into history_dispatch_links values(?,?,?)",
                                         (row["app"],row["event"],receipt["id"]))
-                        reply = f"{receipt['employee']} · {receipt['contact']}的聊天：{status}。"
+                        reply = f"老板，我查了{receipt['employee']}整理您和{receipt['contact']}聊天的进度。{status}。"
                         if short_retry:
-                            reply += f"要重新读取，发「让{receipt['employee']}整理我和{receipt['contact']}的聊天记录」。"
+                            reply += f"如果您要重新读取，可以回复「让{receipt['employee']}整理我和{receipt['contact']}的聊天记录」。"
                         self.respond(row,"done",reply)
                     return
             if short_retry and not self.reference(msg):
@@ -162,7 +162,7 @@ class Worker:
             from .lead_chat import assignment_status
             status = await assignment_status(self, row, msg)
             if status:
-                self.direct_final(row, "done", status)
+                self.direct_final(row, "done", "老板，我查到这些任务的进度。\n" + status)
                 return
         from . import knowledge_intent
         if not command(text)[0] and await knowledge_intent.handle(self,row,msg,text):
@@ -216,8 +216,8 @@ class Worker:
                 except (httpx.HTTPError,ValueError,RuntimeError,KeyError,IndexError,TypeError):
                     kind = 'clarify'
                 if kind != 'work':
-                    reply = (f'请确认联系人，发「让{named}整理我和联系人姓名的聊天记录」。'
-                             if kind=='history' else f'经办人是{named}。请补充这次要交付什么。')
+                    reply = (f'老板，您想请{named}整理哪位联系人的聊天记录？'
+                             if kind=='history' else f'老板，我知道您点了{named}。您希望这次交付什么？')
                     self.respond(row,'done',reply)
                     return
             role, intent = named, 'append' if ref else 'deliver'
@@ -244,7 +244,7 @@ class Worker:
                     await self.route_direct(row,msg,text)
                     return
         if not intent and not ref and not pending and text.strip() and self.cfg.get('isolated_runner_enabled'):
-            if self.direct_notice(row,'running','已收到，正在确认任务归属。'):
+            if self.direct_notice(row,'running','老板，我收到了，正在核对这件事归哪项任务。'):
                 self.flush(cleanup=False)
             from .steward import classify
             try:
@@ -261,7 +261,7 @@ class Worker:
             if not previous or previous['role']!=role:
                 ref = None
         if role not in self.cfg['roles'] or not title:
-            self.respond(row,'clarify','请回复本条并填写「#任务编号」或「新建 角色名 任务名」。原消息和附件会随任务保存。')
+            self.respond(row,'clarify','老板，我还没对上这项任务。您可以在这条消息下回「#任务编号」或「新建 角色名 任务名」，我会把原消息和附件一并归入任务。')
             return
         cfg = self.cfg['roles'][role]
         event_key = hashlib.sha256((row['app']+'|'+row['event']).encode()).hexdigest()
@@ -272,14 +272,14 @@ class Worker:
             await session.commit()
         task = result.get('task_id')
         if not task:
-            self.respond(row,'clarify',f"请回复本条并填写「#任务编号」。候选任务：{result.get('candidates',[])}")
+            self.respond(row,'clarify',f"老板，我查到了几项可能的任务：{result.get('candidates',[])}。您指的是哪一项？在这条消息下回「#任务编号」就可以。")
             return
         if intent == 'query':
             if pending:
                 with self.db:
                     self.db.execute('update questions set resolved_by=? where app=? and event=?',(row['event'],pending['app'],pending['event']))
                     self.db.execute("update inbox set state='resolved',task=? where app=? and event=?",(task,pending['app'],pending['event']))
-            self.respond(row,'done',f"〈{title}〉 #{task}：{result.get('status') or result.get('action')}",task)
+            self.respond(row,'done',f"老板，我查到〈{title}〉（#{task}）的记录是「{result.get('status') or result.get('action')}」。",task)
             return
         with self.db:
             new = self.db.execute('insert or ignore into bindings values(?,?,?)',(task,role,title)).rowcount
@@ -289,7 +289,7 @@ class Worker:
                 self.db.execute('update questions set resolved_by=? where app=? and event=?',(row['event'],pending['app'],pending['event']))
                 self.db.execute("update inbox set state='resolved',task=? where app=? and event=?",(task,pending['app'],pending['event']))
             if row['state']=='received':
-                enqueue(self.db,task,'steward',{'text':f'已登记〈{title}〉 #{task}。引用本条可继续补充。'})
+                enqueue(self.db,task,'steward',{'text':f'老板，我已登记〈{title}〉，任务号是 #{task}。您可以在这条消息下补充。'})
             self.db.execute("update inbox set task=?,state='bound' where app=? and event=?",(task,row['app'],row['event']))
         ahead = self.db.execute("""select 1 from inbox where task=? and state in ('submitting','running')
             and rowid < (select rowid from inbox where app=? and event=?) limit 1""",(task,row['app'],row['event'])).fetchone()
@@ -514,7 +514,7 @@ class Worker:
             return
         thread = thread or self.cfg['steward_thread']
         if self.db.execute("select 1 from inbox where state in ('direct_running','direct_submitting')").fetchone():
-            self.direct_notice(row,'queued','已排队，等上一条处理完就开始。')
+            self.direct_notice(row,'queued','老板，我收到了。前一条还在处理，您这条已排队。')
             return
         if self.direct_notice(row,'running','思考中…'):
             self.flush(cleanup=False)
@@ -591,7 +591,7 @@ class Worker:
                             do update set attempts=attempts+1,after=unixepoch()+min(300,5*(attempts+1))""",(retry_key,))
                         self.db.execute('update inbox set error=? where app=? and event=?',(reason,row['app'],row['event']))
                         if not latest['error']:
-                            enqueue(self.db,latest['task'],'steward',{'text':f'正在核对已登记的执行请求（{reason}）。'})
+                            enqueue(self.db,latest['task'],'steward',{'text':f'老板，我正在核对已登记的执行请求（{reason}），结果还没确认。'})
                     continue
                 if row['app'] != self.cfg.get('steward',{}).get('app_id'):
                     with self.db:

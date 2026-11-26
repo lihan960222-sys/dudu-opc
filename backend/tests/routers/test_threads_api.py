@@ -181,8 +181,8 @@ async def test_steward_voice_is_in_every_engine_prompt_and_absent_from_employee_
         employee = await agent_store.create_agent(db, owner_id=owner, name="Employee")
     for agent, expected in ((lead, True), (employee, False)):
         thread = await rt.create_thread(agent_id=agent.id)
-        await rt.send_turn(thread.id, "hello")
-        await wait_until(lambda: thread.id not in rt._runs)
+        turn = await rt.send_turn(thread.id, "hello")
+        await wait_until(lambda: turn.id not in rt._runs)
         assert all((steward_reply.INSTRUCTIONS in (part or "")) == expected for part in captured[-1])
 
 

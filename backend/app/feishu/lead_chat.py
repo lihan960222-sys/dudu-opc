@@ -142,7 +142,7 @@ async def register_report(worker,row,turn):
         if registered.rowcount and root.status not in ('completed','cancelled','failed'):
             # An acknowledgement is a receipt, not a request for owner input.
             assignees = '、'.join(dict.fromkeys(names))
-            enqueue(worker.db,None,'steward',{'text':f'老板，给 {assignees} 的派工已登记。有结果我在这条消息下向您汇报。',
+            enqueue(worker.db,None,'steward',{'text':f'老板，我已登记给 {assignees} 的派工。等收到结果，我在这条消息下向您汇报。',
                                              'reply_to':row['message']})
         worker.db.execute("update inbox set state='done' where app=? and event=?",key)
     return True

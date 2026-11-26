@@ -58,8 +58,17 @@ def test_steward_owns_failures_and_retains_the_original_error():
 
 def test_steward_instructions_explain_the_limit_and_require_evidence_before_reporting():
     from app.services.steward_reply import INSTRUCTIONS
-    for phrase in ("1000", "Markdown", "老板", "您", "催促", "承担", "回执", "授权"):
+    for phrase in ("1000", "Markdown", "老板", "您", "催促", "承担", "回执", "授权", "先听取", "已经做了什么"):
         assert phrase in INSTRUCTIONS
+
+
+def test_direct_requests_drop_pressure_and_keep_the_owners_quotes():
+    from app.services.steward_reply import preview
+    assert preview("老板，你赶紧确认权限。") == "老板，请您确认权限。"
+    assert preview("你希望我用哪份文档？") == "您希望我用哪份文档？"
+    assert preview("你得知结果。") == "你得知结果。"
+    quoted = "员工原话：\n> 老板，你赶紧确认权限。"
+    assert preview(quoted) == quoted
 
 
 @pytest.mark.parametrize("length", [999, 1000, 1001])

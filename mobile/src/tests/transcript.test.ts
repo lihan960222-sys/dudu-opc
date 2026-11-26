@@ -28,6 +28,20 @@ describe('transcript', () => {
     expect(t.runningTurnId).toBe(7);
   });
 
+  it('shows a server-identified team wake as a system note without showing its private prompt', () => {
+    const prompt = 'Harness message, not from the person. 系统续办。';
+    const wake = { ...ev(1, 'turn.started', { prompt_text: prompt, internal: true, team_generated: true }, 9), ts: '2026-11-26T12:00:00Z' };
+    const started = applyEvent(emptyTranscript(), wake);
+    expect(started.items).toEqual([{ kind: 'note', key: 'e1', text: '系统正在续办任务。', ts: wake.ts }]);
+    expect(started.runningTurnId).toBe(9);
+    expect(applyEvent(started, wake)).toBe(started);
+    const ended = applyEvent(started, ev(2, 'turn.completed', {}, 9));
+    expect(ended.runningTurnId).toBeNull();
+    for (const data of [{ prompt_text: prompt }, { prompt_text: prompt, team_generated: false }]) {
+      expect(applyEvent(ended, ev(3, 'turn.started', data)).items[1]).toMatchObject({ kind: 'user', text: prompt });
+    }
+  });
+
   it('never applies an event twice, so a replay after a reconnect shows nothing again', () => {
     const events = [ev(1, 'turn.started', { prompt_text: 'a' }), ev(2, 'assistant.message', { text: 'b' })];
     const once = applyEvents(emptyTranscript(), events);

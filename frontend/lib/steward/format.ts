@@ -12,7 +12,9 @@ export function stewardTurnStatus(status: string, detail?: string | null): strin
 export function presentStewardReply(original: string): { text: string; markdown: string | null } {
   let text = original;
   if (!["`", "~~~", "“", "「", '"', "\n\n运行记录：\n"].some(mark => text.includes(mark)) && !/^(?:>| {4}|\t)/m.test(text)) {
-    text = text.replace(/^(?:你必须|你得)(?=(?:先)?(?:确认|选择|授权|决定|提供|指定|填写|回复|打开|点击))/gm, "请您");
+    text = text
+      .replace(/^(老板[，,][ \t]*)?你(?:必须|得|应该|赶快|赶紧|快点)(?=(?:先)?(?:确认|选择|授权|决定|提供|指定|填写|回复|打开|点击))/gm, "$1请您")
+      .replace(/^(老板[，,][ \t]*)?你(?=希望|想|愿意|方便|可以|能否|是否)/gm, "$1您");
   }
   if (Array.from(original).length <= LIMIT) return { text, markdown: null };
   const opening = text.trim().split(/(?:^|\s|(?<=[：:。！？；]))(?:\d+[.)、](?=\s|[^\x00-\x7f])|[-*+]\s)|\n/u, 1)[0]

@@ -46,7 +46,7 @@ async def handle(worker,row,msg,text):
         return False
     review = history.REVIEW.fullmatch(item["command"])
     if not review or not review[1] or review[5].strip() not in ("全部并重整知识库","全部并写入云盘"):
-        worker.direct_final(row,"done","请引用要继续整理的知识库任务。")
+        worker.direct_final(row,"done","老板，我还没对上您说的知识库。您方便引用一下原来的任务吗？")
         return True
     intent = item["decision"]
     if not intent:
@@ -75,10 +75,10 @@ async def handle(worker,row,msg,text):
                                   order by id desc limit 1""",(row["app"],review[3])).fetchone()
         status = ("已完成，共核对 "+str(state["matched"])+" 条可见消息。" if state and state["state"]=="completed"
                   else "上次处理未完成。" if state else "还没有完成记录。")
-        worker.direct_final(row,"done",f"{review[1]}负责的「{review[3]}」知识库：{status}")
+        worker.direct_final(row,"done",f"老板，我查了{review[1]}负责的「{review[3]}」知识库。{status}")
         return True
     if intent not in ("update","restructure","resume"):
-        worker.direct_final(row,"done",f"你想让{review[1]}继续更新「{review[3]}」这份知识库，还是只看进度？")
+        worker.direct_final(row,"done",f"老板，我还没拿准您的意思。您是要我请{review[1]}继续更新「{review[3]}」知识库，还是只向您汇报进度？")
         return True
     suffix = {"update":"全部并写入云盘", "restructure":"全部并重整知识库",
               "resume":review[5].strip()}[intent]

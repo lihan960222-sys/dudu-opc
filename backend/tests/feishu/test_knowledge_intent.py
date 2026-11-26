@@ -45,6 +45,10 @@ async def test_semantic_followup_is_scoped_to_the_real_owner(tmp_path,monkeypatc
         proof=db.execute("select owner from owner_readwrite_requests where event='2'").fetchone()
         assert bool(proof)==bool(routed)
         assert bool(finals)==(decision in ("status","clarify","offline"))
+        if decision in ("clarify", "offline"):
+            assert finals[0][2] == "老板，我还没拿准您的意思。您是要我请二狗继续更新「李晗」知识库，还是只向您汇报进度？"
+        if decision == "status":
+            assert finals[0][2].startswith("老板，我查了二狗负责的「李晗」知识库")
         send("3","第三节")
         continued=db.execute("select command from knowledge_intent_candidates where event='3'").fetchone()
         assert bool(continued)==(decision!="other")

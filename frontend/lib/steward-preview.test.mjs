@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { presentStewardReply, stewardPreview, stewardTurnStatus } from "./steward-preview.ts";
+import { downloadStewardReply, presentStewardReply, stewardPreview, stewardTurnStatus } from "./steward-preview.ts";
 
 test("999 and 1000 Unicode characters fit directly, including supplementary Chinese and emoji", () => {
   for (const size of [999, 1000]) {
@@ -13,6 +13,26 @@ test("a 1001-character original gets a brief summary even if polite wording shor
   const opening = "你必须确认范围。";
   const text = opening + "𠮷".repeat(1001 - Array.from(opening).length);
   assert.deepEqual(presentStewardReply(text), { text: "请您确认范围。\n详见完整回复。", markdown: text });
+});
+
+test("the web download link serves every byte of the original Markdown and is then released", async (t) => {
+  const prefix = '老板，我还没收到回执。\n> 原话\n```sh\nexit 7\n```\n';
+  const original = prefix + "𠮷".repeat(1001 - Array.from(prefix).length);
+  const saved = presentStewardReply(original);
+  let clicked = false;
+  let release;
+  const link = { click() { clicked = true; } };
+  t.after(() => { delete globalThis.window; delete globalThis.document; });
+  globalThis.document = { createElement(tag) { assert.equal(tag, "a"); return link; } };
+  globalThis.window = { setTimeout(fn) { release = fn; } };
+  downloadStewardReply(saved.markdown, "大嘴完整回复");
+  assert.ok(clicked);
+  assert.equal(link.download, "大嘴完整回复.md");
+  const response = await fetch(link.href);
+  assert.equal(response.headers.get("content-type"), "text/markdown;charset=utf-8");
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from(original, "utf8"));
+  release();
+  await assert.rejects(fetch(link.href));
 });
 
 test("steward failure takes responsibility and preserves the entire quoted diagnostic", () => {
@@ -33,6 +53,8 @@ test("long replies show complete sentences", () => {
 
 test("owner requests are polite; evidence, quotes, and code remain exact", () => {
   assert.equal(stewardPreview("你得先确认权限。"), "请您先确认权限。");
+  assert.equal(stewardPreview("老板，你赶紧确认权限。"), "老板，请您确认权限。");
+  assert.equal(stewardPreview("你希望我用哪份文档？"), "您希望我用哪份文档？");
   assert.equal(stewardPreview("请您先确认权限。"), "请您先确认权限。");
   assert.equal(stewardPreview("未写入。"), "未写入。");
   assert.equal(stewardPreview("你得知结果。"), "你得知结果。");

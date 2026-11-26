@@ -38,9 +38,10 @@ def test_exact_private_approval_reply(tmp_path, reply, decision):
         import json
         calls.append((req.url.path,json.loads(req.content)))
         return httpx.Response(200,json={"decision":decision})
+    replies = []
     worker = SimpleNamespace(db=db,cfg={"steward":{"app_id":"steward","open_id":"ou_test_owner"}},
         api=httpx.Client(transport=httpx.MockTransport(backend),base_url="http://localhost"),
-        respond=lambda *args: None)
+        respond=lambda *args: replies.append(args[2]))
     execution = dict(thread=2,turn=3,event="source")
     approvals.notify(worker,execution,4)
     approvals.notify(worker,execution,4)
@@ -54,6 +55,7 @@ def test_exact_private_approval_reply(tmp_path, reply, decision):
     assert approvals.answer(worker,row,{**msg,"parent_id":"unrelated"},reply)
     assert not calls
     assert approvals.answer(worker,row,msg,reply)
+    assert replies[-1] == ("老板，我已按您的选择允许本次操作。" if decision == "allow" else "老板，我已按您的选择拒绝本次操作。")
     assert approvals.answer(worker,{**row,"event":"retry"},msg,reply)
     assert calls == [("/threads/2/approvals/a1",{"decision":decision,"remember":False,"expected_turn_id":3})]
     db.close()

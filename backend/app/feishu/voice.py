@@ -113,12 +113,12 @@ async def handle(worker,row,msg,text):
     from .documents import quoted_answer
     body=text.strip()[len('读给我听'):].lstrip(' ：:\r\n\t') or quoted_answer(db,row,msg)
     if not body or len(body)>LIMIT:
-        worker.direct_final(row,'done','请写「读给我听」并附上最多 500 字，也可以回复本段私聊里管家已发出的普通文字回答。')
+        worker.direct_final(row,'done','老板，我还没拿到能朗读的文字。您可以在「读给我听」后附上最多 500 字，也可以引用我在这段私聊里的普通文字回复。')
         return True
     try:
         ms=await asyncio.to_thread(synthesize,body,local_file(worker.pub,*keys))
     except (ImportError,IndexError,OSError,ValueError,subprocess.SubprocessError):
-        worker.direct_final(row,'done','本机未能生成语音。请检查 Windows 语音包和音频组件；较长文字可分段朗读。')
+        worker.direct_final(row,'done','老板，这次我没能在本机生成语音。需要核对 Windows 语音包和音频组件。如果文字较长，也可以分段朗读。')
         return True
     with db:
         change=db.execute("update inbox set state='done' where app=? and event=? and state='received'",keys)

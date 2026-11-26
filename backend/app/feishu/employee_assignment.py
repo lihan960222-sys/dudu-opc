@@ -24,7 +24,7 @@ async def route(worker, row, msg, text):
     if current[0]!="received":
         return True
     if not cfg.get("steward_thread"):
-        worker.direct_final(row,"done","请先在工作台绑定大嘴的飞书会话，再派这项任务。")
+        worker.direct_final(row,"done","老板，我还没绑定工作台里的飞书会话，这次没能派工。会话绑定需要您的管理权限。")
         return True
     raw = json.loads(msg["content"])["text"]
     requirement = raw
@@ -49,14 +49,14 @@ async def route(worker, row, msg, text):
             title = documents.COMMAND.sub("",first,count=1).lstrip("：: ").strip()
             body = draft if draft.strip() else documents.quoted_answer(db,row,msg)
             if not title or len(title)>200:
-                raise ValueError("请告诉我文档标题。")
+                raise ValueError("文档需要一个 1 到 200 字的标题，您想用什么名字？")
             if body.strip():
                 documents.blocks(body)
         else:
             employee_name,contact = review[1],review[3]
             source = workspace_access.settings_for(cfg)["history_sources"].get(contact)
             if not source:
-                raise ValueError(f"请先为{employee_name}绑定与{contact}的单聊。")
+                raise ValueError(f"我还查不到{employee_name}读取您与{contact}单聊的授权。")
             employee, *_ = await history.reviewer(cfg,source,employee_name)
             action = {"全部并重整知识库":"restructure","全部并写入云盘":"update"}.get(review[5].strip(),"read")
             decision=db.execute("select decision from knowledge_intent_candidates where app=? and event=?",keys).fetchone()
@@ -75,7 +75,7 @@ async def route(worker, row, msg, text):
                 values(?,?,?,?,?,?,?,?,?,?,?)""",(*keys,row["message"],employee,text,requirement,submissions.event_key(row),
                          contact,action,title,body))
     except (ValueError,KeyError,OSError) as err:
-        worker.direct_final(row,"done",str(err))
+        worker.direct_final(row,"done",f"老板，这次我还没登记派工。{err}")
         return True
     goal = text.partition("\n")[0]
     detail = raw.partition("\n")[0] if document else raw
@@ -96,7 +96,7 @@ async def latest_status(worker, app, contact):
     if not assignment:
         return None
     if not assignment["turn"]:
-        return "大嘴已收到，正在准备派工。"
+        return "老板，我收到您的交代了，还没有派工回执。"
     from sqlalchemy import select
     from app.db.models import AgentJob
     from app.db.session import AsyncSessionLocal
@@ -108,7 +108,7 @@ async def latest_status(worker, app, contact):
         child = await session.scalar(select(AgentJob).where(AgentJob.owner_id==owner,AgentJob.parent_id==root,
             AgentJob.assignee_agent_id==assignment["employee"],AgentJob.kind=="job").order_by(AgentJob.id.desc()).limit(1)) if root else None
     if not child:
-        return "已交给大嘴，目前还没有员工派工回执。"
+        return "老板，我查了这次派工，还没有员工接单的记录。"
     label = {"completed":"已完成","failed":"执行失败","cancelled":"已取消","needs_input":"等待补充信息",
              "queued":"等待执行","running":"正在执行","waiting":"正在等待结果"}.get(child.status,"处理中")
-    return f"派工 #{child.id}，{label}。"
+    return f"老板，我查到派工 #{child.id} 的状态是「{label}」。"

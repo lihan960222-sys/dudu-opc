@@ -111,6 +111,9 @@ export function applyEvent(state: Transcript, event: ThreadEvent): Transcript {
 
   switch (event.type) {
     case 'turn.started':
+      if (data.team_generated === true) {
+        return { ...base, runningTurnId: turnId, typing: null, items: [...state.items, { kind: 'note', key, text: '系统正在续办任务。', ts }] };
+      }
       return { ...base, runningTurnId: turnId, typing: null, items: [...state.items, { kind: 'user', key, turnId, text: text(data.prompt_text), attachments: readAttachments(data.attachments), ts }] };
 
     case 'assistant.message':

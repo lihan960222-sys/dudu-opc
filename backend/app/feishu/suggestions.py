@@ -54,15 +54,15 @@ def digest_text(items):
     if len(items) == 1:
         options = offered_options(items[0])
         menu = "，".join(f"「{n}」{opt['label']}" for n, opt in enumerate(options,1))
-        lines.append("引用回复" + (menu or "「采纳」「稍后」或「忽略」") + "。")
+        lines.append("老板，您可以引用这条消息，回复" + (menu or "「采纳」「稍后」或「忽略」") + "。")
     else:
         waiting = next((n for n, item in enumerate(items, 1)
                         if item["title"].startswith("有任务在等待 · ")
                         and any(o["id"] == "followup" for o in offered_options(item))), None)
         if waiting:
-            lines.append(f"建议先查第 {waiting} 项卡在哪里。要我跟进，引用回复「跟进{waiting}」。")
+            lines.append(f"老板，第 {waiting} 项还在等。如果您要我查，引用回复「跟进{waiting}」就行。")
         else:
-            lines.append("需要我跟进哪项？引用回复「跟进」加序号。")
+            lines.append("老板，如果您想让我跟进其中一项，可以引用回复「跟进」加序号。")
     return "\n".join(lines)
 
 
@@ -116,14 +116,14 @@ def answer(worker,row,msg,text):
     choice = CHOICES.get(text.strip()) if msg.get('message_type')=='text' else None
     if not offers:
         if choice:
-            worker.respond(row,'done','请直接引用原建议，再选择如何处理。')
+            worker.respond(row,'done','老板，我还没对上您说的那条建议。您方便引用原消息吗？')
         return bool(choice)
     option = None
     selection = text.strip() if msg.get('message_type')=='text' else ''
     if len(offers) > 1:
         match = re.fullmatch(r'(跟进|摘要|稍后|忽略)\s*([1-3])', selection)
         if not match or int(match[2]) > len(offers):
-            worker.respond(row, 'done', '请引用原消息，回复「跟进」「摘要」「稍后」或「忽略」加序号。')
+            worker.respond(row, 'done', '老板，我还没对上具体哪项。您可以引用原消息，回复「跟进」「摘要」「稍后」或「忽略」加序号。')
             return True
         offer = offers[int(match[2])-1]
         action = match[1]
@@ -132,7 +132,7 @@ def answer(worker,row,msg,text):
             available = json.loads(offer['options'] or '[]')
             option = 'followup' if action == '跟进' else 'brief'
             if not any(o['id'] == option for o in available):
-                worker.respond(row, 'done', '这项建议没有这个选项。')
+                worker.respond(row, 'done', '老板，这项建议里没有您选的操作，我还没处理。')
                 return True
     else:
         offer = offers[0]
@@ -143,14 +143,14 @@ def answer(worker,row,msg,text):
         elif choice=='approve' and options:
             option = options[0]['id']
     if not choice:
-        worker.respond(row,'done','请引用这条建议，回复其中一个选项，或选择「稍后」「忽略」。')
+        worker.respond(row,'done','老板，我还没拿准您的选择。您可以引用这条建议，回复一个选项，也可以选「稍后」或「忽略」。')
         return True
     if offer['state']=='closed':
         if offer['decision_event']!=row['event']:
-            worker.respond(row,'done','这条建议已处理。')
+            worker.respond(row,'done','老板，我查到这条建议已经处理了。')
         return True
     if offer['decision_event'] and offer['decision_event']!=row['event']:
-        worker.respond(row,'done','已收到你的选择，正在核对处理结果。')
+        worker.respond(row,'done','老板，我收到您的选择了，正在核对处理结果。')
         return True
     with db:
         db.execute("update suggestion_offers set state='deciding',choice=?,decision_event=? where outgoing=?",
@@ -176,7 +176,7 @@ def answer(worker,row,msg,text):
         else:
             resp.raise_for_status()
             result = resp.json()
-            message = {'approve':'已采纳。','defer':'已选择稍后处理。','dismiss':'已忽略这条建议。'}[choice]
+            message = {'approve':'老板，我已按您的选择采纳。','defer':'老板，我已将这条建议留到稍后处理。','dismiss':'老板，我已按您的选择忽略这条建议。'}[choice]
             if result.get('report') and not result.get('followup_task_id'):
                 message += '\n'+str(result['report'])
             if result.get('followup_task_id'):
