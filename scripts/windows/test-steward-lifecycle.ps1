@@ -130,6 +130,12 @@ if ($ExerciseSyntheticJob) {
     $systemShell = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell/v1.0/powershell.exe'
     $command = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
     if (-not [IO.File]::Exists($command) -or -not [IO.File]::Exists($systemShell)) { throw 'System test executables are unavailable.' }
+    $stdioGroup=[Dudu.WorkerGroup]::new($true)
+    $stdioSignal=[Threading.EventWaitHandle]::new($false,'ManualReset')
+    try {
+        $stdioCheck='-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "if ([Console]::OpenStandardOutput() -eq [IO.Stream]::Null -or [Console]::OpenStandardError() -eq [IO.Stream]::Null) { exit 42 }"'
+        Assert ($stdioGroup.Run($systemShell,$stdioCheck,[Environment]::SystemDirectory,$stdioSignal) -eq 0) 'hidden service children retain valid output and error streams for console logging libraries'
+    } finally { $stdioSignal.Dispose(); $stdioGroup.Dispose() }
     $fixtures = @()
     try {
         foreach ($name in @('target','control')) {
