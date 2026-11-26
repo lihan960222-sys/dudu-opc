@@ -1,0 +1,45 @@
+name: Dudu on Windows
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-steward.yml'
+      - 'start-steward.cmd'
+      - 'scripts/windows/*steward*.ps1'
+      - 'scripts/windows/Steward*.cs'
+      - 'frontend/lib/managed-window*'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-steward.yml'
+      - 'start-steward.cmd'
+      - 'scripts/windows/*steward*.ps1'
+      - 'scripts/windows/Steward*.cs'
+      - 'frontend/lib/managed-window*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-steward-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lifecycle:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: astral-sh/setup-uv@v5.4.2
+      - name: Verify window choices and process ownership
+        run: ./scripts/windows/test-steward-lifecycle.ps1 -ExerciseSyntheticJob
+      - name: Install the locked backend
+        run: uv sync --project backend --frozen
+      - name: Cold start, stop and restart the web service
+        run: |
+          $null = New-Item -ItemType Directory -Path frontend/out -ErrorAction Stop
+          Set-Content -LiteralPath frontend/out/index.html -Value '<title>Dudu</title>' -Encoding UTF8
+          ./scripts/windows/test-steward-web-restart.ps1
