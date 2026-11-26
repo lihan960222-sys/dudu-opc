@@ -94,9 +94,10 @@ def test_http_browser_roundtrip_and_dashboard(tmp_path,monkeypatch):
                 "refresh_token_expires_in":9000,"scope":" ".join(oauth.ALL_SCOPES)}
     monkeypatch.setattr(oauth,"_request",fake)
     app=FastAPI()
+    identity_now = [Principal(kind="browser", role="owner", person_id=1, session_id=1)]
     @app.middleware("http")
     async def identity(request: Request,call_next):
-        request.state.auth=Principal(kind="browser",role="owner",session_id=1)
+        request.state.auth=identity_now[0]
         return await call_next(request)
     app.include_router(routes.router,prefix="/api/v1")
     prefix="/api/v1/feishu/owner-oauth"
@@ -128,6 +129,9 @@ def test_http_browser_roundtrip_and_dashboard(tmp_path,monkeypatch):
             "section": ["people"], "capability": ["feishu"], "employee": ["4"], "feishu_oauth": ["connected"]}
         assert owner.get(prefix + "/status?employee=4").json()["actions"]["folder"]
         assert not owner.get(prefix + "/status").json()["actions"]["folder"]
+        identity_now[0] = Principal(kind="browser", session_id=2, scopes=("admin", "chat"))
+        assert owner.get(prefix + "/status?employee=4").status_code == 403
+        assert owner.delete(prefix + "/connection?employee=4").status_code == 403
 
 
 def test_extending_consent_keeps_prior_capabilities_until_confirmed(tmp_path,monkeypatch):
@@ -154,9 +158,92 @@ def test_extending_consent_keeps_prior_capabilities_until_confirmed(tmp_path,mon
     with pytest.raises(oauth.OwnerOAuthError):
         finish(ext)
     assert oauth.status(cfg)["actions"]=={"history":True,"doc":False,"delete":False,"folder":False,"wiki":False}
+    progress = oauth.consent_progress(cfg, oauth.status(cfg)["scopes"])
+    assert progress == {"state": "failed", "missing_scopes": sorted(oauth.ACTIONS["doc"])}
     actual.update(oauth.ACTIONS["history"])
     finish(begin("doc"))
     assert oauth.status(cfg)["actions"]=={"history":True,"doc":True,"delete":False,"folder":False,"wiki":False}
+
+
+def test_simultaneous_employee_consents_return_to_the_right_employee_and_keep_existing_scopes(tmp_path, monkeypatch):
+    from fastapi import FastAPI, Request
+    from fastapi.testclient import TestClient
+    from app.auth.policy import Principal
+    from app.feishu import owner_oauth as oauth
+    from app.routers import feishu_owner_oauth as routes
+
+    cfg = {"_access_config_path": str(tmp_path / "feishu.json"), "owner_id": "local-owner",
+           "steward": {"app_id": "cli_testlead", "open_id": "ou_lead", "tenant_key": "test-tenant"},
+           "roles": {str(n): {"agent_id": n, "app_id": f"cli_test{n}", "owner_open_id": f"ou_{n}",
+                              "secret_env": "FEISHU_TEST_SECRET"} for n in [4, 9]}}
+    monkeypatch.setenv("FEISHU_TEST_SECRET", "test-secret")
+    monkeypatch.setattr(routes, "config_from_env", lambda: cfg)
+    grants = {}
+
+    def provider(method, url, **kwargs):
+        if url == oauth.USER_INFO:
+            employee = kwargs["headers"]["Authorization"].removeprefix("Bearer token-")
+            return {"data": {"open_id": f"ou_{employee}"}}
+        assert url == oauth.PKCE_TOKEN
+        payload = kwargs["json"]
+        employee = int(payload["client_id"].removeprefix("cli_test"))
+        expected, scopes = grants[payload["code"]]
+        assert employee == expected
+        return {"access_token": f"token-{employee}", "refresh_token": "test-refresh",
+                "expires_in": 3600, "refresh_token_expires_in": 7200, "scope": " ".join(scopes)}
+
+    monkeypatch.setattr(oauth, "_request", provider)
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def authenticate(request: Request, call_next):
+        request.state.auth = Principal(kind="browser", role="owner", person_id=1, session_id=12)
+        return await call_next(request)
+
+    prefix = "/api/v1/feishu/owner-oauth"
+    app.include_router(routes.router, prefix="/api/v1")
+    with TestClient(app, base_url="http://127.0.0.1:8787", follow_redirects=False) as browser:
+        def begin(employee, action, expected):
+            response = browser.post(prefix + "/start", params={"employee": employee}, json={"action": action})
+            response.raise_for_status()
+            query = parse_qs(urlsplit(response.json()["authorize_url"]).query)
+            assert query["client_id"] == [f"cli_test{employee}"]
+            assert set(query["scope"][0].split()) == expected | {"offline_access"}
+            code = f"test-{len(grants)}"
+            grants[code] = (employee, expected | {"offline_access"})
+            return {"state": query["state"][0], "code": code}
+
+        def finish(employee, query):
+            response = browser.get(prefix + "/callback", params=query)
+            assert response.status_code == 303
+            assert parse_qs(urlsplit(response.headers["location"]).query) == {
+                "section": ["people"], "capability": ["feishu"], "employee": [str(employee)], "feishu_oauth": ["connected"]}
+
+        def actions(employee):
+            return browser.get(prefix + "/status", params={"employee": employee}).json()["actions"]
+
+        previous = oauth.ACTIONS["history"] | oauth.ACTIONS["doc"]
+        finish(4, begin(4, "both", previous))
+        first = begin(4, "folder", previous | oauth.ACTIONS["folder"])
+        other = begin(9, "wiki", oauth.ACTIONS["wiki"])
+        assert not actions(4)["folder"]
+        finish(4, first)
+        finish(9, other)
+        assert actions(4) == {"history": True, "doc": True, "folder": True, "wiki": False, "delete": False}
+        assert actions(9) == {"history": False, "doc": False, "folder": False, "wiki": True, "delete": False}
+        assert not browser.get(prefix + "/status").json()["connected"]
+
+        # An upgrade can occur during the ten-minute window for a pre-upgrade callback.
+        legacy_nonce = "4.legacy-browser-nonce"
+        actual_owner = Principal(kind="browser", role="owner", person_id=1, session_id=12)
+        old_link = oauth.start(oauth.employee_config(cfg, 4), "wiki", "http://127.0.0.1:8787" + prefix + "/callback",
+                               routes._binding(actual_owner, legacy_nonce))
+        old_state = parse_qs(urlsplit(old_link).query)["state"][0]
+        browser.cookies.set(routes.COOKIE, legacy_nonce, domain="127.0.0.1", path=routes.COOKIE_PATH)
+        assert browser.delete(prefix + "/connection", params={"employee": 9}).status_code == 200
+        grants["legacy"] = (4, previous | oauth.ACTIONS["folder"] | oauth.ACTIONS["wiki"] | {"offline_access"})
+        finish(4, {"state": old_state, "code": "legacy"})
+        assert actions(4)["folder"] and actions(4)["wiki"]
 
 
 @pytest.mark.skipif(__import__("os").name!="nt",reason="Windows credential file format")

@@ -17,7 +17,7 @@ type OAuth = {
   actions: { history: boolean; doc: boolean; delete?: boolean; wiki?: boolean; folder?: boolean };
   redirect_uri: string;
   permissions_url?: string;
-  consent?: {state: "expired" | "processing" | "awaiting_return"; missing_scopes: string[]} | null;
+  consent?: {state: "expired" | "failed" | "processing" | "awaiting_return"; missing_scopes: string[]} | null;
 };
 const oauth = "/feishu/owner-oauth";
 const settings = "/staff/feishu";
@@ -27,6 +27,7 @@ export function FeishuAccess({ employee, name, isLead, members }: {
 }) {
   const [access, setAccess] = useState<Access | null>(null);
   const [auth, setAuth] = useState<OAuth | null>(null);
+  const [authError, setAuthError] = useState("");
   const [alias, setAlias] = useState("");
   const [chat, setChat] = useState("");
   const [folder, setFolder] = useState("");
@@ -39,31 +40,37 @@ export function FeishuAccess({ employee, name, isLead, members }: {
     const target = next.document_target;
     setFolder(target.folder_token ? target.tenant_origin + "/drive/folder/" + target.folder_token : "");
   }, []);
+  const authLoadId = useRef<symbol | null>(null);
+  const readAuth = useCallback(() => {
+    const current = Symbol();
+    authLoadId.current = current;
+    return request<OAuth>(oauth + "/status?employee=" + employee).then(next => {
+      if (authLoadId.current === current) { setAuth(next); setAuthError(""); }
+    }).catch(err => {
+      if (authLoadId.current === current) { setAuth(null); setAuthError(String(err)); }
+    });
+  }, [employee]);
   const loadId = useRef<symbol | null>(null);
   const load = useCallback(() => {
     const current = Symbol();
     loadId.current = current;
-    return Promise.allSettled([
-      request<Access>(settings + "/access"), request<OAuth>(oauth + "/status?employee=" + employee)
-    ]).then(([policy, connection]) => {
-      if (current !== loadId.current) return;
-      if (policy.status === "fulfilled") accept(policy.value);
-      if (connection.status === "fulfilled") setAuth(connection.value);
-      const errors = [policy, connection].flatMap(r => r.status === "rejected" ? [String(r.reason)] : []);
-      setError(errors.join("。"));
+    const policy = request<Access>(settings + "/access").then(next => {
+      if (loadId.current === current) { accept(next); setError(""); }
+    }).catch(err => {
+      if (loadId.current === current) setError(String(err));
     });
-  }, [accept, employee]);
+    return Promise.all([policy, readAuth()]);
+  }, [accept, readAuth]);
   useEffect(() => {
     void load();
-    let active = true;
-    const onFocus = () => {
-      void request<OAuth>(oauth + "/status?employee=" + employee).then(next => {
-        if (active) setAuth(next);
-      }).catch(() => {});
-    };
+    const onFocus = () => { void readAuth(); };
     window.addEventListener("focus", onFocus);
-    return () => { active = false; loadId.current = null; window.removeEventListener("focus", onFocus); };
-  }, [employee, load]);
+    return () => {
+      authLoadId.current = null;
+      loadId.current = null;
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [readAuth, load]);
 
   async function run(work: () => Promise<void>) {
     setBusy(true); setError(""); setNotice("");
@@ -110,24 +117,28 @@ export function FeishuAccess({ employee, name, isLead, members }: {
       <p>在和管家的私聊中发起查阅或整理。{isLead ? "管家可查阅你已登记的联系人。" : "点名这位员工整理时，只能使用分配给该岗位的联系人。"}</p>
       <fieldset disabled={busy} className="dp-fields">
         <legend>老板的飞书账号</legend>
-        <p>当前应用：{name}。{auth?.actions.history ? "已授权读取私聊。" : "读取私聊待授权。"}{auth?.actions.doc ? "已授权文档读写。" : "文档读写待授权。"}</p>
-        <div className="dp-actions">
+        {auth ? <p>当前应用：{name}。{auth.actions.history ? "已授权读取私聊。" : "读取私聊待授权。"}{auth.actions.doc ? "已授权文档读写。" : "文档读写待授权。"}</p>
+          : <p role="status">{authError ? "暂时无法读取飞书授权状态。" : "正在读取飞书授权状态…"}</p>}
+        {auth && <div className="dp-actions">
           <button className="dp-button" onClick={() => void run(() => connect("history"))}>授权读取私聊</button>
           <button className="dp-button" onClick={() => void run(() => connect("doc"))}>授权文档读写</button>
-          {!isLead && (auth?.actions.wiki ? <span>已授权识别知识库链接</span> :
+          {!isLead && (auth.actions.wiki ? <span>已授权识别知识库链接</span> :
             <button className="dp-button" onClick={() => void run(() => connect("wiki"))}>授权识别知识库链接</button>)}
-          {!isLead && (auth?.actions.folder ? <span>已授权核对目标文件夹</span> :
+          {!isLead && (auth.actions.folder ? <span>已授权核对目标文件夹</span> :
             <button className="dp-button" onClick={() => void run(() => connect("folder"))}>授权核对目标文件夹</button>)}
-          {!isLead && (auth?.actions.delete ? <span>已授权删除员工创建的指定文档</span> :
+          {!isLead && (auth.actions.delete ? <span>已授权删除员工创建的指定文档</span> :
             <button className="dp-button" onClick={() => void run(() => connect("delete"))}>授权删除指定文档</button>)}
-          {isLead && auth && !auth.actions.history && !auth.actions.doc && <button className="dp-link" onClick={() => void run(() => connect("both"))}>同时授权两项</button>}
-          {auth?.connected && <button className="dp-link" onClick={() => void run(async () => {
-            setAuth(await request<OAuth>(oauth + "/connection?employee=" + employee, {method:"DELETE"}));
+          {isLead && !auth.actions.history && !auth.actions.doc && <button className="dp-link" onClick={() => void run(() => connect("both"))}>同时授权两项</button>}
+          {auth.connected && <button className="dp-link" onClick={() => void run(async () => {
+            const next = await request<OAuth>(oauth + "/connection?employee=" + employee, {method:"DELETE"});
+            authLoadId.current = null;
+            setAuth(next); setAuthError("");
             setNotice("已断开该应用在本机的飞书授权。");
           })}>断开此应用授权</button>}
-        </div>
+        </div>}
         {auth?.consent && <p role="status">
-          {auth.consent.state === "expired" ? "上次授权已过期，请重新发起缺少的授权。" :
+          {auth.consent.state === "failed" ? "上次授权未保存，请核对应用权限后重新授权。" :
+            auth.consent.state === "expired" ? "上次授权已过期，请重新发起缺少的授权。" :
             auth.consent.state === "processing" ? "已收到飞书回调，正在核对授权。" : "等待飞书回到工作台。在授权页点「同意」后等它自动返回。"}
           {" 缺少 "}{auth.consent.missing_scopes.join("、")}
         </p>}
@@ -193,7 +204,7 @@ export function FeishuAccess({ employee, name, isLead, members }: {
         <label>云盘文件夹链接<input value={folder} onChange={e => setFolder(e.target.value)} placeholder="粘贴你有编辑权限的飞书文件夹链接" /></label>
         <div className="dp-actions"><button className="dp-button" onClick={() => void run(saveFolder)}>保存文件夹</button><small>清空后保存可关闭写入。</small></div>
       </fieldset>}
-      {error && <div role="alert" className="dp-error">{error} <button className="dp-link" onClick={() => void load()}>重新读取</button></div>}
+      {(error || authError) && <div role="alert" className="dp-error">{[error, authError].filter(Boolean).join("。")} <button className="dp-link" onClick={() => void load()}>重新读取</button></div>}
       <p role="status" className="dp-toaster">{notice}</p>
     </section>
   );

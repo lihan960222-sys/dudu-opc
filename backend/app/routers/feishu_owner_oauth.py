@@ -38,6 +38,13 @@ def owner_browser(request: Request):
     return principal
 
 
+def _consent_owner(request: Request):
+    principal = owner_browser(request)
+    if principal.role != "owner" or principal.person_id is None:
+        raise HTTPException(403, "请先用本机工作区的老板账号登录，再管理飞书授权。")
+    return principal
+
+
 def _origin(value):
     parts = urlsplit(value)
     return public_url.normalize(f"{parts.scheme}://{parts.netloc}")
@@ -91,6 +98,15 @@ def _binding(principal, nonce):
     return hashlib.sha256(json.dumps(browser).encode()).hexdigest()
 
 
+def _employee_prefix(value):
+    prefix, sep, _ = value.partition(".")
+    return int(prefix) if sep and prefix.isascii() and prefix.isdigit() and len(prefix) < 16 else None
+
+
+def _cookie_name(employee):
+    return COOKIE if employee is None else f"{COOKIE}_{employee}"
+
+
 def _config():
     try:
         return config_from_env()
@@ -109,7 +125,7 @@ def employee_config(employee):
 
 @router.get("/status")
 def connection_status(request: Request, employee: int | None = None):
-    owner_browser(request)
+    _consent_owner(request)
     uri = redirect_uri(request)
     cfg=employee_config(employee)
     current=owner_oauth.status(cfg)
@@ -120,27 +136,28 @@ def connection_status(request: Request, employee: int | None = None):
 
 @router.post("/start")
 def begin(payload: StartRequest, request: Request, employee: int | None = None):
-    principal = owner_browser(request)
+    principal = _consent_owner(request)
     uri = redirect_uri(request)
     nonce = secrets.token_urlsafe(32)
     try:
-        if employee is not None:
-            nonce = f"{employee}.{nonce}"
-        url = owner_oauth.start(employee_config(employee),payload.action,uri,_binding(principal,nonce))
+        url = owner_oauth.start(employee_config(employee),payload.action,uri,_binding(principal,nonce),employee=employee)
     except owner_oauth.OwnerOAuthError as exc:
         raise HTTPException(409,str(exc)) from None
     response = JSONResponse({"authorize_url":url,"redirect_uri":uri},headers=HEADERS)
-    response.set_cookie(COOKIE,nonce,max_age=600,path=COOKIE_PATH,httponly=True,samesite="lax",secure=uri.startswith("https://"))
+    response.set_cookie(_cookie_name(employee),nonce,max_age=600,path=COOKIE_PATH,httponly=True,samesite="lax",secure=uri.startswith("https://"))
     return response
 
 
 @router.get("/callback")
 def callback(request: Request, state: str = "", code: str = "", error: str = ""):
-    principal = owner_browser(request)
+    principal = _consent_owner(request)
     uri = redirect_uri(request,callback=True)
-    nonce = request.cookies.get(COOKIE) or ""
-    prefix, sep, _ = nonce.partition(".")
-    employee = int(prefix) if sep and prefix.isascii() and prefix.isdigit() and len(prefix)<16 else None
+    employee = _employee_prefix(state)
+    cookie = _cookie_name(employee)
+    nonce = request.cookies.get(cookie) or ""
+    if employee is None:
+        # An authorization begun before employee-specific cookies has an unprefixed state.
+        employee = _employee_prefix(nonce)
     destination = f"/?section=people&capability=feishu&employee={employee}" if employee is not None else "/?section=host"
     try:
         owner_oauth.finish(employee_config(employee),state,_binding(principal,nonce),uri,"" if error else code)
@@ -152,16 +169,20 @@ def callback(request: Request, state: str = "", code: str = "", error: str = "")
         outcome = "error"
     response = RedirectResponse(uri.removesuffix(CALLBACK)+destination+"&feishu_oauth="+outcome,status_code=303,headers=HEADERS)
     if outcome == "connected":
-        response.delete_cookie(COOKIE,path=COOKIE_PATH,secure=uri.startswith("https://"),httponly=True,samesite="lax")
+        response.delete_cookie(cookie,path=COOKIE_PATH,secure=uri.startswith("https://"),httponly=True,samesite="lax")
     return response
 
 
 @router.delete("/connection")
 def unlink(request: Request, employee: int | None = None):
-    owner_browser(request)
+    _consent_owner(request)
     uri = redirect_uri(request)
     cfg = employee_config(employee)
     owner_oauth.disconnect(cfg)
     response = JSONResponse({**owner_oauth.status(cfg),"redirect_uri":uri},headers=HEADERS)
-    response.delete_cookie(COOKIE,path=COOKIE_PATH,secure=uri.startswith("https://"),httponly=True,samesite="lax")
+    cookies = {_cookie_name(employee)} if employee is not None else set()
+    if _employee_prefix(request.cookies.get(COOKIE) or "") == employee:
+        cookies.add(COOKIE)
+    for cookie in cookies:
+        response.delete_cookie(cookie,path=COOKIE_PATH,secure=uri.startswith("https://"),httponly=True,samesite="lax")
     return response

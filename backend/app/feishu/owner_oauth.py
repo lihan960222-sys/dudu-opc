@@ -139,13 +139,15 @@ def _token(cfg, **form):
     return _request("POST", TOKEN, data=payload)
 
 
-def start(cfg, action, uri, browser):
+def start(cfg, action, uri, browser, *, employee=None):
     if action not in ("both", *ACTIONS):
         raise OwnerOAuthError("请选择聊天记录、云文档或两项授权。")
     if action == "delete" and not cfg.get("_employee_oauth"):
         raise OwnerOAuthError("请在员工自己的飞书应用中授权删除。")
     scopes = (ACTIONS["history"] | ACTIONS["doc"] if action == "both" else ACTIONS[action]) | {"offline_access"}
     state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(64)
+    if employee is not None:
+        state = f"{employee}.{state}"
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     with _db(cfg, lock=True) as (db, key):
         existing = db.execute("select scopes from grant_data where profile=? and max(expires,refresh_expires)>?",
@@ -191,6 +193,15 @@ def finish(cfg, state, browser, uri, code):
             raise OwnerOAuthError("授权请求已失效，请在原来的浏览器重新连接。")
         db.execute("update flow set used=1 where profile=?", (key,))
     # Commit single use before exchanging the code. A disconnect or newer attempt invalidates this one.
+    try:
+        _finish_claim(cfg, row, uri, code)
+    except OwnerOAuthError:
+        with _db(cfg, lock=True) as (db, key):
+            db.execute("update flow set used=2 where profile=? and state=? and used=1", (key, digest))
+        raise
+
+
+def _finish_claim(cfg, row, uri, code):
     if not code or len(code)>2048:
         raise OwnerOAuthError("本次授权未完成。")
     token = _token(cfg, grant_type="authorization_code", code=code,
@@ -205,7 +216,7 @@ def finish(cfg, state, browser, uri, code):
         raise OwnerOAuthError("这次登录的飞书账号与已配置的老板身份不一致。")
     with _db(cfg, lock=True) as (db, key):
         changed = db.execute("delete from flow where profile=? and state=? and used=1 and until>?",
-                             (key, digest, time.time())).rowcount
+                             (key, row["state"], time.time())).rowcount
         if changed != 1:
             raise OwnerOAuthError("授权已过期或被另一次操作替换，请重新连接。")
         requested = set(row["scopes"].split()) - {"offline_access"}
@@ -232,7 +243,12 @@ def consent_progress(cfg, granted):
     requested=set(row["scopes"].split())-set(granted)-{"offline_access"}
     if not requested:
         return None
-    state="expired" if row["until"]<=time.time() else "processing" if row["used"] else "awaiting_return"
+    if row["used"] == 2:
+        state = "failed"
+    elif row["until"] <= time.time():
+        state = "expired"
+    else:
+        state = "processing" if row["used"] else "awaiting_return"
     return {"state":state,"missing_scopes":sorted(requested)}
 
 

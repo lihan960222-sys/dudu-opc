@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { test } from "node:test";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import ts from "typescript";
 import { assignedContact, feishuEntry } from "./feishu-employee.ts";
 
 test("employees see their assignments, including the legacy default lead", () => {
@@ -22,4 +27,24 @@ test("private tools open only from their explicit link, old anchor or OAuth retu
   assert.deepEqual(entry("section=host&feishu_oauth=error", "", "new"), { requested: true, employee: "" });
   assert.deepEqual(entry("feishu_oauth=connected&employee=4", "", "3"), { requested: true, employee: "4" });
   assert.deepEqual(entry("feishu_oauth=connected&employee=4"), { requested: true, employee: "4" });
+});
+
+test("the employee profile waits for verified scopes before offering folder consent", () => {
+  const source = readFileSync(new URL("../components/staff/FeishuAccess.tsx", import.meta.url), "utf8");
+  const { outputText } = ts.transpileModule(source, { compilerOptions: {
+    jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+  } });
+  const exports = {};
+  const require = createRequire(import.meta.url);
+  const load = (name) => {
+    if (name === "@/lib/api") return { request: () => assert.fail("render must not contact an API") };
+    if (name === "@/lib/feishu-employee") return { assignedContact };
+    return require(name);
+  };
+  new Function("exports", "require", outputText)(exports, load);
+  const result = renderToStaticMarkup(React.createElement(exports.FeishuAccess, {
+    employee: 4, name: "二狗", isLead: false, members: [4],
+  }));
+  assert.match(result, /正在读取飞书授权状态/);
+  assert.doesNotMatch(result, /待授权|授权核对目标文件夹/);
 });
