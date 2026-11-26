@@ -378,9 +378,8 @@ async def _current_feature(db, owner_id, agent, thread):
 async def project_runtime_for(db, owner_id, agent, thread, approval_mode):
     from pathlib import Path
     from app.db.models import Team
-    from app.services import employee_runtime
+    from app.services import employee_runtime, team_workspaces
     from app.services.engine_registry import resolve_model_profile
-    from app.services.role_workspace import checked_root, validate_configured_location
     stamp = (thread.provider_state or {}).get("employee_project")
     if not employee_runtime.native_enabled(owner_id, agent.id):
         if stamp:
@@ -388,26 +387,11 @@ async def project_runtime_for(db, owner_id, agent, thread, approval_mode):
         return None
     item, scope, binding = await _current_feature(db, owner_id, agent, thread)
     selected = resolve_model_profile(agent.provider, agent.model_vendor, thread.model, agent.effort)
-    roots = []
-    rows = (await db.execute(select(Agent.id, Agent.owner_id, Agent.team_id, Agent.role_path,
-                                    Agent.workspace_path, Agent.archived_at))).all()
-    barriers = [(r.id, Path(value).resolve()) for r in rows for value in (r.role_path, r.workspace_path) if value]
     team = await db.get(Team, agent.team_id) if agent.team_id else None
-    if agent.team_workspaces_readable and team and team.owner_id == owner_id and team.lead_agent_id != agent.id:
-        for row in rows:
-            if (row.id in (agent.id, team.lead_agent_id) or row.owner_id != owner_id or row.team_id != team.id
-                    or row.archived_at or not row.role_path):
-                continue
-            try:
-                path = checked_root(Path(row.role_path))
-                validate_configured_location(path)
-            except (ValueError, OSError):
-                continue
-            if not any(i != row.id and (p.is_relative_to(path) or path.is_relative_to(p)) for i,p in barriers):
-                roots.append(path)
+    directory = await team_workspaces.load(db, team)
     runtime = employee_runtime.resolve_project_runtime(agent, item, approval_mode=approval_mode,
-        readable_roots=roots, model_vendor=selected.model_vendor, assignment_epoch=scope.assignment_epoch,
-        protected_roots=tuple(path for _, path in barriers))
+        readable_roots=directory.readable_by(agent.id).values(), model_vendor=selected.model_vendor,
+        assignment_epoch=scope.assignment_epoch, protected_roots=directory.protected_roots)
     await check_employee_root(db, owner_id, agent, runtime.root)
     runtime.check_previous_storage(stamp)
     if (stamp != runtime.stamp or Path(thread.workspace_path) != runtime.root or thread.provider != selected.engine_id):

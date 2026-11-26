@@ -1,4 +1,4 @@
-"""Reviewed edits to one existing UTF-8 file in a bound employee directory."""
+"""Confined reads of employee files and reviewed edits to the employee's own project."""
 from contextlib import ExitStack, contextmanager
 import hashlib
 import os
@@ -60,20 +60,24 @@ def _directory(path):
         kernel.CloseHandle(wintypes.HANDLE(handle))
 
 
-@contextmanager
 def pinned_parent(root, target):
-    """Hold the trusted root and every parent of a project file during an operation."""
+    return pinned_directory(root, target.parent)
+
+
+@contextmanager
+def pinned_directory(root, directory):
+    """Hold the trusted root and every directory down to the target during an operation."""
     with ExitStack() as stack:
         current = feature_files.checked(root)
         descriptor = stack.enter_context(_directory(current))
-        for part in target.parent.relative_to(current).parts:
+        for part in directory.relative_to(current).parts:
             current = feature_files.checked(current / part)
             descriptor = stack.enter_context(_directory(current))
         yield descriptor
 
 
-def _contents(project, path):
-    fd, info, final = workspace_files._open_confined(project.root, path)
+def _contents(root, path):
+    fd, info, final = workspace_files._open_confined(root, path)
     with os.fdopen(fd, "rb") as stream:
         if (info.st_nlink != 1 or final != path or info.st_size > feature_files.MAX_TEXT
                 or not os.path.samestat(info, feature_files.checked(path).stat())):
@@ -89,9 +93,40 @@ def read(project, args):
         raise ValueError("读取操作只接受一个岗位内的相对文件名。")
     path = _target(project, args["path"])
     with pinned_parent(project.root, path):
-        data, _ = _contents(project, path)
+        data, _ = _contents(project.root, path)
     return {"path":path.relative_to(project.root).as_posix(), "text":data.decode("utf-8-sig"),
             "sha256":hashlib.sha256(data).hexdigest()}
+
+
+def inspect_peer(root, name, *, listing, limit=workspace_files.LIST_MAX_ENTRIES, folders_only=False):
+    if not isinstance(name, str) or len(name) > 400 or workspace_files.is_secret(PureWindowsPath(name).parts):
+        raise ValueError("请使用同事岗位目录内的相对路径。")
+    target = feature_files.checked_relative(root, name)
+    relative = target.relative_to(root).as_posix()
+    if not listing:
+        with pinned_parent(root, target):
+            data, _ = _contents(root, target)
+        return {"path": relative, "text": data.decode("utf-8-sig"), "sha256": hashlib.sha256(data).hexdigest()}
+    if type(limit) is not int or not 1 <= limit <= workspace_files.LIST_MAX_ENTRIES:
+        raise ValueError(f"返回数量须为 1 到 {workspace_files.LIST_MAX_ENTRIES} 的整数。")
+    if type(folders_only) is not bool:
+        raise ValueError("folders_only 须为布尔值。")
+    entries = []
+    with pinned_directory(root, target):
+        for child in sorted(target.iterdir()):
+            if workspace_files.is_secret(child.relative_to(root).parts):
+                continue
+            try:
+                feature_files.checked_relative(target, child.name)
+                folder = child.is_dir()
+                if not folder and (folders_only or not child.is_file()):
+                    continue
+            except (OSError, ValueError):
+                continue
+            if len(entries) == limit:
+                return {"path": relative, "entries": entries, "truncated": True}
+            entries.append({"name": child.name, "folder": folder})
+    return {"path": relative, "entries": entries, "truncated": False}
 
 
 def edit(project, args, *, storage):
@@ -103,7 +138,7 @@ def edit(project, args, *, storage):
         raise ValueError("需要一处可以核对的文本替换。")
     path = _target(project, args["path"])
     with pinned_parent(project.root, path) as parent_fd:
-        data, info = _contents(project, path)
+        data, info = _contents(project.root, path)
         data.decode("utf-8-sig")
         old, new = args["old"].encode(), args["new"].encode()
         if hashlib.sha256(data).hexdigest() != args["sha256"] or data.count(old) != 1:
@@ -123,7 +158,7 @@ def edit(project, args, *, storage):
                 stream.write(result)
                 stream.flush()
                 os.fsync(stream.fileno())
-            current, latest = _contents(project, path)
+            current, latest = _contents(project.root, path)
             if not os.path.samestat(latest, info) or current != data:
                 raise ValueError("文件刚被其他程序修改，请重新读取。")
             if os.name == "nt":

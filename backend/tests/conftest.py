@@ -33,6 +33,14 @@ def using_sqlite() -> bool:
     return settings.DATABASE_KIND == "sqlite"
 
 
+@pytest.fixture(autouse=True)
+def isolate_explicit_settings(monkeypatch):
+    # Restoring a Pydantic value with setattr still marks it as explicitly configured.
+    # Give each test its own field set so a temporary override cannot change the
+    # next test's interpretation of the operator's defaults.
+    monkeypatch.setattr(settings, "__pydantic_fields_set__", settings.model_fields_set.copy())
+
+
 @pytest.fixture(scope="session", autouse=True)
 def sqlite_schema():
     """Create the schema of the temporary SQLite database with the real

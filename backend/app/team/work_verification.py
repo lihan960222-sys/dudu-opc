@@ -77,19 +77,27 @@ def _project_path(raw, root):
     return current, relative.as_posix()
 
 
-def command_receipt(item, root):
+def _readable_path(raw, root, peers):
+    if isinstance(raw, str):
+        path = Path(raw)
+        root = next((peer for peer in peers if path.is_relative_to(peer)), root)
+    target, relative = _project_path(raw, root)
+    return target, relative, root
+
+
+def command_receipt(item, root, *, readable_roots=()):
     if (item.get("type")!="commandExecution" or not isinstance(item.get("id"),str)
             or not isinstance(item.get("command"),str) or not item["command"].strip()
             or item.get("status") not in ("completed","failed","declined","cancelled","interrupted")):
         return None
     try:
-        cwd,relative=_project_path(item.get("cwd"),root)
+        cwd,relative,cwd_root=_readable_path(item.get("cwd"),root,readable_roots)
         if not cwd.is_dir():
             return None
     except (OSError,ValueError):
         return None
     code=item.get("exitCode")
-    receipt = {"command":item["command"],"cwd":relative,"root":str(root),"exit_code":code if type(code)==int else None,
+    receipt = {"command":item["command"],"cwd":relative,"root":str(cwd_root),"exit_code":code if type(code)==int else None,
                "status":item["status"],"call_id":item["id"]}
     actions = item.get("commandActions")
     if receipt["exit_code"] != 0 or receipt["status"] != "completed" or not isinstance(actions,list) or len(actions)!=1:
@@ -105,11 +113,12 @@ def command_receipt(item, root):
     if not isinstance(raw,str) or not raw:
         return receipt
     try:
-        path, name = _project_path(str(cwd / raw), root)
+        path, name, inspected_root = _readable_path(str(cwd / raw), root, readable_roots)
         if ((action["type"]=="read" and path.is_file()) or
                 (action["type"]=="listFiles" and path.is_dir()) or
                 (action["type"]=="search" and (path.is_dir() or path.is_file()))):
-            receipt["inspection"] = {"operation":action["type"],"path":name,"scope":"role","root":str(root)}
+            receipt["inspection"] = {"operation":action["type"],"path":name,
+                "scope":"role" if inspected_root == root else "peer","root":str(inspected_root)}
     except (OSError,ValueError):
         pass
     return receipt
@@ -188,7 +197,13 @@ async def assess(db,job,turn,check):
         if native:
             worker = await db.get(Agent,job.assignee_agent_id)
             if worker and worker.owner_id==job.owner_id and worker.role_path:
-                seen.extend(item for item in native if Path(item["root"])==Path(worker.role_path))
+                seen.extend(item for item in native if item.get("scope") == "role" and Path(item["root"]) == Path(worker.role_path))
+                peer_reads = [item for item in native if item.get("scope") == "peer"]
+                if peer_reads:
+                    from app.services import team_workspaces
+                    directory = await team_workspaces.load(db, await service.team_for(db, job.owner_id))
+                    current = set(directory.readable_by(worker.id).values())
+                    seen.extend(item for item in peer_reads if Path(item["root"]) in current)
         if seen:
             return {"state":"inspected","evidence":seen[:12]}
         return {"state":"missing","detail":"没有本轮查阅项目文件或目录的成功记录。"}

@@ -65,6 +65,19 @@ def checked(path):
     return path
 
 
+def checked_relative(root, name):
+    path = PureWindowsPath(name)
+    if path.anchor:
+        raise ValueError("Path outside scope")
+    current = checked(root)
+    for part in path.parts:
+        if (part.startswith(".") or part.endswith((" ", ".")) or part.casefold() in PRIVATE
+                or any(ch in part for ch in ':*?"<>|') or ntpath.isreserved(part)):
+            raise ValueError("Private or invalid path")
+        current = checked(current / part)
+    return current
+
+
 class FeatureFiles:
     def __init__(self, task, writable=True, peer_access=None):
         self.task = checked(task)
@@ -124,20 +137,19 @@ class FeatureFiles:
         if scope not in ("role", "task", *peers) or not isinstance(name, str):
             raise ValueError("Invalid scope or path")
         path = PureWindowsPath(name)
-        if path.anchor or (scope == "role" and path.parts and path.parts[0] == "任务"):
+        if scope == "role" and path.parts and path.parts[0] == "任务":
             raise ValueError("Path outside scope")
-        result = checked(peers.get(scope) or (self.role if scope == "role" else self.task))
-        for part in path.parts:
-            if (part.startswith(".") or part.endswith((" ", ".")) or part.casefold() in PRIVATE
-                    or any(ch in part for ch in ':*?"<>|') or ntpath.isreserved(part)):
-                raise ValueError("Private or invalid path")
-            result = checked(result / part)
-        return result
+        return checked_relative(peers.get(scope) or (self.role if scope == "role" else self.task), name)
 
     def call(self, name, args):
         scope=args.get("scope","task" if name=="write_text" else None)
-        if name=="write_text" and (not self.writable or scope not in (("task","role") if self.peer_access else ("task",))):
-            raise ValueError("不能写入其他员工的目录。")
+        if name=="write_text":
+            if not self.writable:
+                raise ValueError("本轮任务是只读的，无法写入文件。")
+            if scope=="role" and not self.peer_access:
+                raise ValueError("本轮只可以写入任务目录。")
+            if scope not in ("role","task"):
+                raise ValueError("不能写入其他员工的目录。")
         peers=self.peer_roots()
         path = self.path(scope,args["path"],peers=peers)
         if name == "list_files":

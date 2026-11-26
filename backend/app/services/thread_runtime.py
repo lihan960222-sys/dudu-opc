@@ -1050,8 +1050,12 @@ class ThreadRuntime:
                 raise ProviderUnavailable("Draft-only routines require a confined Claude engine and compatible Gmail read grants.")
             if draft_only and (skills or attached or thread.session_state == "active"):
                 raise ProviderUnavailable("Draft-only routines require a fresh conversation without skills or attachments.")
-        recall = None if draft_only or consult or isolated else await self._recall(agent, thread_id, prompt_text)
-        brief = project_facts if isolated else "" if draft_only or feature else await self._recent_work(agent, thread)
+        recall = None if draft_only or consult or isolated else await self._recall(
+            agent, thread_id, prompt_text, notes_only=steward_chat
+        )
+        brief = project_facts if isolated else ""
+        if not (isolated or draft_only or feature or steward_chat):
+            brief = await self._recent_work(agent, thread)
         handoff = ""
         if thread.provider_session_id is not None:
             # Native sessions have never seen turns that ran on a fallback.
@@ -1230,9 +1234,10 @@ class ThreadRuntime:
             ctx.bind_native_session = bind_native_session
         if steward_chat:
             from app.services.steward_reply import INSTRUCTIONS
-            ctx.instructions = _with_brief(ctx.instructions, INSTRUCTIONS)
-            ctx.codex_prompt.instructions = _with_brief(ctx.codex_prompt.instructions, INSTRUCTIONS)
-            ctx.prompt = INSTRUCTIONS + "\n\n" + ctx.prompt
+            steward_instructions = INSTRUCTIONS + "\n\n" + recent_work.STEWARD_HISTORY_GUIDANCE
+            ctx.instructions = _with_brief(ctx.instructions, steward_instructions)
+            ctx.codex_prompt.instructions = _with_brief(ctx.codex_prompt.instructions, steward_instructions)
+            ctx.prompt = steward_instructions + "\n\n" + ctx.prompt
         ctx.feature_workspace = thread.workspace_path if feature else None
         if feature and not consult and agent is not None and agent.team_id:
             ctx.peer_workspaces = {"database":str(settings.SQLITE_FILE.resolve()),"owner":self.owner_id,
@@ -1302,7 +1307,9 @@ class ThreadRuntime:
                     scheduled_knowledge=bool(weekly))
                 if not weekly:
                     ctx.codex_prompt.instructions = _with_brief(ctx.codex_prompt.instructions,
-                        "Use employee_capabilities to discover your currently granted tools and local text skills. "
+                        "Use employee_capabilities to discover your registered role folder, read-only peer folders, "
+                        "currently granted tools and local text skills. For a colleague's project, look up their "
+                        "name and ID there. Use the supplied file scope or peer tools with a relative path. "
                         "Use enable_local_skill to read the exact selected skill and follow its returned instructions.")
                 if feishu:
                     from app.team.feishu_assignment import required_tool
@@ -1487,12 +1494,15 @@ class ThreadRuntime:
             logger.exception("could not work out connected apps; the turn goes on without them", thread_id=run.thread_id)
             return unavailable("runtime_check_failed")
 
-    async def _recall(self, agent, thread_id: int, prompt_text: str):
+    async def _recall(self, agent, thread_id: int, prompt_text: str, *, notes_only: bool = False):
         """Passages from the agent's topic notes and other conversations for
         this message (memory_recall.py), or None. Never fails a turn."""
         if agent is None or not agent.memory_enabled or not getattr(agent, "recall_enabled", True):
             return None
         try:
+            if notes_only:
+                notes = memory_recall.note_passages(agent.id, memory_recall.terms_of(prompt_text))
+                return memory_recall.render(notes, [])
             async with self.session() as db:
                 return await memory_recall.build(
                     db, owner_id=self.owner_id, agent_id=agent.id, thread_id=thread_id, message=prompt_text

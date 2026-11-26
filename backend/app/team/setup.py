@@ -13,7 +13,7 @@ from sqlalchemy import select, func
 from app.core.config import settings
 from app.db.models import Agent, AgentJob, Approval, Thread, Team, TeamEvent, TeamSetupRequest, Turn
 from app.db.transactions import begin_write
-from app.services import agent_memory
+from app.services import agent_memory, team_workspaces
 from app.services.steward_deepseek import MODELS as STEWARD_MODELS
 from app.team import fence
 from app.team.service import TeamError, audit, clean_line, member, now, team_for
@@ -63,13 +63,21 @@ async def catalog(db, owner, caller_id, *, engines):
     if not team or caller.team_id != team.id:
         raise TeamError('no_team', 'Choose a team lead first.')
     rows = (await db.execute(select(Agent).where(Agent.owner_id == owner, Agent.team_id == team.id, Agent.archived_at.is_(None)).order_by(Agent.id))).scalars()
+    directory = await team_workspaces.load(db, team)
+    agents = []
+    for a in rows:
+        fields = directory.profile(a, caller.id)
+        workspace_path = fields.get('role_path')
+        if not workspace_path and settings.STEWARD_STRICT_OWNER != owner:
+            workspace_path = a.workspace_path
+        agents.append({'id': a.id, 'name': fence.line(a.name), 'title': fence.line(a.title or ''),
+                       'provider': a.provider, 'model': a.model, 'model_vendor': a.model_vendor, 'effort': a.effort,
+                       'is_lead': a.id == team.lead_agent_id, 'revision': revision(a),
+                       'description': fence.line(a.description or ''), 'instructions': agent_memory.redact_secrets(a.instructions or '')[0],
+                       'workspace_path': workspace_path, **fields})
     return {
         'team': fence.line(team.name), 'lead_agent_id': team.lead_agent_id,
-        'agents': [{'id': a.id, 'name': fence.line(a.name), 'title': fence.line(a.title or ''), 'provider': a.provider, 'model': a.model,
-                    'model_vendor': a.model_vendor, 'effort': a.effort,
-                    'is_lead': a.id == team.lead_agent_id, 'revision': revision(a),
-                    'description': fence.line(a.description or ''), 'instructions': agent_memory.redact_secrets(a.instructions or '')[0],
-                    'workspace_path': a.workspace_path} for a in rows],
+        'agents': agents,
         'engines': engines,
         'limits': {'max_operations': MAX_OPERATIONS, 'max_created_per_turn': settings.TEAM_MAX_CREATED_PER_TURN, 'max_agents': settings.TEAM_MAX_AGENTS},
         'scope': 'You may create specialists and edit name, title, description, instructions and engine of teammates. Permissions, approvals and memory are never changed here.',

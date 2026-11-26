@@ -906,6 +906,13 @@ class _CodexTurn:
                         "If a project check needs review, use team.run_project_command with its complete argv and relative cwd. "
                         "An unchanged check recorded by your assigning steward can run read-only. Other operations need an individual review.")
                 instructions = f"{instructions}\n\n{note}" if instructions else note
+            if self.project and "list_peer_files" in feature_team_tools(self.ctx):
+                note = ("For a colleague's project, use team.employee_capabilities for the registered name, ID and "
+                        "folder. Use team.list_peer_files and team.read_peer_text with that ID and a relative path. "
+                        "For N folder names use folders_only=true and limit=N. Return up to N verified names and "
+                        "finish even when truncated is true. Check the total only if the owner asks for it. "
+                        "These tools are read-only and return inspection receipts.")
+                instructions = f"{instructions}\n\n{note}" if instructions else note
         launch = self.ctx.memory_launch
         if self.computer is not None:
             try:
@@ -1030,7 +1037,11 @@ class _CodexTurn:
                             or stored.get("modelProvider") != expected_vendor):
                         return self._failed("无法核实旧会话的员工目录或供应商。", "project_binding_changed",
                                             session_state="active", provider_state=self.ctx.provider_state)
-                started = await self._call("thread/resume", {"threadId": self.codex_thread, **common})
+                resume_params = {"threadId": self.codex_thread, **common}
+                if self.project:
+                    # Unlike start, resume cannot set the thread's execution environments.
+                    resume_params.pop("environments", None)
+                started = await self._call("thread/resume", resume_params)
             else:
                 started = await self._call("thread/start", {**common, "ephemeral": self.service_history})
         except RpcError as exc:
@@ -1067,8 +1078,8 @@ class _CodexTurn:
             if (not isinstance(profile, dict) or profile.get("id") != self.project.permission_name
                     or started.get("approvalPolicy") != self.policy.approval
                     or not _private_workspace_matches(started, self.project, not self.tools)
-                    or (not self.tools and thread.get("environments") != [])
-                    or not _private_thread_matches(thread, self.project)):
+                    or not _private_thread_matches(thread, self.project)
+                    or not await self._confirm_project_environments(thread, expected_provider)):
                 return self._failed("引擎未确认员工项目目录、读写权限或后台会话保存位置。", "codex_policy_mismatch")
         self.thread_id = thread.get("id") if isinstance(thread, dict) and isinstance(thread.get("id"), str) else None
         if not self.thread_id:
@@ -1164,6 +1175,32 @@ class _CodexTurn:
         if isinstance(turn_info, dict) and isinstance(turn_info.get("id"), str):
             self.codex_turn_id = turn_info["id"]
         return None
+
+    async def _confirm_project_environments(self, thread, expected_provider):
+        environments = thread.get("environments")
+        if self.tools or environments == []:
+            return True
+        # Resuming with the project's cwd selects its local environment, even for
+        # a previously read-only thread. Only clear that exact, verified default.
+        if (not self.codex_thread or thread.get("id") != self.codex_thread or
+                not isinstance(environments, list) or len(environments) != 1):
+            return False
+        current = environments[0]
+        if (not isinstance(current, dict) or current.get("environmentId") != "local"
+                or _native_path(current.get("cwd")) != self.project.root):
+            return False
+        roots = current.get("runtimeWorkspaceRoots")
+        if not isinstance(roots, list) or len(roots) != 1 or _native_path(roots[0]) != self.project.root:
+            return False
+        try:
+            await self._call("thread/settings/update", {"threadId": self.codex_thread, "environments": []})
+            record = await self._call("thread/read", {"threadId": self.codex_thread, "includeTurns": False})
+        except (RpcClosed, RpcError, asyncio.TimeoutError):
+            return False
+        refreshed = record.get("thread") if isinstance(record, dict) else None
+        return (_private_thread_matches(refreshed, self.project, self.codex_thread)
+                and _native_path(refreshed.get("path")) == _native_path(thread.get("path"))
+                and refreshed.get("modelProvider") == expected_provider and refreshed.get("environments") == [])
 
     async def _project_discovery(self, config: dict) -> dict:
         project_skills = []
@@ -1504,7 +1541,7 @@ class _CodexTurn:
                      "output":stored,"truncated":truncated}
         if self.project and kind == "commandExecution":
             from app.team.work_verification import command_receipt
-            if evidence := command_receipt(item, self.project.root):
+            if evidence := command_receipt(item, self.project.root, readable_roots=self.project.readable_roots):
                 completed["command_receipt"] = evidence
                 completed["ok"] = status == "completed" and type(item.get("exitCode")) is int and item["exitCode"] == 0
         elif self.project and kind == "fileChange":
@@ -1649,9 +1686,9 @@ class _CodexTurn:
                     self.rpc.respond(rid, payload(False))
                     return
                 name, tool_input = found
-                from app.team.mcp_server import PROJECT_COMMAND, PROJECT_FILES, TOOLS
+                from app.team.mcp_server import PEER_FILES, PROJECT_COMMAND, PROJECT_FILES, TOOLS
                 feishu_tools = getattr(getattr(self.ctx, 'team', None), 'feishu_tools', ())
-                if ((name not in {entry['name'] for entry in (*TOOLS, *PROJECT_FILES, PROJECT_COMMAND)} and name not in feishu_tools) or
+                if ((name not in {entry['name'] for entry in (*TOOLS, *PROJECT_FILES, *PEER_FILES, PROJECT_COMMAND)} and name not in feishu_tools) or
                         (self.feature and (name not in feature_team_tools(self.ctx) or
                          (name == 'ask_agent' and tool_input.get('mode') != 'consult')))):
                     self.rpc.respond(rid, payload(False))

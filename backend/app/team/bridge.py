@@ -57,6 +57,8 @@ class TeamBridge:
     @property
     def launch(self):
         extra = ['--escalations'] if notices.escalations_on() else []
+        if getattr(self.run.ctx.team, 'is_lead', False) and getattr(self.run.ctx.team, 'strict_hierarchy', False):
+            extra.append('--steward')
         if getattr(self.run.ctx.team, 'feature_consult', False):
             extra.append('--project-consult')
         if getattr(self.run.ctx.team, 'feature_consult', False) and not self.run.ctx.team.delegation_enabled:
@@ -66,7 +68,10 @@ class TeamBridge:
         from app.services import employee_terminal
         flags = {'run_project_command':'--project-command','read_project_text':'--project-read',
                  'replace_project_text':'--project-edit'}
-        extra.extend(flags[name] for name in employee_terminal.allowed_tools(self.run.ctx))
+        allowed = employee_terminal.allowed_tools(self.run.ctx)
+        extra.extend(flag for name, flag in flags.items() if name in allowed)
+        if "list_peer_files" in allowed:
+            extra.append("--peer-files")
         for tool in getattr(self.run.ctx.team, 'feishu_tools', ()):
             extra.extend(['--employee-tool', tool])
         if getattr(sys, 'frozen', False):
@@ -136,12 +141,13 @@ class TeamBridge:
 
     async def execute(self, name, args, *, approval_id=None):
         rt, run = self.runtime, self.run
-        if name in ('read_project_text','replace_project_text'):
+        if name in ('read_project_text','replace_project_text','list_peer_files','read_peer_text'):
             from app.core.config import settings
-            from app.services import employee_project_files, employee_runtime, employee_terminal, workspace_files
+            from app.services import employee_project_files, employee_runtime, employee_terminal, team_workspaces, workspace_files
             from app.team.steward_review import current_native_job
 
             writing = name == 'replace_project_text'
+            peer_read = name in employee_terminal.PEER_READ_TOOLS
             async with rt.session() as db:
                 await begin_write(db)
                 job = await current_native_job(db, run, write=writing, lock=True)
@@ -150,15 +156,34 @@ class TeamBridge:
                     raise service.TeamError('outside_scope','工单归属或项目权限已变更。')
                 try:
                     project = await employee_runtime.checked_active_project(db, run)
-                    if writing:
+                    root, scope = project.root, 'role'
+                    if peer_read:
+                        listing = name == 'list_peer_files'
+                        options = dict(args)
+                        agent_id = options.pop('agent_id', None)
+                        path = options.pop('path', None)
+                        allowed_options = {'limit', 'folders_only'} if listing else set()
+                        if type(agent_id) is not int or not isinstance(path, str) or options.keys() - allowed_options:
+                            raise ValueError('请指定同事编号和岗位目录内的相对路径。')
+                        team = await service.team_for(db, rt.owner_id)
+                        peers = await team_workspaces.turn_peers(db, team, project)
+                        target = peers.get(agent_id)
+                        if not target:
+                            raise ValueError('这名同事不在本轮可读的岗位目录中。')
+                        root, scope = Path(target['role_path']), f"employee:{target['id']}"
+                        result = await asyncio.to_thread(employee_project_files.inspect_peer, root, path,
+                                                         listing=listing, **options)
+                    elif writing:
                         result = await asyncio.to_thread(employee_project_files.edit,project,args,storage=settings.SQLITE_FILE.parent)
                     else:
                         result = await asyncio.to_thread(employee_project_files.read,project,args)
                 except (OSError, UnicodeError, ValueError, workspace_files.FileAccessError) as exc:
                     raise service.TeamError('project_file_unavailable', str(exc)) from exc
                 await db.commit()
-            receipt = {'operation':'write_text' if writing else 'read_text', 'scope':'role',
-                       'path':result['path'], 'root':str(project.root)}
+            receipt = {'operation':'write_text' if writing else 'read_text', 'scope':scope,
+                       'path':result['path'], 'root':str(root)}
+            if name == 'list_peer_files':
+                receipt.update(operation='list_files', count=len(result['entries']), truncated=result['truncated'])
             if writing:
                 receipt['sha256'] = result['sha256']
             if not await run.recorder.emit('tool.completed', {'call_id':'project-file-' + os.urandom(16).hex(),
@@ -224,6 +249,7 @@ class TeamBridge:
                     if not await current_native_job(db, run):
                         raise service.TeamError("parent_gone", "这项派工已结束或已交给其他员工。")
                 if name=="employee_capabilities":
+                    from app.services import employee_terminal, team_workspaces
                     from app.team.feishu_tools_bridge import grant
                     from app.team.mcp_server import FEISHU_TOOLS
                     management.strict(args,set())
@@ -235,15 +261,30 @@ class TeamBridge:
                     connector_tools = run.ctx.composio_exact_tools
                     if connector_tools is None and run.ctx.composio_launch is not None:
                         connector_tools = [item["name"] for item in composio_tools.mcp_tools(run.ctx.composio_apps or {})]
+                    peers = []
+                    peer_tools = set()
+                    if project and "list_peer_files" in employee_terminal.allowed_tools(run.ctx, live=True):
+                        team = await service.team_for(db, rt.owner_id)
+                        peers = list((await team_workspaces.turn_peers(db, team, project)).values())
+                        if peers:
+                            peer_tools.update(employee_terminal.PEER_READ_TOOLS)
+                    elif not project and getattr(run.ctx, "peer_workspaces", None):
+                        from app.services.feature_files import FeatureFiles
+                        files = FeatureFiles(Path(run.ctx.feature_workspace), False, run.ctx.peer_workspaces)
+                        for scope, path in files.peer_roots().items():
+                            _, who, display = scope.split(":", 2)
+                            peers.append({"id": int(who), "name": fence.line(display), "role_path": str(path),
+                                          "scope": scope})
                     saved = [{"template_id":"employee", "name":skill.name, "description":skill.description,
                               "source":skill.source, "revision":skill.revision}
                              for skill in agent_skills.list_skills(caller.id) if skill.enabled]
                     return {**agent_skills.bundled_catalog(caller.id), "saved_skills":saved,
+                            "role_path":caller.role_path, "read_only_peers":peers,
                             "feishu_tool_details":{t["name"]:t["description"] for t in FEISHU_TOOLS
                                                    if t["name"] in feishu_tools},
                             "project_skills":[s for s in agent_skills.project_skill_catalog(project.root, caller.id) if s["enabled"]] if project else [],
                             "granted_tools":sorted(
-                        feishu_tools|set(run.ctx.community_tools)|set(connector_tools or []))}
+                        feishu_tools|peer_tools|set(run.ctx.community_tools)|set(connector_tools or []))}
                 management.strict(args,{"template_id","name"})
                 try:
                     skill=agent_skills.selected_employee_skill(caller.id,args.get("name"),args.get("template_id"),
@@ -288,8 +329,12 @@ class TeamBridge:
                 if name not in ('delegate','answer_job_question') and (name != 'ask_agent' or args.get('mode') != 'consult'):
                     raise service.TeamError('consult_only','Only same-project consultation is available.')
             elif name == 'list_agents':
+                from app.services import team_workspaces
+                team = await service.team_for(db, rt.owner_id)
+                directory = await team_workspaces.load(db, team)
                 rows = (await db.execute(select(Agent).where(Agent.team_id == caller.team_id, Agent.owner_id == rt.owner_id, Agent.archived_at.is_(None)).order_by(Agent.id))).scalars()
-                return {'agents': [{'id': a.id, 'name': fence.line(a.name), 'title': fence.line(a.title), 'can_delegate': a.delegation_enabled} for a in rows]}
+                return {'agents': [{'id': a.id, 'name': fence.line(a.name), 'title': fence.line(a.title),
+                                    'can_delegate': a.delegation_enabled, **directory.profile(a, caller.id)} for a in rows]}
         if name in management.TOOLS:
             return await management.call(rt, run, name, args)
         if name in setup.TOOLS:

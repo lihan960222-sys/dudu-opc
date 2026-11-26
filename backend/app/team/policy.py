@@ -42,6 +42,10 @@ def automatic(tool, mode, team, arguments):
         if team.origin == "routine" and name in team.feishu_tools and not team.is_lead:
             return "allowed", "bound_weekly_knowledge"
         return "denied", "weekly_tool_not_granted"
+    if name in ("list_peer_files", "read_peer_text"):
+        if team.feature_consult and team.strict_hierarchy and not team.is_lead and team.origin == "person":
+            return "allowed", "read_only_peer_workspace"
+        return "denied", "outside_peer_workspace"
     if name in ('run_project_command','read_project_text','replace_project_text'):
         if not team.feature_consult or not team.strict_hierarchy or team.is_lead or team.origin!='person':
             return 'denied','outside_project_command'

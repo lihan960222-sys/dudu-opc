@@ -30,6 +30,25 @@ def test_one_existing_text_edit_preserves_line_endings_and_checks_revision(tmp_p
     assert {p.name for p in root.iterdir()} == {"任务","seconds.cmd"}
 
 
+def test_peer_listing_counts_only_visible_matches_and_signals_if_more_exist(tmp_path):
+    for name in ("1-alpha", "3-beta", ".private"):
+        (tmp_path / name).mkdir()
+    for name in ("0-before.txt", "2-between.txt", "4-after.txt"):
+        (tmp_path / name).touch()
+    for limit, folders_only, names, truncated in (
+        (2, False, ["0-before.txt", "1-alpha"], True),
+        (1, True, ["1-alpha"], True),
+        (2, True, ["1-alpha", "3-beta"], False),
+        (3, True, ["1-alpha", "3-beta"], False),
+    ):
+        result = files.inspect_peer(tmp_path, "", listing=True, limit=limit, folders_only=folders_only)
+        assert [entry["name"] for entry in result["entries"]] == names
+        assert result["truncated"] is truncated
+    for args in ({"limit": 0}, {"limit": 501}, {"limit": True}, {"limit": "2"}, {"folders_only": 1}):
+        with pytest.raises(ValueError):
+            files.inspect_peer(tmp_path, "", listing=True, **args)
+
+
 @pytest.mark.parametrize("name", ["../peer.txt", ".env", "AGENTS.md", "任务/7/notes.txt", "C:/wild.txt", "source.txt:stream"])
 def test_files_stay_in_authorized_employee_project(tmp_path, name):
     task = tmp_path / "任务" / "7"

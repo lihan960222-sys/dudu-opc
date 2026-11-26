@@ -257,17 +257,28 @@ async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
     requests = []
     workspace_roots = [str(project.root)]
     attached_tools = {}
+    local_environment = {"environmentId": "local", "cwd": str(project.root), "runtimeWorkspaceRoots": [str(project.root)]}
+    resumed_environments = [local_environment]
+    effective_environments = []
+    ignore_clear = False
     async def rpc(method, params, **_options):
         requests.append((method, params))
         if method in {"thread/start", "thread/resume"}:
+            attached_tools.clear()
             attached_tools.update(params["config"]["mcp_servers"])
-            environments = {"environments": params["environments"]} if "environments" in params else {}
-            return {"thread": {**stored_thread, **environments}, "modelProvider": "openai", "model": params["model"],
+            # Resume does not accept the start-only environments field. Supplying cwd selects the local default.
+            effective_environments[:] = resumed_environments if method == "thread/resume" else params.get("environments", [local_environment])
+            return {"thread": {**stored_thread, "environments": list(effective_environments)}, "modelProvider": "openai", "model": params["model"],
                 "approvalPolicy": params["approvalPolicy"], "activePermissionProfile": {"id": params["permissions"]},
                 "cwd": str(project.root), "runtimeWorkspaceRoots": list(workspace_roots),
                 "instructionSources": [str(project.root / "AGENTS.md")]}
+        if method == "thread/settings/update":
+            assert params == {"threadId": native, "environments": []}
+            if not ignore_clear:
+                effective_environments.clear()
+            return {}
         if method == "thread/read":
-            return {"thread": dict(stored_thread)}
+            return {"thread": {**stored_thread, "environments": list(effective_environments)}}
         return {"initialize": {}, "account/read": {"account": {"type": "chatgpt"}},
                 "config/read": {"config": {}}, "thread/turns/list": {"data": []},
                 "skills/list": {"data": [{"cwd": str(project.root), "skills": []}]},
@@ -282,11 +293,12 @@ async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
     monkeypatch.setattr(codex_adapter.StdioRpc, "spawn", spawn)
     monkeypatch.setattr(codex_adapter._CodexTurn, "_pump", done)
 
-    async def start(state, number, *, cloud=False):
+    async def start(state, number, *, cloud=False, readonly=False):
+        requested_project = replace(project, writable=False) if readonly else project
         ctx = TurnContext(thread_id=12, turn_id=number, prompt="continue", workspace=project.root, model="gpt-fake",
             provider_session_id="backend", provider_state=state, resume=number > 1, history=AsyncMock(),
-            feature_workspace=str(project.root), project_runtime=project, model_vendor="openai",
-            approval_mode="accept_edits", bind_native_session=AsyncMock(return_value=True))
+            feature_workspace=str(project.root), project_runtime=requested_project, model_vendor="openai",
+            approval_mode="plan" if readonly else "accept_edits", bind_native_session=AsyncMock(return_value=True))
         if cloud:
             ctx.team = SimpleNamespace(is_lead=False, strict_hierarchy=True, delegation_enabled=False,
                 feishu_tools=("feishu_list_sources",))
@@ -322,9 +334,27 @@ async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
     cloud = await start(state, 8, cloud=True)
     assert cloud.status == "succeeded", cloud.error
     thread_config = next(p for m,p in reversed(requests) if m == "thread/resume")
-    assert thread_config["environments"] == [] and not thread_config["config"]["features"]["shell_tool"]
+    assert "environments" not in thread_config and not thread_config["config"]["features"]["shell_tool"]
     assert "feishu_list_sources" in thread_config["config"]["mcp_servers"]["team"]["enabled_tools"]
     assert next(p for m,p in reversed(requests) if m == "turn/start")["environments"] == []
+    calls = [m for m, _ in requests]
+    update_at = calls.index("thread/settings/update")
+    assert calls[update_at + 1] == "thread/read" and calls[-1] == "turn/start"
+    delivered = calls.count("turn/start")
+    ignore_clear = True
+    refused = await start(state, 9, cloud=True)
+    assert refused.error_code == "codex_policy_mismatch" and [m for m, _ in requests].count("turn/start") == delivered
+    clears = [m for m, _ in requests].count("thread/settings/update")
+    resumed_environments[:] = [{**local_environment, "cwd": str(tmp_path / "other employee")}]
+    wrong = await start(state, 10, cloud=True)
+    assert wrong.error_code == "codex_policy_mismatch"
+    assert [m for m, _ in requests].count("thread/settings/update") == clears and [m for m, _ in requests].count("turn/start") == delivered
+    resumed_environments[:] = [local_environment]
+    ignore_clear = False
+    plan = await start(state, 11, readonly=True)
+    assert plan.status == "succeeded", plan.error
+    turn = next(p for m, p in reversed(requests) if m == "turn/start")
+    assert turn["environments"] == [] and turn["permissions"] == replace(project, writable=False).permission_name
     probe.assert_not_awaited()
 
 

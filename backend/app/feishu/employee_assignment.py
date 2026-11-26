@@ -1,7 +1,15 @@
 """Bind an authenticated owner's requested action to the real lead/employee job."""
 import json
+import re
 
 from . import document_access, documents, history, submissions, workspace_access
+
+
+def _requests_empty_body(first_line):
+    # Ignore a quoted document title when looking for a separate instruction about its body.
+    instruction = re.sub(r"《[^》]*》|「[^」]*」|“[^”]*”", "", first_line)
+    return re.search(r"(?:^|[，,。；;])\s*(?:正文(?:先|暂时)?留空|(?:先|暂时)?(?:不用|不要|无需)(?:写|填(?:写)?)?正文)"
+                     r"\s*(?=$|[，,。；;！!])", instruction) is not None
 
 
 async def route(worker, row, msg, text):
@@ -47,9 +55,14 @@ async def route(worker, row, msg, text):
             action = "create_document"
             first, _, draft = documents.NAMED.sub("",text.strip(),count=1).partition("\n")
             title = documents.COMMAND.sub("",first,count=1).lstrip("：: ").strip()
-            body = draft if draft.strip() else documents.quoted_answer(db,row,msg)
             if not title or len(title)>200:
                 raise ValueError("文档需要一个 1 到 200 字的标题，您想用什么名字？")
+            if draft.strip():
+                body = draft
+            elif (msg.get("parent_id") or msg.get("root_id")) and not _requests_empty_body(raw.partition("\n")[0]):
+                body = documents.quoted_answer(db, row, msg)
+                if not isinstance(body, str) or not body.strip():
+                    raise ValueError("我没能核对您引用的答复。请重新引用那条答复，或把正文放在建档指令的第二行。")
             if body.strip():
                 documents.blocks(body)
         else:

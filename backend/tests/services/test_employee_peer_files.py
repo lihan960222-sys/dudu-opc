@@ -45,8 +45,10 @@ def test_granted_employee_can_write_own_and_only_read_active_peer(tmp_path):
 def test_unbound_task_cannot_select_peer_or_write_role(tmp_path):
     task=tmp_path/"任务"/"1";task.mkdir(parents=True)
     fs=FeatureFiles(task,True)
-    with pytest.raises(ValueError): fs.call("write_text",dict(scope="role",path="n",text="a"))
+    with pytest.raises(ValueError,match="任务目录"): fs.call("write_text",dict(scope="role",path="n",text="a"))
     with pytest.raises(ValueError): fs.call("list_files",dict(scope="employee:3:peer",path=""))
+    with pytest.raises(ValueError,match="本轮.*只读"):
+        FeatureFiles(task,False).call("write_text",dict(scope="role",path="n",text="a"))
 
 
 @pytest.mark.asyncio

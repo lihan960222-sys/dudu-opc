@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import select, update
 
 from app.db.models import Thread, Turn
-from app.services import agent_memory, agent_store, local_claude_runner, memory_journal, memory_log, memory_topics, recent_work
+from app.services import agent_memory, agent_store, local_claude_runner, memory_journal, memory_log, memory_topics, recent_work, session_search
 from app.services.provider_adapter import Capabilities, ProviderStatus, TurnOutcome
 from app.services.thread_hub import ThreadHub
 from app.services.thread_runtime import ThreadRuntime
@@ -27,6 +27,7 @@ class Engine:
         self.fail = False
         self.tool = None
         self.edit = None
+        self.reply = None
 
     def new_session_id(self):
         return None
@@ -43,7 +44,7 @@ class Engine:
             await sink.emit("tool.completed", {"call_id": "c1", "ok": True, "output": "ok"})
         if self.fail:
             return TurnOutcome("failed", error="boom", error_code="runner_error")
-        reply = f"Done: {ctx.prompt[:40]} token=hunter2hunter2"
+        reply = self.reply or f"Done: {ctx.prompt[:40]} token=hunter2hunter2"
         await sink.emit("assistant.message", {"text": reply})
         return TurnOutcome("succeeded", result=reply)
 
@@ -51,8 +52,10 @@ class Engine:
 @pytest.fixture
 async def harness(sessions, owner, monkeypatch, tmp_path):
     from app.core.config import settings
+    from app.services import workspace_snapshots
 
     monkeypatch.setattr(local_claude_runner, "workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(workspace_snapshots, "store_dir_for", lambda workspace: tmp_path / "snapshots" / os.path.basename(workspace))
     monkeypatch.setattr(settings, "TEAM_ENABLED", True)
     monkeypatch.setattr(settings, "MEMORY_CAPTURE_QUIET_SECONDS", 0)
     engine = Engine()
@@ -151,6 +154,49 @@ async def test_logs_can_be_read_and_deleted_and_go_with_the_agent(tmp_path, monk
 
 
 # --- the brief ------------------------------------------------------------------------------
+
+
+async def test_steward_gets_durable_notes_but_other_jobs_are_read_on_demand(harness, sessions, owner):
+    rt, engine = harness
+    agent = await make_agent(sessions, owner, make_lead=True)
+    agent_memory.write_memory(agent.id, "- Use the owner's display names.\n")
+    memory_topics.write_topic(agent.id, "atlas.md", "- Atlas folders are named after cities.\n")
+    engine.reply = "Atlas dispatch failed because yesterday's engine was offline."
+    old = await say(rt, sessions, agent, "Atlas folders: list every folder", title="Yesterday's job")
+    engine.reply = None
+
+    request = "Atlas folders: report two folder names."
+    current = await say(rt, sessions, agent, request, title="New job")
+    ctx = engine.contexts[-1]
+    assert ctx.codex_prompt.user_text == request
+    assert "recent_work" not in ctx.codex_prompt.background
+    assert "Use the owner's display names" in ctx.codex_prompt.background["agent_notes"]
+    assert "named after cities" in ctx.codex_prompt.background["recall"]
+    assert recent_work.STEWARD_HISTORY_GUIDANCE in ctx.instructions
+    assert recent_work.STEWARD_HISTORY_GUIDANCE in ctx.codex_prompt.instructions
+    sent = "\n".join((ctx.prompt, ctx.instructions, *ctx.codex_prompt.background.values()))
+    assert "engine was offline" not in sent and "list every folder" not in sent
+    assert ctx.memory_launch is not None
+    async with sessions() as db:
+        result = await session_search.search(db, owner_id=owner, agent_id=agent.id, current_thread_id=current.id,
+                                             query="engine was offline", scope="conversations")
+    assert [hit.thread_id for hit in result.conversations] == [old.id]
+
+    await say(rt, sessions, agent, "Continue this request", thread=current)
+    history = await engine.contexts[-1].history()
+    assert any(item.get("text") == request for item in history)
+
+
+async def test_brief_picks_the_person_turn_before_an_automatic_receipt(harness, sessions, owner):
+    rt, engine = harness
+    agent = await make_agent(sessions, owner)
+    first = await say(rt, sessions, agent, "Confirm the Friday schedule", title="Schedule")
+    await rt.send_turn(first.id, "Automatic dispatch failure receipt", internal=True, team_origin="harness")
+    await finished(sessions, first.id, count=2)
+    await say(rt, sessions, agent, "What's on the calendar?", title="Calendar")
+    brief = engine.contexts[-1].codex_prompt.background["recent_work"]
+    assert "Confirm the Friday schedule" in brief
+    assert "Automatic dispatch failure receipt" not in brief
 
 
 async def test_the_brief_lists_the_other_conversations_newest_first_and_never_this_one(harness, sessions, owner):

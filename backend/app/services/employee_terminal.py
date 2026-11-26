@@ -11,27 +11,30 @@ from app.services.thread_store import cap_tool_output
 from app.team import work_verification
 from app.team.mcp_server import MAILBOX_TIMEOUT_SECONDS
 
+PEER_READ_TOOLS = ("list_peer_files", "read_peer_text")
+
 
 def allowed_tools(ctx, *, live=False):
     project = getattr(ctx, "project_runtime", None)
     team = getattr(ctx, "team", None)
-    if (not project or not team or team.is_lead
-            or team.origin != "person" or not team.feature_consult or not team.strict_hierarchy
+    if (not project or not team or team.is_lead or not getattr(team, "feature_consult", False)
+            or getattr(team, "origin", None) != "person" or not team.strict_hierarchy
             or getattr(ctx, "consult_only", False) or getattr(ctx, "scheduled_knowledge", False)):
         return ()
     # Explicit operator settings at decision time also override a turn's captured default.
     setting = app_settings.resolve("LOCAL_TOOLS_ENABLED", live=live)
     if setting.effective_value is not True and not (setting.source == "default" and not setting.error):
         return ()
+    peer_reads = PEER_READ_TOOLS if getattr(project, "readable_roots", ()) else ()
     if ctx.approval_mode == "plan" and not project.writable:
-        return ("read_project_text",)
+        return ("read_project_text", *peer_reads)
     if project.writable and ctx.approval_mode == "ask":
-        return ("run_project_command","read_project_text","replace_project_text")
+        return ("run_project_command","read_project_text","replace_project_text", *peer_reads)
     if project.writable and ctx.approval_mode == "accept_edits":
         # Native in-project reads and edits already work. The reviewed command
         # is available when an operation needs a specific review.
-        return ("run_project_command",)
-    return ()
+        return ("run_project_command", *peer_reads)
+    return peer_reads
 
 
 def available(ctx, *, live=False):
