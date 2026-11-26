@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from contextlib import asynccontextmanager, contextmanager
@@ -30,9 +31,40 @@ class BoundaryUnavailable(ValueError):
         self.unsupported = unsupported
 
 
+def _terminal_preference_path(owner_id: str, employee_id: int) -> Path:
+    if not isinstance(owner_id, str) or not owner_id or type(employee_id) is not int or employee_id < 1:
+        raise ValueError("Invalid employee identity.")
+    owner = hashlib.sha256(owner_id.encode()).hexdigest()
+    path = settings.SQLITE_FILE.resolve().parent / "employee-settings" / str(employee_id) / f"project-terminal-{owner}.json"
+    if path.resolve() != path:
+        raise BoundaryUnavailable("员工的项目终端设置指向了其他目录，请检查本机数据目录。")
+    return path
+
+
 def native_enabled(owner_id: str, employee_id: int) -> bool:
+    path = _terminal_preference_path(owner_id, employee_id)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return _host_native_default(owner_id, employee_id)
+    if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 8:
+        with path.open("rb") as stream:
+            value = stream.read(9).strip()
+        if value in (b"true", b"false"):
+            return value == b"true"
+    raise BoundaryUnavailable("无法识别这名员工的项目终端设置，请检查本机数据目录。")
+
+
+def _host_native_default(owner_id: str, employee_id: int) -> bool:
     entries = os.environ.get("SUPARAGENT_EMPLOYEE_NATIVE_IDS", "").split(",")
     return f"{owner_id}/{employee_id}" in {entry.strip() for entry in entries}
+
+
+def save_native_enabled(owner_id: str, employee_id: int, enabled: bool) -> None:
+    from app.services.agent_memory import write_atomic
+    path = _terminal_preference_path(owner_id, employee_id)
+    _private_directory(path.parent)
+    write_atomic(path, "true\n" if enabled else "false\n")
 
 
 def _default_service_root() -> Path:

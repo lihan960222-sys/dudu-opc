@@ -10,10 +10,11 @@ import { useT } from "@/lib/use-i18n";
 import { collaboration, type TeamState } from "@/lib/collaboration";
 import { StaffCapabilities } from "./StaffCapabilities";
 import { StaffModelFields } from "./ProfileControls";
-import { directoryMode, directoryModes } from "@/lib/directory-mode";
+import { canManageProjectTerminal, directoryMode, directoryModes } from "@/lib/directory-mode";
 import { TeamWorkspaceAccess } from "./TeamWorkspaceAccess";
 import { DeepSeekKey } from "./DeepSeekKey";
 import { EmployeeOpenAI } from "./EmployeeOpenAI";
+import { EmployeeProjectTerminal } from "./EmployeeProjectTerminal";
 import { employeeModelProfile } from "@/lib/engine-selection";
 import { FeishuAccess } from "./FeishuAccess";
 import { useSession } from "../AuthGate";
@@ -376,6 +377,10 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
             </>
           ) : tab === "access" ? (<>
             {accessFields}
+            {agent && !isLead && canManageProjectTerminal(session) && <EmployeeProjectTerminal
+              key={agent.id} employee={agent.id} busy={busy} folderSaved={!!agent.role_path && agent.role_path === path.trim()} />}
+            {agent && !isLead && ownsHost && !canManageProjectTerminal(session) &&
+              <small>用老板账号登录后，可在这里设置员工的项目终端。</small>}
             <div className="dp-cap-row"><span>工作记忆</span><small>{agent?.memory_enabled === false ? "已关闭" : "已开启"}</small></div>
             {onOpenAdvanced && <button type="button" className="dp-link" onClick={onOpenAdvanced}>管理执行引擎与应用授权</button>}
           </>) : tab === "rules" ? (

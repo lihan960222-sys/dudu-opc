@@ -16,13 +16,14 @@ from starlette.responses import JSONResponse
 
 from app.auth.middleware import principal_of
 from app.core import tenant_paths
+from app.db.models import Agent, AgentJob, Thread, Turn
 from app.db.models.team import TeamSetupRequest
 from app.db.transactions import begin_write
 from app.routers.agents import _agent_or_404, _restricted, get_runtime, _check_engine
 from app.routers.employee_codex_login import router as employee_codex_login_router
 from app.routers.feishu_access import router as feishu_access_router
 from app.routers.weekly_knowledge import router as weekly_knowledge_router
-from app.routers.feishu_owner_oauth import owner_browser
+from app.routers.feishu_owner_oauth import owner_browser, signed_in_owner_browser
 from app.services import agent_store, image_gen, role_workspace, steward_deepseek
 from app.services.local_access_policy import require_local_access
 from app.services.thread_runtime import ThreadRuntime
@@ -45,6 +46,67 @@ router.include_router(weekly_knowledge_router)
 
 class StaffingGrant(BaseModel):
     can_staff_team: StrictBool
+
+
+class ProjectTerminalSetting(BaseModel):
+    enabled: StrictBool
+
+    model_config = {"extra": "forbid"}
+
+
+async def _terminal_employee(db, owner, agent_id, *, lock=False):
+    team = await team_service.team_for(db, owner, lock=lock)
+    query = select(Agent).where(Agent.id == agent_id, Agent.owner_id == owner, Agent.archived_at.is_(None))
+    agent = await db.scalar(query.with_for_update() if lock else query)
+    if not agent:
+        raise HTTPException(404, "未找到这名员工。")
+    if team and team.lead_agent_id == agent.id:
+        raise HTTPException(409, "项目终端用于受派工的专业员工。")
+    return agent
+
+
+@router.get("/{agent_id}/project-terminal", dependencies=[Depends(signed_in_owner_browser)])
+async def project_terminal_status(agent_id: int, rt: ThreadRuntime = Depends(get_runtime)):
+    from app.services import employee_runtime
+    async with rt.session() as db:
+        await _terminal_employee(db, rt.owner_id, agent_id)
+    try:
+        enabled = employee_runtime.native_enabled(rt.owner_id, agent_id)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from None
+    return JSONResponse({"enabled": enabled}, headers={"Cache-Control": "no-store"})
+
+
+@router.put("/{agent_id}/project-terminal", dependencies=[Depends(signed_in_owner_browser)])
+async def set_project_terminal(agent_id: int, choice: ProjectTerminalSetting, rt: ThreadRuntime = Depends(get_runtime)):
+    from app.services import employee_runtime, feature_tasks
+    from app.team.jobs import LIVE
+    async with rt.session() as db:
+        await begin_write(db)
+        # Dispatch uses the same team lock. An accepted job keeps its execution mode until it ends.
+        agent = await _terminal_employee(db, rt.owner_id, agent_id, lock=True)
+        try:
+            current = employee_runtime.native_enabled(rt.owner_id, agent_id)
+            if current != choice.enabled:
+                job = await db.scalar(select(AgentJob.id).where(AgentJob.owner_id == rt.owner_id,
+                    AgentJob.assignee_agent_id == agent_id, AgentJob.kind == "job", AgentJob.mode == "work",
+                    AgentJob.task_id.is_not(None), AgentJob.status.in_((*LIVE, "dispatched"))).limit(1))
+                turn = await db.scalar(select(Turn.id).join(Thread, Thread.id == Turn.thread_id).where(
+                    Thread.owner_id == rt.owner_id, Thread.agent_id == agent_id,
+                    Thread.kind == "feature", Turn.status == "running").limit(1))
+                if job or turn:
+                    raise HTTPException(409, "这名员工还有项目工单在办理。请等工单结束或先停止任务，再切换项目终端。")
+            if choice.enabled:
+                if not agent.role_path:
+                    raise HTTPException(422, "请先保存这名员工自己的工作目录。")
+                root = role_workspace.checked_root(Path(agent.role_path))
+                role_workspace.load(root, agent.model)
+                await feature_tasks.check_employee_root(db, rt.owner_id, agent, root, enabling=True)
+            employee_runtime.save_native_enabled(rt.owner_id, agent_id, choice.enabled)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, str(exc)) from None
+        await db.commit()
+    return {"enabled": choice.enabled}
 
 
 @router.patch("/{agent_id}/staffing", dependencies=[Depends(owner_browser)])

@@ -38,10 +38,10 @@ def owner_browser(request: Request):
     return principal
 
 
-def _consent_owner(request: Request):
+def signed_in_owner_browser(request: Request):
     principal = owner_browser(request)
     if principal.role != "owner" or principal.person_id is None:
-        raise HTTPException(403, "请先用本机工作区的老板账号登录，再管理飞书授权。")
+        raise HTTPException(403, "请先用本机工作区的老板账号登录。")
     return principal
 
 
@@ -125,7 +125,7 @@ def employee_config(employee):
 
 @router.get("/status")
 def connection_status(request: Request, employee: int | None = None):
-    _consent_owner(request)
+    signed_in_owner_browser(request)
     uri = redirect_uri(request)
     cfg=employee_config(employee)
     current=owner_oauth.status(cfg)
@@ -136,7 +136,7 @@ def connection_status(request: Request, employee: int | None = None):
 
 @router.post("/start")
 def begin(payload: StartRequest, request: Request, employee: int | None = None):
-    principal = _consent_owner(request)
+    principal = signed_in_owner_browser(request)
     uri = redirect_uri(request)
     nonce = secrets.token_urlsafe(32)
     try:
@@ -150,7 +150,7 @@ def begin(payload: StartRequest, request: Request, employee: int | None = None):
 
 @router.get("/callback")
 def callback(request: Request, state: str = "", code: str = "", error: str = ""):
-    principal = _consent_owner(request)
+    principal = signed_in_owner_browser(request)
     uri = redirect_uri(request,callback=True)
     employee = _employee_prefix(state)
     cookie = _cookie_name(employee)
@@ -175,7 +175,7 @@ def callback(request: Request, state: str = "", code: str = "", error: str = "")
 
 @router.delete("/connection")
 def unlink(request: Request, employee: int | None = None):
-    _consent_owner(request)
+    signed_in_owner_browser(request)
     uri = redirect_uri(request)
     cfg = employee_config(employee)
     owner_oauth.disconnect(cfg)

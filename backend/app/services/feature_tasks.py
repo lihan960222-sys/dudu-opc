@@ -332,12 +332,12 @@ async def session_for(db, owner_id, task_id, *, model, workspace_path, job_id=No
     return thread, False
 
 
-async def check_employee_root(db, owner, agent, root):
+async def check_employee_root(db, owner, agent, root, *, enabling=False):
     from pathlib import Path
     from app.core.config import settings
     from app.db.models import Agent
     from app.services.employee_runtime import native_enabled
-    if owner != settings.STEWARD_STRICT_OWNER and not native_enabled(owner, agent.id):
+    if not enabling and owner != settings.STEWARD_STRICT_OWNER and not native_enabled(owner, agent.id):
         return
     peers=await db.execute(select(Agent.role_path,Agent.workspace_path).where(Agent.id!=agent.id))
     for paths in peers:

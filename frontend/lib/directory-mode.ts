@@ -1,3 +1,10 @@
+import type { SessionInfo } from "./session";
+
+export function canManageProjectTerminal(session: SessionInfo | null): boolean {
+  return session?.kind === "browser" && (session.session_id ?? 0) > 0
+    && session.role === "owner" && (session.person_id ?? 0) > 0 && session.scopes.includes("admin");
+}
+
 export const directoryModes = {
   plan: {label: "只读", help: "可以查看自己的工作目录和拟定计划。"},
   ask: {label: "编辑前确认", help: "可以查看自己的工作目录，修改文件前需审批。"},
