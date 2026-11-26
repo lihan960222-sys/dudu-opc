@@ -50,6 +50,20 @@ def owner():
     return "od_rt_" + uuid4().hex
 
 
+@pytest.fixture
+async def cleanup_jobs(sessions, owner):
+    """Remove the live jobs and receipts an isolated owner fixture creates."""
+    from app.db.models import AgentJob, AgentJobEvent, AgentJobInbox
+
+    yield
+    async with sessions() as db:
+        ids = select(AgentJob.id).where(AgentJob.owner_id == owner)
+        await db.execute(delete(AgentJobInbox).where(AgentJobInbox.owner_id == owner))
+        await db.execute(delete(AgentJobEvent).where(AgentJobEvent.job_id.in_(ids)))
+        await db.execute(delete(AgentJob).where(AgentJob.owner_id == owner))
+        await db.commit()
+
+
 @pytest.fixture(autouse=True)
 async def cleanup(sessions, owner):
     yield

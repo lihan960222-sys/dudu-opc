@@ -8,7 +8,7 @@ from app.db import session
 from app.db.models import AgentJob,FeishuLeadChat,Thread,Turn,WorkItem
 from app.feishu.lead_chat import select_thread
 from app.services import agent_store,feature_tasks,role_workspace,thread_store
-from tests.services.thread_harness import sessions,owner
+from tests.services.thread_harness import cleanup_jobs, sessions,owner
 
 
 def test_reply_to_earlier_outgoing_carries_scoped_event_and_exact_owner_text(tmp_path):
@@ -128,7 +128,7 @@ def test_existing_steward_turn_survives_model_binding_migration(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_assignment_receipt_cannot_forward_invented_approval(tmp_path, sessions, owner, monkeypatch):
+async def test_assignment_receipt_cannot_forward_invented_approval(tmp_path, sessions, owner, cleanup_jobs, monkeypatch):
     from contextlib import closing
     from types import SimpleNamespace
     import json
@@ -155,7 +155,7 @@ async def test_assignment_receipt_cannot_forward_invented_approval(tmp_path, ses
 
 
 @pytest.mark.asyncio
-async def test_escalated_hire_notifies_original_steward_message_once(tmp_path, sessions, owner, monkeypatch):
+async def test_escalated_hire_notifies_original_steward_message_once(tmp_path, sessions, owner, cleanup_jobs, monkeypatch):
     from contextlib import closing
     import json
     from types import SimpleNamespace

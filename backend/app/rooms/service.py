@@ -8,7 +8,7 @@ from datetime import timedelta
 import json
 from sqlalchemy import select, func, delete
 from app.core.config import settings
-from app.db.models import Agent, Room, RoomMember, RoomDispatch, Thread, Turn, Event, Approval, AgentJob
+from app.db.models import Agent, Room, RoomMember, RoomDispatch, Thread, Turn, Event, Approval
 from app.db.transactions import begin_write
 from app.services import thread_store
 from app.team import fence, policy, service as teams
@@ -293,12 +293,11 @@ class Rooms:
         # Only claim one item. The next scheduler tick continues the room.
         async with self.rt.session() as db:
             await begin_write(db)
+            await teams.team_for(db, self.rt.owner_id, lock=True)
             room = await self.get(db, room_id, lock=True)
             if await db.scalar(select(RoomDispatch.id).where(RoomDispatch.room_id == room_id, RoomDispatch.status == 'running').limit(1)):
                 return
-            active = await db.scalar(select(func.count()).select_from(RoomDispatch).where(RoomDispatch.status == 'running'))
-            active += await db.scalar(select(func.count()).select_from(AgentJob).where(AgentJob.status.in_(('running', 'needs_input'))))
-            if active >= settings.TEAM_MAX_PARALLEL:
+            if await self.rt.team_jobs.active_workers(db) >= settings.TEAM_MAX_PARALLEL:
                 return
             row = await db.scalar(select(RoomDispatch).where(RoomDispatch.room_id == room_id, RoomDispatch.status == 'queued').order_by(RoomDispatch.id).limit(1))
             if row is None:

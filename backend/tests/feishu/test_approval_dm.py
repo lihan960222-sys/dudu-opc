@@ -7,7 +7,7 @@ import pytest
 from app.feishu import approvals
 from app.feishu.routing import journal
 from app.services import thread_store as store
-from tests.services.thread_harness import sessions, owner
+from tests.services.thread_harness import cleanup_jobs, sessions, owner
 
 
 def test_native_owner_decision_summarises_exact_operation_and_job(tmp_path):
@@ -79,7 +79,7 @@ async def test_decision_requires_exact_live_lease(sessions, owner, tmp_path):
         assert not await store.decide_approval(db,aid,"denied",**args)
 
 @pytest.mark.asyncio
-async def test_active_delegated_approval_reaches_steward_once(sessions, owner, tmp_path, monkeypatch):
+async def test_active_delegated_approval_reaches_steward_once(sessions, owner, cleanup_jobs, tmp_path, monkeypatch):
     from app.db import session
     from app.db.models import AgentJob
     from app.services import agent_store

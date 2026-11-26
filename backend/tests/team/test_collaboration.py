@@ -227,6 +227,40 @@ async def test_room_saved_message_queue_then_sequential_reply(harness, sessions)
             assert (await db.get(Thread, m.member_thread_id)).kind == 'room_member'
 
 
+async def test_room_capacity_is_independent_for_each_owner(harness, sessions, owner, monkeypatch):
+    from sqlalchemy import delete
+    from app.core.config import settings
+
+    rt, engine, lead, _ = harness
+    monkeypatch.setattr(settings, 'TEAM_MAX_PARALLEL', 1)
+    room = await rt.rooms.create({'name': 'Capacity', 'member_ids': [lead.id]})
+    foreign = owner + '-other'
+    async with sessions() as db:
+        outside = await agent_store.create_agent(db, owner_id=foreign, name='Other employee')
+        occupied = AgentJob(owner_id=foreign, requester_agent_id=outside.id, requester_thread_id=1,
+                            requester_turn_id=1, assignee_agent_id=outside.id,
+                            brief='Other work', brief_hash='sample', status='running')
+        db.add(occupied)
+        await db.commit()
+        occupied_id = occupied.id
+    try:
+        await rt.rooms.post(room['id'], 'A request for this room')
+        await rt.rooms.work(room['id'])
+        assert len(engine.contexts) == 1
+        async with sessions() as db:
+            job = await db.get(AgentJob, occupied_id)
+            job.owner_id = owner
+            job.requester_agent_id = lead.id
+            job.assignee_agent_id = lead.id
+            await db.commit()
+        await rt.rooms.post(room['id'], 'A second request')
+        await rt.rooms.work(room['id'])
+        assert len(engine.contexts) == 1
+    finally:
+        async with sessions() as db:
+            await db.execute(delete(AgentJob).where(AgentJob.id == occupied_id))
+            await db.execute(delete(Agent).where(Agent.id == outside.id))
+            await db.commit()
 async def test_room_hold_pass_and_stop_queued(harness, sessions):
     rt, engine, lead, worker = harness
     room = await rt.rooms.create({'name':'Quiet', 'member_ids':[lead.id,worker.id], 'default_responder_kind':'everyone'})

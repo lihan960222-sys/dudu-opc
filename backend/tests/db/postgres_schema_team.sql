@@ -8,6 +8,7 @@ CREATE TABLE agent_job (
 	origin_ref VARCHAR, 
 	origin_quote TEXT, 
 	task_id BIGINT,
+	assignment_epoch INTEGER DEFAULT '1' NOT NULL,
 	project VARCHAR,
 	requester_agent_id BIGINT NOT NULL, 
 	requester_thread_id BIGINT NOT NULL, 

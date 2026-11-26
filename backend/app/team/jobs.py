@@ -299,6 +299,20 @@ class Jobs:
             self._stop_active_turn(turn_id)
         return job
 
+    async def active_workers(self, db):
+        """Count this owner's running room replies and occupied delegation slots."""
+        from app.db.models import Room, RoomDispatch
+        child = aliased(AgentJob)
+        # A parent waiting for a child or for its question does not occupy a slot.
+        live_jobs = await db.scalar(select(func.count()).select_from(AgentJob).where(
+            AgentJob.owner_id == self.rt.owner_id,
+            or_(AgentJob.status == 'running', (AgentJob.status == 'needs_input') & AgentJob.question.is_(None)),
+            ~exists(select(child.id).where(child.parent_id == AgentJob.id, child.status.in_(LIVE)))))
+        room_replies = await db.scalar(select(func.count()).select_from(RoomDispatch).join(
+            Room, Room.id == RoomDispatch.room_id).where(Room.owner_id == self.rt.owner_id,
+                                                        RoomDispatch.status == 'running'))
+        return live_jobs + room_replies
+
     async def admit(self, job_id, run):
         async with self.rt.session() as db:
             await begin_write(db)
@@ -315,15 +329,7 @@ class Jobs:
                     AgentJob.status.in_(("running","needs_input","waiting","resume","dispatched"))).limit(1))
                 if concurrent or await feature_tasks.predecessor_running(db, job.task_id, job.assignment_epoch):
                     return "queued"
-            # Waiting ancestors do not take a worker slot: otherwise nested
-            # synchronous calls could exhaust all slots before a leaf starts.
-            child = aliased(AgentJob)
-            live_jobs = await db.scalar(select(func.count()).select_from(AgentJob).where(
-                AgentJob.owner_id == self.rt.owner_id, or_(AgentJob.status == 'running', (AgentJob.status == 'needs_input') & AgentJob.question.is_(None)),
-                ~exists(select(child.id).where(child.parent_id == AgentJob.id, child.status.in_(LIVE)))))
-            from app.db.models import RoomDispatch, Room
-            room_active = await db.scalar(select(func.count()).select_from(RoomDispatch).join(Room, Room.id == RoomDispatch.room_id).where(Room.owner_id == self.rt.owner_id, RoomDispatch.status == 'running'))
-            if live_jobs + room_active >= settings.TEAM_MAX_PARALLEL:
+            if await self.active_workers(db) >= settings.TEAM_MAX_PARALLEL:
                 return 'queued'
             root = await db.get(AgentJob, job.root_id or job.id)
             if root.budget_executions <= 0:

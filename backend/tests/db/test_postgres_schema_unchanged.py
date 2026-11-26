@@ -24,7 +24,8 @@ AGENT_TABLES = {"agent"}
 AGENT_REVISION_TABLES = {"agent_revision"}
 COMPUTER_TABLES = {"computer"}
 AUTH_TABLES = {"auth_owner", "auth_session", "auth_pairing_code"}
-STEWARDSHIP_TABLES = {"feature_message", "feature_scope", "feature_session", "steward_direct_turn", "steward_suggestion", "feishu_lead_chat"}
+STEWARDSHIP_TABLES = {"feature_message", "feature_scope", "feature_session", "steward_direct_turn", "steward_suggestion",
+                     "feishu_lead_chat", "knowledge_weekly_grant", "knowledge_weekly_slot"}
 MUAPI_TABLES = {"muapi_tool_grant"}
 TEAM_TABLES = {"team", "team_event", "agent_job", "agent_job_event", "agent_job_inbox", "team_setup_request"}
 ROOM_TABLES = {"room", "room_member", "room_dispatch", "room_webhook_receipt"}

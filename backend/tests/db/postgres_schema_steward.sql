@@ -8,6 +8,32 @@ CREATE TABLE feature_message (
 	PRIMARY KEY (owner_id, event_key)
 );
 
+CREATE TABLE knowledge_weekly_grant (
+	owner_id VARCHAR NOT NULL,
+	employee_id BIGINT NOT NULL,
+	source_job_id BIGINT NOT NULL,
+	task_id BIGINT NOT NULL,
+	assignment_epoch INTEGER NOT NULL,
+	scope JSON NOT NULL,
+	enabled BOOLEAN NOT NULL,
+	generation VARCHAR(32) NOT NULL,
+	next_due TIMESTAMP WITH TIME ZONE NOT NULL,
+	blocked_reason VARCHAR(300),
+	PRIMARY KEY (owner_id, employee_id)
+);
+
+CREATE TABLE knowledge_weekly_slot (
+	event_key VARCHAR(90) NOT NULL,
+	owner_id VARCHAR NOT NULL,
+	employee_id BIGINT NOT NULL,
+	job_id BIGINT NOT NULL,
+	scope_digest VARCHAR(64) NOT NULL,
+	cutoff BIGINT NOT NULL,
+	since BIGINT,
+	PRIMARY KEY (event_key),
+	UNIQUE (job_id)
+);
+
 CREATE TABLE steward_direct_turn (
 	owner_id VARCHAR NOT NULL,
 	event_key VARCHAR NOT NULL,
@@ -31,6 +57,7 @@ CREATE TABLE feishu_lead_chat (
 
 CREATE TABLE feature_scope (
 	task_id BIGINT NOT NULL,
+	assignment_epoch INTEGER DEFAULT '1' NOT NULL,
 	project VARCHAR NOT NULL,
 	version VARCHAR NOT NULL,
 	acceptance TEXT NOT NULL,
@@ -47,6 +74,7 @@ CREATE TABLE feature_scope (
 CREATE TABLE feature_session (
 	thread_id BIGINT NOT NULL,
 	task_id BIGINT NOT NULL,
+	assignment_epoch INTEGER DEFAULT '1' NOT NULL,
 	previous_id BIGINT,
 	PRIMARY KEY (thread_id),
 	FOREIGN KEY(thread_id) REFERENCES thread (id),

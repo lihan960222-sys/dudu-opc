@@ -8,11 +8,11 @@ from app.db.models import AgentJob, AgentJobEvent, AgentJobInbox
 from app.services import agent_store, feature_tasks, thread_store
 from app.team import service, steward_review
 from app.team.jobs import Jobs
-from tests.services.thread_harness import owner, sessions
+from tests.services.thread_harness import cleanup_jobs, owner, sessions
 
 
 @pytest.mark.asyncio
-async def test_owner_decision_resumes_same_worker_via_lead(sessions, owner, tmp_path):
+async def test_owner_decision_resumes_same_worker_via_lead(sessions, owner, cleanup_jobs, tmp_path):
     import asyncio
     from app.services.thread_runtime import ThreadRuntime
     async with sessions() as db:
@@ -63,7 +63,7 @@ async def test_nested_writes_need_a_current_owner_grant(sessions, owner):
 
 @pytest.mark.parametrize("decision", ["allow", "deny", "escalate"])
 @pytest.mark.asyncio
-async def test_exact_write_is_reviewed_by_assigning_steward(sessions, owner, tmp_path, monkeypatch, decision):
+async def test_exact_write_is_reviewed_by_assigning_steward(sessions, owner, cleanup_jobs, tmp_path, monkeypatch, decision):
     monkeypatch.setattr(settings,"STEWARD_STRICT_OWNER",owner)
     async with sessions() as db:
         lead = await agent_store.create_agent(db, owner_id=owner, name="Lead", provider="codex", make_lead=True)
