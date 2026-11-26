@@ -119,6 +119,26 @@ async def test_one_use_approval_exact_arguments_and_turn_ownership(harness, sess
     assert sorted(results) == [False, True]
 
 
+async def test_project_command_requires_delivered_decision_and_exact_argv(harness, sessions):
+    rt, _, lead, _ = harness
+    thread = await rt.create_thread(agent_id=lead.id)
+    tool = 'mcp__team__run_project_command'
+    args = {'argv':['test.exe','one'], 'cwd':'.'}
+    async with sessions() as db:
+        turn = await thread_store.start_turn(db, thread.id, 'synthetic', owner_instance='test')
+        token, turn_id = turn.owner_token, turn.id
+        approval = await thread_store.create_approval(db, thread_id=thread.id, turn_id=turn_id,
+            request_id='command', tool=tool, input=args, summary='one command', kind='command', owner_token=token)
+        approval_id = approval.id
+        await thread_store.decide_approval(db, approval_id, 'allowed')
+        assert not await consume_allowed_approval(db, turn_id, token, tool, args)
+        assert await thread_store.mark_allow_delivered(db, approval_id, token)
+        assert not await consume_allowed_approval(db, turn_id, token, tool, {**args,'argv':['test.exe','two']})
+        assert not await consume_allowed_approval(db, turn_id, token, tool, {**args,'cwd':'other'})
+        assert await consume_allowed_approval(db, turn_id, token, tool, args)
+        assert not await consume_allowed_approval(db, turn_id, token, tool, args)
+
+
 async def test_forged_mailbox_without_approval_cannot_create(harness, sessions):
     rt, engine, lead, worker = harness
     thread = await rt.create_thread(agent_id=lead.id)

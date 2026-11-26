@@ -11,6 +11,8 @@ import sys
 import time
 from uuid import uuid4
 
+MAILBOX_TIMEOUT_SECONDS = 330
+
 
 def schema(properties, required=()):
     return {'type': 'object', 'properties': properties, 'required': list(required), 'additionalProperties': False}
@@ -111,12 +113,16 @@ FEISHU_TOOLS = [
 ]
 
 
+PROJECT_COMMAND = {'name':'run_project_command',
+    'description':'Run exactly this argv in the employee project after one-operation review. cwd is relative to its project root. Returns the real exit code, stdout and stderr. For Windows shell built-ins or pipelines invoke cmd.exe /d /c explicitly.',
+    'inputSchema':schema({'argv':{'type':'array','minItems':1,'maxItems':128,'items':string(8192)},'cwd':string(400)},('argv',))}
+
 OPTIONAL = {'raise_escalation'}
 
 
 class Server:
     def __init__(self, mailbox, escalations=False, project_consult=False, feishu_tools=(), employee_only=False,
-                 feishu_only=False):
+                 feishu_only=False, project_command=False):
         self.mailbox = Path(mailbox)
         if feishu_only:
             self.tools = [tool for tool in FEISHU_TOOLS if tool["name"] in feishu_tools]
@@ -139,6 +145,8 @@ class Server:
             self.tools = []
         if project_consult or employee_only:
             self.tools.extend(t for t in TOOLS if t["name"] in ("employee_capabilities","enable_local_skill"))
+            if project_command:
+                self.tools.append(PROJECT_COMMAND)
         self.tools.extend(t for t in FEISHU_TOOLS if t["name"] in feishu_tools)
 
     def call(self, name, arguments):
@@ -150,7 +158,7 @@ class Server:
         temporary.write_text(json.dumps({'name': name, 'arguments': arguments}), encoding='utf-8')
         os.replace(temporary, path)
         response = self.mailbox / f'resp-{token}.json'
-        deadline = time.monotonic() + 330
+        deadline = time.monotonic() + MAILBOX_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             if response.exists():
                 result = json.loads(response.read_text(encoding='utf-8'))
@@ -188,10 +196,11 @@ def main():
     parser.add_argument('--project-consult', action='store_true')
     parser.add_argument('--employee-only', action='store_true')
     parser.add_argument('--feishu-only', action='store_true')
+    parser.add_argument('--project-command', action='store_true')
     parser.add_argument('--employee-tool', action='append', choices=[t['name'] for t in FEISHU_TOOLS], default=[])
     arguments = parser.parse_args()
     server = Server(arguments.mailbox, arguments.escalations, arguments.project_consult, arguments.employee_tool,
-                    arguments.employee_only, arguments.feishu_only)
+                    arguments.employee_only, arguments.feishu_only, arguments.project_command)
     for line in sys.stdin:
         try:
             if len(line) > 100000:
