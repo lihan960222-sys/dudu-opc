@@ -103,6 +103,10 @@ class TeamBridge:
                 args=canonical_call(self.run.recovery_call,"mcp__team__"+name,args)
                 if args is None:
                     raise service.TeamError("recovery_scope","仅可续办原工单指定的派工。")
+            if followup := getattr(self.run,"recovery_followup",None):
+                from app.feishu.dispatch_recovery import permits_followup
+                if not permits_followup(followup,"mcp__team__"+name,args):
+                    raise service.TeamError("recovery_scope","只可处理原工单当前的问题或审批。")
             async with self.runtime.session() as db:
                 allowed = await consume_allowed_approval(db, self.run.turn_id, self.run.owner_token, 'mcp__team__' + name, args)
             if not allowed:

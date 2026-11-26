@@ -215,6 +215,7 @@ class ActiveRun:
     prompt_text: str = ""
     recovery_call: dict | None = None
     recovery_requested: bool = False
+    recovery_followup: dict | None = None
     capturable: bool = False
     # The agent's notes are on: the finished turn leaves a line in its daily log.
     log_memory: bool = False
@@ -406,7 +407,7 @@ class ThreadApprovalGate:
                 if status == "denied":
                     self._policy_denials[approval.id] = source
                 future.set_result(status)
-                if run.recovery_call is not None and status=="denied":
+                if (run.recovery_call is not None or run.recovery_followup is not None) and status=="denied":
                     run.ctx.abort()
                 self._log("auto_allowed" if status == "allowed" else "denied", approval.id, source=source)
             runtime.hub.notify(run.thread_id)
@@ -756,6 +757,7 @@ class ThreadRuntime:
         feature_event_key: str | None = None,
         feature_resume_job: int | None = None,
         recovery_job: int | None = None,
+        recovery_followup: tuple[int, list[int]] | None = None,
         direct_event_key: str | None = None,
         assignment_source: dict | None = None,
         skills: list[str] | None = None,
@@ -806,6 +808,17 @@ class ThreadRuntime:
                 root=await db.get(AgentJob,recovery_job)
                 dispatch_recovery.require(dispatch_recovery.is_recovery(root) and root.owner_id==self.owner_id and root.assignee_thread_id==thread.id)
                 recovery=await dispatch_recovery.checked_wake(db,root)
+        followup = None
+        if recovery_followup is not None:
+            from app.feishu import dispatch_recovery
+            from app.db.models import AgentJob
+            dispatch_recovery.require(internal and recovery is None and thread.kind=="chat" and not
+                (direct_event_key or feature_event_key or skills or attachment_ids))
+            async with self.session() as db:
+                root=await db.get(AgentJob,recovery_followup[0])
+                dispatch_recovery.require(dispatch_recovery.is_recovery(root) and root.owner_id==self.owner_id and root.assignee_thread_id==thread.id)
+                followup=await dispatch_recovery.followup_scope(db,root,recovery_followup[1],require_pending=True)
+                owner_request=await dispatch_recovery.followup_owner_request(db,root,thread)
         if direct_event_key is not None:
             from app.services import feature_tasks
             async with self.session() as db:
@@ -1013,10 +1026,11 @@ class ThreadRuntime:
                     thread_id,
                     prompt_text,
                     owner_instance=self.instance_id,
-                    feature_event_key=feature_event_key, feature_resume_job=feature_resume_job, recovery_job=recovery_job,
+                    feature_event_key=feature_event_key, feature_resume_job=feature_resume_job,
+                    recovery_job=recovery_job, recovery_followup=recovery_followup,
                     direct_event_key=direct_event_key, direct_attachment_ids=attachment_ids, direct_skills=skills,
                     assignment_source=assignment_source, attachments=submitted_attachments or None,
-                    origin="harness" if recovery_job is not None else team_origin, internal=internal,
+                    origin="harness" if recovery_job is not None or followup is not None else team_origin, internal=internal,
                     person_id=person_id,
                     person_label=person_label,
                 )
@@ -1302,6 +1316,14 @@ class ThreadRuntime:
         if thread.job_id is not None and not internal:
             await self.team_jobs.on_person_message(thread, turn, prompt_text)
         run.routine_run_id = routine_run_id
+        if followup:
+            run.recovery_followup = followup
+            instruction = ("这是对同一员工派工的后续处理。能从原来信确定答案时，请用 answer_job_question 回复员工。"
+                "需要老板决定的事，请保留员工原问题。对待审的写入，只用 review_employee_write 处理此回合列出的申请。"
+                "超出当前授权时交给老板决定。老板的原来信如下。\n"+json.dumps({"original_request":owner_request},ensure_ascii=False))
+            ctx.prompt += "\n"+instruction
+            ctx.codex_prompt.user_text += "\n"+instruction
+            run.log_memory = run.capturable = False
         if recovery:
             private_prompt = ("系统续办先前被拒的派工。请调用一次 delegate，给出下方的唯一员工和工单，"
                 "其余必填字段简述原意即可。服务会取回已批准的原派工内容并按当前权限办理。\n" +

@@ -661,6 +661,11 @@ class Jobs:
                     project=row.project, text=answer.strip(), result={'task_id':row.task_id, 'job_id':row.id}))
             row.status, row.answer, row.question = 'queued', answer.strip(), None
             row.assignee_turn_id = None
+            if row.parent_id:
+                from app.feishu.dispatch_recovery import is_recovery
+                holder=await db.get(AgentJob,row.parent_id,with_for_update=True)
+                if is_recovery(holder) and holder.status=="needs_input":
+                    holder.status,holder.question="waiting",None
             event(db, row, 'clarified', {'question_turn_id':expected, 'lead_turn_id':run.turn_id})
             await db.commit()
         self.kick()
@@ -779,6 +784,16 @@ class Jobs:
             if await self._outstanding(db, row):
                 # Handed work on: wait for it, even when this turn failed.
                 row.status = 'waiting'
+                from app.feishu import dispatch_recovery
+                if dispatch_recovery.is_recovery(row):
+                    try:
+                        question=await dispatch_recovery.parked_question(db,row,turn)
+                    except dispatch_recovery.RecoveryDenied as exc:
+                        await db.rollback()
+                        await self.settle(job_id,"failed","refused",detail=str(exc))
+                        return
+                    if question:
+                        row.status,row.question,row.current_turn_id="needs_input",question,None
                 if turn.status != 'succeeded':
                     row.restart = 'cut'
                 event(db, row, 'waiting', {'turn_status': turn.status})
@@ -1059,6 +1074,7 @@ class Jobs:
         claimed = None
         from app.feishu import dispatch_recovery
         recovery_job = None
+        recovery_followup = None
         async with self.rt.session() as db:
             await begin_write(db)
             row = await db.get(AgentJob, job_id, with_for_update=True)
@@ -1080,15 +1096,25 @@ class Jobs:
                 # The employee's receipt is the report. No second model turn may alter its result.
                 active=await db.scalar(select(AgentJob.id).where(AgentJob.parent_id==row.id,AgentJob.status.in_(LIVE)).limit(1))
                 if active:
-                    for item in items:
-                        item.delivered_at=service.now()
-                    row.status,row.current_turn_id="needs_input",None
-                    row.question="经办员工有待确认事项，请在工作台打开原工单查看。"
-                    await db.commit()
+                    ids=[item.id for item in items]
+                    try:
+                        scope=await dispatch_recovery.followup_scope(db,row,ids)
+                    except dispatch_recovery.RecoveryDenied as exc:
+                        await db.rollback()
+                        await self.settle(job_id,"failed","refused",detail=str(exc))
+                        return
+                    if scope["question"] or scope["approvals"]:
+                        recovery_followup=(row.id,ids)
+                    else:
+                        for item in items:
+                            item.delivered_at=service.now()
+                        row.status,row.current_turn_id="waiting",None
+                        await db.commit()
+                        return
+                else:
+                    await db.rollback()
+                    await self.settle(job_id,"completed","done")
                     return
-                await db.rollback()
-                await self.settle(job_id,"completed","done")
-                return
             if dispatch_recovery.is_recovery(row) and not items:
                 try:
                     await dispatch_recovery.checked_wake(db,row)
@@ -1112,13 +1138,29 @@ class Jobs:
         thread_id, mode, origin, inbox_ids, scoped_resume = claimed
         try:
             turn = await self.rt.send_turn(thread_id, text, approval_mode=mode, team_origin=origin, internal=True,
-                feature_resume_job=scoped_resume, **({"recovery_job":recovery_job} if recovery_job is not None else {}))
-        except dispatch_recovery.RecoveryDenied as exc:
-            await self.settle(job_id,"failed","refused",detail=str(exc))
-            return
+                feature_resume_job=scoped_resume, **({"recovery_job":recovery_job} if recovery_job is not None else {}),
+                **({"recovery_followup":recovery_followup} if recovery_followup is not None else {}))
         except Exception as exc:  # noqa: BLE001
+            if recovery_followup is not None:
+                # A lost/superseded review must never turn into another model wake.
+                async with self.rt.session() as db:
+                    await begin_write(db)
+                    holder=await db.get(AgentJob,job_id,with_for_update=True)
+                    if holder.status=="running" and holder.current_turn_id is None:
+                        try:
+                            question=await dispatch_recovery.parked_question(db,holder)
+                        except dispatch_recovery.RecoveryDenied as denied:
+                            await db.rollback()
+                            await self.settle(job_id,"failed","refused",detail=str(denied))
+                            return
+                        holder.status="needs_input" if question else "waiting"
+                        holder.question=question
+                        event(db,holder,"followup_unavailable",{"owner_question":bool(question)})
+                        await db.commit()
+                return
             if recovery_job is not None:
-                await self.settle(job_id,"failed","refused",detail="本次系统续办未能启动。请查看管家会话。")
+                detail=str(exc) if isinstance(exc,dispatch_recovery.RecoveryDenied) else "老板，我没能启动这次续办。"
+                await self.settle(job_id,"failed","refused",detail=detail)
                 return
             # Not now (the thread is busy, the engine is down): try next pass.
             logger.warning('resume could not start', job_id=job_id, error=exc.__class__.__name__)
@@ -1135,6 +1177,9 @@ class Jobs:
         async with self.rt.session() as db:
             await begin_write(db)
             row = await db.get(AgentJob, job_id, with_for_update=True)
+            if (recovery_job or recovery_followup) and (row.status!="running" or row.current_turn_id!=turn.id):
+                # The runtime already bound this turn atomically and may have finished it.
+                return
             row.current_turn_id = row.assignee_turn_id = turn.id
             event(db, row, 'resumed', {'turn_id': turn.id})
             await db.commit()
@@ -1393,17 +1438,30 @@ class Jobs:
         """For a turn the person starts while hand-offs are out: what is
         outstanding, so the agent does not hand the same work out again."""
         async with self.rt.session() as db:
-            holder = await db.scalar(select(AgentJob).where(AgentJob.assignee_thread_id == thread_id, AgentJob.status.in_(('waiting', 'resume', 'running')),
+            from app.feishu import dispatch_recovery
+            holder = await db.scalar(select(AgentJob).where(AgentJob.assignee_thread_id == thread_id,
+                or_(AgentJob.status.in_(('waiting', 'resume', 'running')),
+                    (AgentJob.kind=="root") & (AgentJob.origin_ref==dispatch_recovery.MARK) & (AgentJob.status=="needs_input")),
                                                             or_(AgentJob.kind == 'root', AgentJob.reply != 'wait')).order_by(AgentJob.id.desc()).limit(1))
             if holder is None:
                 return ''
             kids = list((await db.execute(select(AgentJob).where(AgentJob.parent_id == holder.id, AgentJob.reply == 'resume', AgentJob.status.in_(LIVE)))).scalars())
             if not kids:
                 return ''
+            if dispatch_recovery.is_recovery(holder):
+                try:
+                    await dispatch_recovery.checked_child(db,holder,await dispatch_recovery.proof_for(db,holder))
+                except dispatch_recovery.RecoveryDenied:
+                    return ''
             names = {}
             for kid in kids:
                 agent = await db.get(Agent, kid.assignee_agent_id)
                 names[kid.id] = fence.line(agent.name) if agent else 'a teammate'
         listing = '; '.join(f'job {k.id} for {names[k.id]} ({k.status})' for k in kids)
+        if dispatch_recovery.is_recovery(holder):
+            for kid in kids:
+                if kid.status=="needs_input" and kid.question:
+                    listing += (f'\nOpen employee question for job {kid.id}, question_turn_id {kid.assignee_turn_id}: '
+                                + fence.text(kid.question,2000))
         return (f'Harness note: you already handed out work that is still outstanding: {listing}. You will be resumed with its results. '
                 'Do not assign it again.\n\n')

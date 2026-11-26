@@ -547,6 +547,7 @@ async def start_turn(
     feature_event_key: str | None = None,
     feature_resume_job: int | None = None,
     recovery_job: int | None = None,
+    recovery_followup: tuple[int, list[int]] | None = None,
     direct_event_key: str | None = None,
     assignment_source: dict | None = None,
     direct_attachment_ids: list[str] | None = None,
@@ -638,6 +639,16 @@ async def start_turn(
     if recovery_job is not None:
         from app.feishu.dispatch_recovery import bind_wake
         await bind_wake(db,recovery_job,thread,turn.id,internal=internal)
+    if recovery_followup is not None:
+        from app.db.models import AgentJob
+        from app.feishu import dispatch_recovery
+        root=await db.get(AgentJob,recovery_followup[0],with_for_update=True)
+        dispatch_recovery.require(internal and dispatch_recovery.is_recovery(root) and root.status=="running"
+            and root.current_turn_id is None and root.owner_id==thread.owner_id
+            and root.assignee_thread_id==thread.id and root.assignee_agent_id==thread.agent_id)
+        await dispatch_recovery.followup_scope(db,root,recovery_followup[1],require_pending=True)
+        root.current_turn_id=root.assignee_turn_id=turn.id
+        started["recovery_followup"]=True
     start_event = await _add_event(db, thread_id, "turn.started", started, turn.id)
     if not internal and thread.kind=="chat" and (assignment_source or "#" in prompt_text or "工单" in prompt_text or "任务" in prompt_text):
         from app.db.models import FeatureScope

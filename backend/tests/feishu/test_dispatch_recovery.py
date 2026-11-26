@@ -1,5 +1,6 @@
 """Only a recorded, rejected employee handoff may be resumed by its local operator."""
 import json
+import tempfile
 from contextlib import closing
 from types import SimpleNamespace
 
@@ -47,9 +48,39 @@ def test_selects_real_approved_call_and_rejects_unmatched_effects():
             recovery.failed_call(bad,approvals,6,7)
 
 
+def test_supervisor_followup_is_limited_to_the_current_question_or_approval():
+    bound={"job":22,"turn":33,"question":True,"approvals":["specific"]}
+    assert recovery.permits_followup(bound,"mcp__team__answer_job_question",{"job_id":22,"question_turn_id":33,"answer":"known"})
+    assert recovery.permits_followup(bound,"mcp__team__review_employee_write",{"job_id":22,"turn_id":33,"approval_id":"specific"})
+    for name,values in (("answer_job_question",{"job_id":23,"question_turn_id":33}),
+                        ("review_employee_write",{"job_id":22,"turn_id":33,"approval_id":"another"}),
+                        ("delegate",{"agent_ids":[22]}),("feishu_edit_document",{})):
+        assert not recovery.permits_followup(bound,"mcp__team__"+name,values)
+
+
 @pytest.fixture
 async def setup_case(sessions,owner,tmp_path,monkeypatch):
     from app.feishu.worker import Worker
+    from app.desktop import profile
+    private=tmp_path/"private"
+    workspace=tmp_path/"supervisor"
+    private.mkdir()
+    workspace.mkdir()
+    for name in ("home","apps","temp"):
+        (private/name).mkdir()
+    for name, path in {"HOME":private/"home", "USERPROFILE":private/"home",
+                       "LOCALAPPDATA":private/"apps", "CODEX_HOME":private/"home"/".codex",
+                       "SUPARAGENT_EMPLOYEE_RUNTIME_ROOT":private/"employee-runtime",
+                       "FEISHU_CONFIG":tmp_path/"channel.json"}.items():
+        monkeypatch.setenv(name,str(path))
+    monkeypatch.setattr(tempfile,"tempdir",str(private/"temp"))
+    monkeypatch.setattr(profile,"_current",None)
+    for name,path in {"LOCAL_WORKSPACE_ROOT":workspace,"ATTACHMENTS_DIR":private/"attachments",
+                      "DECISION_LOG_DIR":private/"decisions","ENGINE_PROCESS_DIR":private/"processes",
+                      "AUTH_LIMITS_DIR":private/"limits"}.items():
+        monkeypatch.setattr(settings,name,str(path))
+    monkeypatch.setattr(settings,"TEAM_ENABLED",True)
+    monkeypatch.setattr(settings,"TEAM_LEAD_AUTO",True)
     monkeypatch.setattr(settings,"STEWARD_STRICT_OWNER",owner)
     cfg={"owner_id":owner,"_access_config_path":str(tmp_path/"channel.json"),"state_dir":"channel","project":"default",
          "steward":{"app_id":"test-app","open_id":"test-owner","tenant_key":"tenant"},"roles":{}}
@@ -66,10 +97,10 @@ async def setup_case(sessions,owner,tmp_path,monkeypatch):
         (tmp_path/"employee"/"AGENTS.md").write_text("---\ndefault_model: synthetic\n---\n")
         cfg["steward"]["agent_id"]=lead.id
         chat=await thread_store.create_thread(db,owner_id=owner,provider="codex",model="synthetic",agent_id=lead.id,
-                                              workspace_path=str(tmp_path))
+                                              workspace_path=str(workspace))
         cfg["steward_thread"]=chat.id
         db.add(FeishuLeadChat(thread_id=chat.id,channel=recovery.signature(owner,"test-app","tenant","test-owner","default",chat.id),
-                              selection=recovery.signature("codex",lead.model),model=lead.model,project="default",isolated=False))
+                              selection=recovery.signature("codex",lead.model),model=lead.model,project="default",isolated=True))
         await db.commit()
         result=await feature_tasks.route(db,owner_id=owner,agent_id=child.id,project="other-project",event_key="prior",
             title="Synthetic card",text="Synthetic assignment",intent="independent")
@@ -111,7 +142,8 @@ async def setup_case(sessions,owner,tmp_path,monkeypatch):
     return cfg,chat.id,turn.id,task,child.id,args
 
 
-async def test_operator_registers_once_binds_separate_system_turn_and_original_reply(setup_case,sessions,monkeypatch):
+@pytest.mark.parametrize("clarify",["none","supervisor","owner","unavailable"])
+async def test_operator_registers_once_binds_separate_system_turn_and_original_reply(setup_case,sessions,monkeypatch,clarify):
     cfg,thread,old_turn,task,employee,args=setup_case
     assert (await recovery.recover(sessions,cfg,old_turn,task))=={"eligible":True,"task":task,"employee":employee}
     with recovery.channel(cfg) as journal:
@@ -137,11 +169,39 @@ async def test_operator_registers_once_binds_separate_system_turn_and_original_r
     rt=ThreadRuntime(hub=ThreadHub(),adapters={"codex":engine},_session_factory=sessions,owner_id=cfg["owner_id"])
     observed=[]
     children=[]
+    handled=[]
+    blocked=[]
     monkeypatch.setattr(rt.team_jobs,"kick",lambda:None)
     async def run(ctx,sink,gate):
         active=rt._runs[ctx.turn_id]
         if active.recovery_call is None:
-            return TurnOutcome("succeeded",result="系统已收到员工交付")
+            scope=active.recovery_followup
+            if scope:
+                assert scope["job"]==children[0] and scope["question"]
+                assert "能从原来信确定" in ctx.codex_prompt.user_text
+                assert f"续办工单 #{task}" in ctx.codex_prompt.user_text
+                assert tool_policy.automatic("mcp__team__delegate","full_access",active,args)[0]=="denied"
+                handled.append("steward")
+                if clarify=="owner":
+                    return TurnOutcome("succeeded",result="这项决定需要老板确认。")
+            else:
+                assert clarify in ("owner","unavailable") and "question_turn_id" in ctx.prompt
+                scope={"job":children[0],"turn":question_turn}
+                handled.append("owner")
+            answer={"job_id":scope["job"],"question_turn_id":scope["turn"],"answer":"合成答案"}
+            decision=await gate.open(request_id="answer",tool="mcp__team__answer_job_question",input=answer,
+                                      summary="Synthetic clarification",kind="action")
+            assert (await gate.decide(decision)).kind=="allow"
+            bridge=TeamBridge(rt,active)
+            try:
+                path=bridge.folder/"req-answer.working"
+                path.write_text(json.dumps({"name":"answer_job_question","arguments":answer}),encoding="utf-8")
+                await bridge.handle(path)
+                result=json.loads((bridge.folder/"resp-answer.json").read_text(encoding="utf-8"))
+                assert result.get("status")=="queued", result
+            finally:
+                await bridge.close()
+            return TurnOutcome("succeeded",result="已转达。")
         assert active.recovery_call==args and "Synthetic" not in recovery.PROMPT
         altered={**args,"brief":"different model wording","done_when":"different wording"}
         assert recovery.canonical_call(args,recovery.TOOL,altered)==args
@@ -186,6 +246,7 @@ async def test_operator_registers_once_binds_separate_system_turn_and_original_r
         async def first_result():
             async with sessions() as db:
                 root=await db.get(AgentJob,registered["root"])
+                assert root.status!="failed", (root.outcome,root.outcome_detail)
                 completed=await db.get(Turn,root.assignee_turn_id) if root.assignee_turn_id else None
                 return completed if completed and completed.status!="running" else None
         await wait_until(first_result)
@@ -208,21 +269,78 @@ async def test_operator_registers_once_binds_separate_system_turn_and_original_r
             owner_request=await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id==child.id,
                                                                             AgentJobEvent.kind=="owner_request"))
             assert (owner_request["turn_id"],owner_request["thread_id"])==(old_turn,thread)
-        await rt.team_jobs.settle(children[0],"completed","done",result="Synthetic employee receipt")
-        await rt.team_jobs.promote()
-        await rt.team_jobs.dispatch_resumes()
-        async def report_finished():
+        if clarify!="none":
+            if clarify=="unavailable":
+                send_turn=rt.send_turn
+                async def unavailable(*values,**kwargs):
+                    if kwargs.get("recovery_followup"):
+                        blocked.append(1)
+                        raise RuntimeError("Synthetic provider unavailable")
+                    return await send_turn(*values,**kwargs)
+                monkeypatch.setattr(rt,"send_turn",unavailable)
+            from app.db.models import WorkItem
             async with sessions() as db:
-                return (await db.get(AgentJob,registered["root"])).status=="completed"
+                child=await db.get(AgentJob,children[0])
+                card=await db.get(WorkItem,task)
+                employee_thread=await thread_store.create_thread(db,owner_id=cfg["owner_id"],agent_id=employee,
+                    provider="codex",kind="feature",workspace_path="synthetic")
+                ask=await thread_store.start_turn(db,employee_thread.id,"员工遇到一个测试问题",internal=True)
+                await thread_store.finish_turn(db,ask.id,ask.owner_token,status="succeeded")
+                card.thread_id=child.assignee_thread_id=employee_thread.id
+                question_turn=child.assignee_turn_id=ask.id
+                child.status,child.question="needs_input","测试项用哪一列？"
+                await rt.team_jobs._deliver_to_holder(db,child,"needs_input")
+                await db.commit()
+            await rt.team_jobs.promote()
+            await rt.team_jobs.dispatch_resumes()
+            async def followup_finished():
+                async with sessions() as db:
+                    child=await db.get(AgentJob,children[0])
+                    root=await db.get(AgentJob,registered["root"])
+                    return root.status=="needs_input" if clarify in ("owner","unavailable") else child.status=="queued"
+            await wait_until(followup_finished)
+            if clarify in ("owner","unavailable"):
+                with recovery.channel(cfg,writable=True) as journal:
+                    worker=Worker(cfg,SimpleNamespace(db=journal))
+                    try:
+                        await lead_chat.publish_reports(worker)
+                        await lead_chat.publish_reports(worker)
+                        message=journal.execute("select body from outbox where id!='old-final'").fetchall()
+                        assert len(message)==1 and "测试项用哪一列？" in json.loads(message[0][0])["text"]
+                        assert json.loads(message[0][0])["reply_to"]=="test-message"
+                    finally:
+                        worker.api.close()
+                replied=await rt.send_turn(thread,"用第二列",direct_event_key="synthetic-reply",
+                    assignment_source={"reference_event_key":recovery.event_key({"app":"test-app","event":"test-event"})})
+                if replied.id in rt._runs:
+                    await rt._runs[replied.id].task
+            assert handled=={"owner":["steward","owner"],"unavailable":["owner"],"supervisor":["steward"]}[clarify]
+            assert len(blocked)==int(clarify=="unavailable")
+            async with sessions() as db:
+                answered=await db.get(AgentJob,children[0])
+                assert answered.status=="queued" and answered.answer=="合成答案"
+        await rt.team_jobs.settle(children[0],"completed","done",result="Synthetic employee receipt")
+        async def report_finished():
+            # A result may arrive while the supervisor is still finishing its answer.
+            # The installed background worker continues ticking even after that race.
+            await background.tick()
+            async with sessions() as db:
+                holder=await db.get(AgentJob,registered["root"])
+                assert holder.status!="failed", (holder.outcome,holder.outcome_detail)
+                return holder.status=="completed"
         await wait_until(report_finished)
-        assert len([ctx for ctx in engine.contexts if ctx.thread_id==thread])==1
+        assert len([ctx for ctx in engine.contexts if ctx.thread_id==thread])==1+len(handled)
         with recovery.channel(cfg,writable=True) as journal:
             worker=Worker(cfg,SimpleNamespace(db=journal))
             try:
+                worker.cfg={**cfg,"steward":{**cfg["steward"],"open_id":"unrelated-owner"}}
+                await lead_chat.publish_reports(worker)
+                assert not journal.execute("select finished from direct_team_reports where job=?",(registered["root"],)).fetchone()[0]
+                worker.cfg=cfg
                 await lead_chat.publish_reports(worker)
                 await lead_chat.publish_reports(worker)
                 deliveries=journal.execute("select json_extract(body,'$.reply_to') from outbox where id!='old-final'").fetchall()
-                assert [r[0] for r in deliveries]==["test-message"]
+                assert [r[0] for r in deliveries]==["test-message"]*(2 if clarify in ("owner","unavailable") else 1)
             finally:
                 worker.api.close()
     finally:
@@ -257,6 +375,94 @@ async def test_rejects_stale_or_untrusted_before_registering(setup_case,sessions
         await recovery.recover(sessions,cfg,turn,task,apply=True)
     with recovery.channel(cfg) as journal:
         assert journal.execute("select count(*) from direct_team_reports").fetchone()[0]==0
+
+
+@pytest.mark.parametrize("choice",["allow","escalate","private_parameters"])
+async def test_current_employee_write_can_be_reviewed_or_sent_to_original_dm(setup_case,sessions,monkeypatch,choice):
+    from pathlib import Path
+    import httpx
+    from app.db import session
+    from app.db.models import Agent, AgentJobEvent, AgentJobInbox
+    from app.feishu import approvals
+    from app.team import steward_review
+    cfg,thread,old_turn,task,employee,_=setup_case
+    owner=cfg["owner_id"]
+    lead=cfg["steward"]["agent_id"]
+    queued=await recovery.recover(sessions,cfg,old_turn,task,apply=True)
+    async with sessions() as db:
+        root=await db.get(AgentJob,queued["root"])
+        worker=await db.get(Agent,employee)
+        worker.approval_mode="accept_edits"
+        role_path=Path(worker.role_path)/"任务"/str(task)
+        role_path.mkdir(parents=True)
+        employee_thread,_=await feature_tasks.session_for(db,owner,task,model="synthetic",workspace_path=str(role_path))
+        employee_thread.provider_state={"employee_project":{"employee":employee}}
+        et=await thread_store.start_turn(db,employee_thread.id,"合成写入",internal=True)
+        st=await thread_store.start_turn(db,thread,recovery.PROMPT,internal=True)
+        child=AgentJob(owner_id=owner,kind="job",mode="work",reply="resume",origin_kind="person",
+            root_id=root.id,parent_id=root.id,requester_thread_id=thread,requester_agent_id=lead,requester_turn_id=old_turn,
+            assignee_agent_id=employee,assignee_thread_id=employee_thread.id,assignee_turn_id=et.id,current_turn_id=et.id,
+            task_id=task,project="other-project",assignment_epoch=1,brief="test",brief_hash="hash",status="running",
+            approval_mode="ask")
+        db.add(child)
+        await db.flush()
+        source_key=recovery.event_key({"app":"test-app","event":"test-event"})
+        db.add(AgentJobEvent(job_id=child.id,kind="owner_request",detail={"turn_id":old_turn,"thread_id":thread,"event_key":source_key}))
+        hidden=choice=="private_parameters"
+        ap=await thread_store.create_approval(db,thread_id=et.thread_id,turn_id=et.id,request_id="write",
+            tool="mcp__community__lookup" if hidden else "feature_files.write_text",
+            input={"token":"synthetic-hidden-value"} if hidden else {"path":"results.txt","text":"sample"},
+            owner_token=et.owner_token)
+        review=AgentJobInbox(owner_id=owner,holder_id=root.id,job_id=child.id,kind="review:"+ap.id)
+        db.add(review)
+        await db.commit()
+        scope=await recovery.followup_scope(db,root,[review.id])
+        details=await steward_review.preview(db,owner,child,ap)
+        assert scope=={"job":child.id,"turn":et.id,"question":False,"approvals":[] if hidden else [ap.id]}
+        if not hidden:
+            assert details and recovery.permits_followup(scope,"mcp__team__review_employee_write",details)
+            assert not recovery.permits_followup(scope,"mcp__team__review_employee_write",{**details,"turn_id":old_turn})
+    monkeypatch.setattr(session,"AsyncSessionLocal",sessions)
+    employee_run=SimpleNamespace(turn_id=et.id,owner_token=et.owner_token,stop_requested=False,
+        ctx=SimpleNamespace(feature_workspace=str(role_path),approval_mode="ask",aborted=False))
+    rt=SimpleNamespace(session=sessions,owner_id=owner,_runs={et.id:employee_run},_waiters={},hub=SimpleNamespace(notify=lambda _:None))
+    run=SimpleNamespace(thread_id=thread,turn_id=st.id,agent_id=lead,owner_token=st.owner_token,ctx=SimpleNamespace(approval_mode="ask"))
+    posted=[]
+    def record(request):
+        posted.append(json.loads(request.content))
+        return httpx.Response(200,json={"ok":True})
+    with recovery.channel(cfg,writable=True) as journal, httpx.Client(transport=httpx.MockTransport(record),
+            base_url="http://localhost") as mock:
+        gateway=SimpleNamespace(db=journal,cfg=cfg,api=mock,respond=lambda *args:None)
+        await approvals.collect_team_requests(gateway)
+        if not hidden:
+            assert journal.execute("select count(*) from approval_dm").fetchone()[0]==0
+            actual=await steward_review.decide(rt,run,{**details,"decision":choice,"reason":"Synthetic owner choice"})
+            assert actual["status"]==("allowed" if choice=="allow" else "pending_owner")
+        await approvals.collect_team_requests(gateway)
+        await approvals.collect_team_requests(gateway)
+        rows=journal.execute("select a.*,o.body from approval_dm a join outbox o on o.id=a.outgoing").fetchall()
+        if choice=="allow":
+            assert not rows
+        else:
+            assert len(rows)==1
+            first=rows[0]
+            body=json.loads(first["body"])
+            assert body["reply_to"]=="test-message" and "拒绝" in body["text"]
+            if hidden:
+                assert first["state"]=="deny_only" and "synthetic-hidden-value" not in body["text"]
+            else:
+                assert "results.txt" in body["text"] and "确认" in body["text"]
+            assert first["assignment_epoch"]==1 and first["agent_id"]==employee
+            with journal:
+                journal.execute("update outbox set state='sent',remote='approval-message' where id=?",(first["outgoing"],))
+            incoming={"app":"test-app","event":"test-decision"}
+            reply={"chat_type":"p2p","message_type":"text","parent_id":"approval-message"}
+            if hidden:
+                assert approvals.answer(gateway,incoming,reply,"确认") and not posted
+            assert approvals.answer(gateway,incoming,reply,"拒绝")
+            assert posted==[{"decision":"deny","remember":False,"expected_turn_id":et.id,"expected_assignment_epoch":1,
+                             "expected_employee_id":employee}]
 
 
 @pytest.mark.parametrize("child_state",["no_child","failed","completed_without_receipt","superseded","confirmed"])

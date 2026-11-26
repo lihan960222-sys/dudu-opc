@@ -72,7 +72,10 @@ def queue_notice(db, execution, task, approval, label):
             return
         epoch, agent_id = execution.get("assignment_epoch"), execution.get("agent_id")
         detail = describe(approval, native=epoch is not None and agent_id is not None)
-        if detail is None:
+        deny_only = detail is None and execution.get("recovery_reply")
+        if deny_only:
+            body = f"老板，{label} 有一项操作的完整参数不适合发到飞书。我已保留原申请。您可以引用这条消息回复「拒绝」，让员工停止这项操作。"
+        elif detail is None:
             body = f"老板，{label} 有一项操作需要您决定。完整请求在管理网页的团队派工记录里，您可以在那里核对和处理。"
         else:
             body = f"老板，{label} 有一项操作需要您的许可。\n{detail}\n您可以引用这条私聊，回复「确认」或「拒绝」。"
@@ -82,7 +85,7 @@ def queue_notice(db, execution, task, approval, label):
         outgoing = enqueue(db, task, "steward", notice)
         db.execute("insert into approval_dm(approval,dispatch,thread,turn,outgoing,agent_id,assignment_epoch,state) values(?,?,?,?,?,?,?,?)",
                    (approval["id"], execution["event"], execution["thread"], execution["turn"], outgoing, agent_id, epoch,
-                    "pending" if detail is not None else "local"))
+                    "pending" if detail is not None else "deny_only" if deny_only else "local"))
 
 
 async def collect_team_requests(worker):
@@ -127,7 +130,13 @@ async def collect_team_requests(worker):
                 execution.update(assignment_epoch=job.assignment_epoch, agent_id=agent.id)
             if worker.db.execute("select 1 from sqlite_master where name='direct_turns'").fetchone():
                 original = await db.get(AgentJob, job.root_id) if job.root_id else job
-                if original and original.owner_id == owner and original.requester_agent_id == lead:
+                from app.feishu import dispatch_recovery
+                if dispatch_recovery.is_recovery(original):
+                    target=dispatch_recovery.original_reply(worker.db,worker.cfg,original)
+                    if not target:
+                        continue
+                    execution.update(source_message=target,recovery_reply=True)
+                elif original and original.owner_id == owner and original.requester_agent_id == lead:
                     origin = worker.db.execute("""select i.message from inbox i join direct_turns d using(app,event)
                         where i.app=? and d.thread=? and d.turn=?""",
                         (worker.cfg["steward"].get("app_id"), original.requester_thread_id, original.requester_turn_id)).fetchone()
@@ -148,17 +157,20 @@ def answer(worker, row, msg, text):
             worker.respond(row,"done","老板，我还没对上您要处理的申请。您方便引用原来的审批消息吗？")
         return bool(decision)
     task = binding["task"]
+    if binding["state"] == "deny_only" and (decision != "deny" or msg.get("message_type") != "text"):
+        worker.respond(row,"done","老板，这项操作的完整参数无法在飞书核对。您可以引用原审批消息回复「拒绝」，让员工停止这项操作。",task)
+        return True
     if not decision or msg.get("message_type") != "text":
         worker.respond(row,"done","老板，我还不能确定您的选择。您可以引用原审批消息，回复「确认」或「拒绝」。",task)
         return True
-    if binding["state"] != "pending":
+    if binding["state"] not in ("pending","deny_only"):
         worker.respond(row,"done","老板，我没能再处理这份申请。它可能已经处理或失效，也可能需要在本机核对。",task)
         return True
     # Reserve the specific reply before posting. A crash after this point requires
     # reconciliation, never a second decision on a guessed or newer approval.
     with db:
         won = db.execute("""update approval_dm set state='verify',decision_event=?,decision=?,actor_open_id=?
-            where approval=? and state='pending'""",(row["event"],decision,worker.cfg["steward"]["open_id"],binding["approval"])).rowcount
+            where approval=? and state=?""",(row["event"],decision,worker.cfg["steward"]["open_id"],binding["approval"],binding["state"])).rowcount
     if not won:
         worker.respond(row,"done","老板，我查到这份申请已有另一条回复在处理。",task)
         return True

@@ -152,6 +152,7 @@ async def publish_reports(worker):
     from app.db import session
     from app.core.config import settings
     from app.db.models import AgentJob, TeamSetupRequest
+    from app.feishu import dispatch_recovery
     from .routing import enqueue
     cfg=worker.cfg
     actor=cfg.get('steward',{}).get('agent_id')
@@ -191,6 +192,8 @@ async def publish_reports(worker):
             worker.db.execute('update direct_team_reports set checked=unixepoch() where job=?',(row['job'],))
             if not job or job.outcome=='reassigned' or job.requester_thread_id!=row['thread'] or job.requester_turn_id!=row['turn']:
                 worker.db.execute('update direct_team_reports set finished=1 where job=?',(row['job'],))
+                continue
+            if dispatch_recovery.is_recovery(job) and dispatch_recovery.original_reply(worker.db,cfg,job)!=row["message"]:
                 continue
             for request_id, thread_id in pending_hires.get(job.id, []):
                 if thread_id != job.requester_thread_id:

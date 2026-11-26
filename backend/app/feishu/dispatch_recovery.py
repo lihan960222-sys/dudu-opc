@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.db.models import (Agent, AgentJob, AgentJobEvent, Approval, DirectTurnReceipt, Event,
+from app.db.models import (Agent, AgentJob, AgentJobEvent, AgentJobInbox, Approval, DirectTurnReceipt, Event,
                            FeatureMessage, FeatureScope, FeishuLeadChat, Thread, Turn, WorkItem)
 from app.db.transactions import begin_write
 from app.feishu.lead_chat import signature
@@ -129,6 +129,17 @@ class Evidence:
     original: str
 
 
+async def check_lead_model(db,cfg,thread,lead):
+    from app.services import role_workspace
+    who=cfg["steward"]
+    binding=await db.get(FeishuLeadChat,thread.id)
+    require(binding and binding.channel==signature(cfg["owner_id"],who["app_id"],who["tenant_key"],who["open_id"],
+                                                   cfg.get("project",""),cfg["steward_thread"]))
+    current=role_workspace.load(Path(lead.role_path),lead.model).model if lead.role_path else lead.model
+    require(lead.provider==thread.provider and binding.selection==signature(lead.provider,current) and binding.model==current,
+            "管家的模型已更换，请从当前会话重新确认。")
+
+
 async def validate(db, cfg, turn_id, task, *, expected_epoch=None, root_id=None):
     owner, who = cfg["owner_id"], cfg["steward"]
     require(owner and settings.STEWARD_STRICT_OWNER==owner)
@@ -149,13 +160,7 @@ async def validate(db, cfg, turn_id, task, *, expected_epoch=None, root_id=None)
             and lead.provider==thread.provider)
     require(turn.finished_at and timedelta(0)<=service.now()-turn.finished_at<=timedelta(days=1),
             "原来信已过期，需要老板重新确认。")
-    binding = await db.get(FeishuLeadChat,thread.id)
-    require(binding and binding.channel==signature(owner,who["app_id"],who["tenant_key"],who["open_id"],
-                                                 cfg.get("project",""),cfg["steward_thread"]))
-    from app.services import role_workspace
-    current_model=role_workspace.load(Path(lead.role_path),lead.model).model if lead.role_path else lead.model
-    require(binding.selection==signature(lead.provider,current_model) and binding.model==current_model,
-            "管家的模型已更换，请从当前会话重新确认。")
+    await check_lead_model(db,cfg,thread,lead)
     newer = await db.scalar(select(Event.id).where(Event.thread_id==thread.id, Event.turn_id>turn_id,
         Event.type=="turn.started", Event.data["internal"].as_boolean().is_not(True)).limit(1))
     require(not newer,"同一管家会话已有新的老板来信。")
@@ -191,6 +196,18 @@ async def validate(db, cfg, turn_id, task, *, expected_epoch=None, root_id=None)
 
 def is_recovery(job):
     return bool(job and job.kind=="root" and job.origin_ref==MARK)
+
+
+def original_reply(journal, cfg, root):
+    """Find the registered reply target for the same steward, owner, tenant and original turn."""
+    who=cfg.get("steward",{})
+    if root.owner_id!=cfg.get("owner_id") or root.assignee_agent_id!=who.get("agent_id"):
+        return None
+    row=journal.execute("""select i.message from direct_team_reports r join inbox i using(app,event)
+        join direct_turns d using(app,event) join owner_dm_sources s using(app,event,message)
+        where r.job=? and i.app=? and d.thread=? and d.turn=? and s.owner=? and s.tenant=?""",
+        (root.id,who.get("app_id"),root.requester_thread_id,root.requester_turn_id,who.get("open_id"),who.get("tenant_key"))).fetchone()
+    return row[0] if row else None
 
 
 async def proof_for(db, root):
@@ -257,12 +274,88 @@ async def checked_wake(db, root):
     return info
 
 
+async def followup_owner_request(db,root,thread):
+    from app.team.feishu_assignment import configuration
+    cfg=configuration()
+    require(cfg and cfg.get("owner_id")==settings.STEWARD_STRICT_OWNER==root.owner_id==thread.owner_id
+            and thread.agent_id==root.assignee_agent_id==cfg.get("steward",{}).get("agent_id"))
+    lead=await db.get(Agent,root.assignee_agent_id)
+    team=await service.team_for(db,root.owner_id)
+    require(lead and not lead.archived_at and team and lead.id==team.lead_agent_id and lead.delegation_enabled)
+    await check_lead_model(db,cfg,thread,lead)
+    with channel(cfg) as journal:
+        row,digest,original=source(journal,cfg,root.requester_turn_id,latest=False)
+        require(original_reply(journal,cfg,root)==row["message"])
+    receipt=await db.get(DirectTurnReceipt,(root.owner_id,event_key(row)))
+    require(receipt and receipt.turn_id==root.requester_turn_id and receipt.thread_id==thread.id
+            and receipt.input_sha256==digest)
+    return original
+
+
 async def bind_wake(db, root_id, thread, turn_id, *, internal):
     root=await db.get(AgentJob,root_id,with_for_update=True)
     require(internal and is_recovery(root) and root.status=="running" and root.current_turn_id is None
             and root.owner_id==thread.owner_id and root.assignee_thread_id==thread.id and root.assignee_agent_id==thread.agent_id)
     await checked_wake(db,root)
     root.assignee_turn_id=root.current_turn_id=turn_id
+
+
+async def checked_child(db,root,proof):
+    children=list(await db.scalars(select(AgentJob).where(AgentJob.parent_id==root.id)))
+    require(len(children)==1,"管家未能为这次来信完成派工。")
+    child=children[0]
+    employee=await db.get(Agent,child.assignee_agent_id)
+    require(child.owner_id==root.owner_id and child.root_id==root.id and child.kind=="job" and child.mode=="work" and child.reply=="resume"
+            and child.origin_kind=="person" and child.requester_thread_id==root.requester_thread_id
+            and child.requester_turn_id==root.requester_turn_id and child.requester_agent_id==root.requester_agent_id
+            and child.assignee_agent_id==proof["employee"] and child.task_id==proof["task"]
+            and child.assignment_epoch==proof["epoch"] and employee and employee.owner_id==root.owner_id
+            and not employee.archived_at and await feature_tasks.assignment_current(db,child),
+            "工单或经办人已变化，未发送原派工结果。")
+    owner_source=await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id==child.id,AgentJobEvent.kind=="owner_request"))
+    require(isinstance(owner_source,dict) and owner_source.get("turn_id")==root.requester_turn_id
+            and owner_source.get("thread_id")==root.requester_thread_id and owner_source.get("event_key"))
+    receipt=await db.get(DirectTurnReceipt,(root.owner_id,owner_source["event_key"]))
+    require(receipt and (receipt.thread_id,receipt.turn_id)==(root.requester_thread_id,root.requester_turn_id))
+    return child,employee
+
+
+async def followup_scope(db, root, inbox_ids, *, require_pending=False):
+    child,_=await checked_child(db,root,await proof_for(db,root))
+    inbox=list(await db.scalars(select(AgentJobInbox).where(AgentJobInbox.id.in_(inbox_ids),
+        AgentJobInbox.owner_id==root.owner_id,AgentJobInbox.holder_id==root.id,AgentJobInbox.job_id==child.id)))
+    require(len(inbox)==len(inbox_ids) and inbox)
+    question=any(item.kind=="needs_input" for item in inbox) and child.status=="needs_input" and bool(child.question)
+    from app.team import steward_review
+    approvals=[]
+    for item in inbox:
+        if item.kind.startswith("review:"):
+            approval=await db.get(Approval,item.kind.partition(":")[2])
+            if await steward_review.preview(db,root.owner_id,child,approval):
+                approvals.append(approval.id)
+    if require_pending:
+        require(question or approvals,"员工问题或审批已处理。")
+    return {"job":child.id,"turn":child.assignee_turn_id,"question":bool(question),"approvals":approvals}
+
+
+def permits_followup(scope, tool, args):
+    if not isinstance(args,dict) or args.get("job_id")!=scope["job"]:
+        return False
+    if tool=="mcp__team__answer_job_question":
+        return scope["question"] and args.get("question_turn_id")==scope["turn"]
+    return (tool=="mcp__team__review_employee_write" and args.get("turn_id")==scope["turn"]
+            and args.get("approval_id") in scope["approvals"])
+
+
+async def parked_question(db, root, turn=None):
+    if turn is not None:
+        started=await db.scalar(select(Event.data).where(Event.turn_id==turn.id,Event.type=="turn.started"))
+        if not (started or {}).get("recovery_followup"):
+            return None
+    child,_=await checked_child(db,root,await proof_for(db,root))
+    if child.status=="needs_input" and child.question:
+        return f"老板，工单 #{child.task_id} 有个问题需要您确认。\n{child.question}\n您直接回复我就行。"
+    return None
 
 
 async def guard_child(db, root, args, target, reply):
@@ -283,23 +376,8 @@ async def confirmed_result(db, root):
     """The supervisor's answer cannot replace the employee's current completion or its required tool receipt."""
     from app.team.feishu_assignment import required_tool
     proof=await proof_for(db,root)
-    children=list(await db.scalars(select(AgentJob).where(AgentJob.parent_id==root.id)))
-    require(len(children)==1, "大嘴未能为这次来信完成派工。")
-    child=children[0]
-    employee=await db.get(Agent,child.assignee_agent_id)
-    require(child.owner_id==root.owner_id and child.root_id==root.id and child.kind=="job" and child.mode=="work" and child.reply=="resume"
-            and child.origin_kind=="person" and child.requester_thread_id==root.requester_thread_id
-            and child.requester_turn_id==root.requester_turn_id and child.requester_agent_id==root.requester_agent_id
-            and child.assignee_agent_id==proof["employee"] and child.task_id==proof["task"]
-            and child.assignment_epoch==proof["epoch"] and employee and employee.owner_id==root.owner_id
-            and not employee.archived_at and await feature_tasks.assignment_current(db,child),
-            "工单或经办人已变化，未发送原派工结果。")
+    child,employee=await checked_child(db,root,proof)
     require(child.status=="completed","员工本次派工尚未成功交付。")
-    owner_source=await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id==child.id,AgentJobEvent.kind=="owner_request"))
-    require(isinstance(owner_source,dict) and owner_source.get("turn_id")==root.requester_turn_id
-            and owner_source.get("thread_id")==root.requester_thread_id and owner_source.get("event_key"))
-    receipt=await db.get(DirectTurnReceipt,(root.owner_id,owner_source["event_key"]))
-    require(receipt and (receipt.thread_id,receipt.turn_id)==(root.requester_thread_id,root.requester_turn_id))
     pin=await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id==child.id,AgentJobEvent.kind=="feishu_assignment"))
     needed="feishu_publish_knowledge" if proof.get("require_document") else required_tool(pin) if pin else None
     if not needed:
