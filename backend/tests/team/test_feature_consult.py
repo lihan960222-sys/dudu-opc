@@ -315,6 +315,20 @@ async def test_employee_selects_bundled_skill_in_scoped_turn(sessions,owner,tmp_
     try:
         catalog=await bridge.execute("employee_capabilities",{})
         assert catalog["granted_tools"]==["already_granted"]
+        assert catalog["feishu_tool_details"]=={}
+        from dataclasses import replace
+        from unittest.mock import AsyncMock
+        from app.team import feishu_tools_bridge
+        ctx.team=replace(ctx.team,feishu_tools=("feishu_list_sources","feishu_publish_knowledge"))
+        current=AsyncMock(return_value=NS(tools=ctx.team.feishu_tools))
+        monkeypatch.setattr(feishu_tools_bridge,"grant",current)
+        details=(await bridge.execute("employee_capabilities",{}))["feishu_tool_details"]
+        assert set(details)==set(ctx.team.feishu_tools)
+        assert "same-title" in details["feishu_list_sources"] and "returns the document link" in details["feishu_publish_knowledge"]
+        current.return_value=NS(tools=("feishu_list_sources",))
+        after_revocation=await bridge.execute("employee_capabilities",{})
+        assert "feishu_publish_knowledge" not in after_revocation["granted_tools"]
+        assert set(after_revocation["feishu_tool_details"])=={"feishu_list_sources"}
         skill=catalog["available"][0]
         chosen={k:skill[k] for k in ("template_id","name")}
         result=await bridge.execute("enable_local_skill",chosen)

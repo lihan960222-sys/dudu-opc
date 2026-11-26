@@ -154,6 +154,62 @@ async def test_assignment_receipt_cannot_forward_invented_approval(tmp_path, ses
         assert bodies == [{'text':'老板，我已登记给 Jensen 的派工。等收到结果，我在这条消息下向您汇报。','reply_to':'om_test'}]
 
 
+@pytest.mark.parametrize("state",["confirmed","superseded","still_running"])
+async def test_ordinary_document_report_rechecks_receipt_before_sending_once_to_original_message(
+        tmp_path,sessions,owner,cleanup_jobs,monkeypatch,state):
+    import json
+    from contextlib import closing
+    from types import SimpleNamespace
+    from app.db.models import AgentJobEvent
+    from app.feishu.lead_chat import publish_reports
+    from app.feishu.routing import journal
+    from app.feishu.worker import Worker
+    from app.team import service
+    monkeypatch.setattr(session,"AsyncSessionLocal",sessions)
+    url="https://tenant.feishu.cn/docx/Confirmed"
+    async with sessions() as db:
+        lead=await agent_store.create_agent(db,owner_id=owner,name="Lead",make_lead=True)
+        employee=await agent_store.create_agent(db,owner_id=owner,name="Editor")
+        await service.change_member(db,owner,employee.id)
+        fields=dict(owner_id=owner,requester_agent_id=lead.id,requester_thread_id=7,requester_turn_id=20,
+                    status="completed",mode="work",brief="Deliver",brief_hash="demo",origin_kind="person")
+        root=AgentJob(**fields,kind="root",assignee_agent_id=lead.id,assignee_thread_id=7,result="unverified-success")
+        db.add(root)
+        await db.flush()
+        job=AgentJob(**fields,kind="job",root_id=root.id,parent_id=root.id,reply="resume",assignee_agent_id=employee.id)
+        if state=="still_running":
+            job.status="running"
+        db.add(job)
+        await db.flush()
+        db.add(AgentJobEvent(job_id=job.id,kind="feishu_assignment",detail={"action":"create_document","employee":employee.id}))
+        stamp={"employee":employee.id,"epoch":job.assignment_epoch,"tool":"feishu_create_document"}
+        db.add(AgentJobEvent(job_id=job.id,kind="feishu_delivered",detail={**stamp,"result":{"url":url}}))
+        if state=="superseded":
+            db.add(AgentJobEvent(job_id=job.id,kind="feishu_superseded",detail=stamp))
+        await db.commit()
+    with closing(journal(tmp_path/"channel")) as channel:
+        worker=Worker({"owner_id":owner,"steward":{"agent_id":lead.id,"app_id":"app"}},SimpleNamespace(db=channel))
+        try:
+            channel.execute("insert into direct_turns values('app','e',7,20)")
+            channel.execute("insert into inbox(app,event,message) values('app','e','original-owner-message')")
+            channel.execute("insert into direct_team_reports(app,event,job) values('app','e',?)",(root.id,))
+            if state=="still_running":
+                await publish_reports(worker)
+                assert not channel.execute("select 1 from outbox").fetchone()
+                async with sessions() as db:
+                    current=await db.get(AgentJob,job.id)
+                    current.status="completed"
+                    await db.commit()
+            await publish_reports(worker)
+            await publish_reports(worker)
+            bodies=[json.loads(row[0]) for row in channel.execute("select body from outbox")]
+            assert len(bodies)==1 and bodies[0]["reply_to"]=="original-owner-message"
+            assert "unverified-success" not in bodies[0]["text"]
+            assert (url in bodies[0]["text"]) is (state!="superseded")
+        finally:
+            worker.api.close()
+
+
 @pytest.mark.asyncio
 async def test_escalated_hire_notifies_original_steward_message_once(tmp_path, sessions, owner, cleanup_jobs, monkeypatch):
     from contextlib import closing

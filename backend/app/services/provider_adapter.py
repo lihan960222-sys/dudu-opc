@@ -31,6 +31,10 @@ LOST = "lost"  # this run no longer owns its turn: send nothing, stop
 # Said to the engine when a policy, not a person, refused the call, so its answer to the user is accurate.
 # Only the Claude adapter can carry the text; Codex gets a plain denial.
 DENY_BY_SOURCE = {
+    "select_feishu_delivery_or_none": (
+        "No dispatch or owner approval took place. Select feishu_delivery from the owner's request, "
+        "using none for a chat or local-only deliverable, and submit the corrected call."
+    ),
     "resource_not_assigned": (
         "This mailbox or number is not assigned to this agent, so the call was not made. "
         "Use only the inbox or number you were given; do not ask the user about it."

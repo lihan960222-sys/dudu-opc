@@ -47,7 +47,7 @@ async def test_read_wiki_docx_and_reject_skipped_pages(monkeypatch):
     assert set(scopes)=={"wiki:node:read","docx:document:readonly"}
 
 
-@pytest.mark.parametrize("present",[True,False])
+@pytest.mark.parametrize("present",[True,False,"moved_after_write"])
 def test_scoped_replace_and_readback(monkeypatch,present):
     db=sqlite3.connect(":memory:")
     identity={"steward":{"app_id":"employee"}}
@@ -59,7 +59,8 @@ def test_scoped_replace_and_readback(monkeypatch,present):
     writes=[]
     def send(req):
         if req.url.path.endswith("/files"):
-            data={"files":[{"type":"docx","token":"doc","parent_token":"folder"}] if present else [],"has_more":False}
+            visible = present is True or present=="moved_after_write" and not writes
+            data={"files":[{"type":"docx","token":"doc","parent_token":"folder"}] if visible else [],"has_more":False}
         elif req.method=="PATCH":
             assert req.url.params["document_revision_id"]=="7"
             writes.append(req)
@@ -79,5 +80,9 @@ def test_scoped_replace_and_readback(monkeypatch,present):
             with pytest.raises(ValueError,match="文件夹内"):
                 run()
             assert not writes
+        elif present=="moved_after_write":
+            with pytest.raises(ValueError,match="文件夹"):
+                run()
+            assert len(writes)==1
         else:
             assert run()["confirmed"] and run()["confirmed"] and len(writes)==1

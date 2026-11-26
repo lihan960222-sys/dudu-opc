@@ -8,7 +8,6 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from urllib.parse import urlsplit
 
 from sqlalchemy import select
 
@@ -374,33 +373,20 @@ async def guard_child(db, root, args, target, reply):
 
 async def confirmed_result(db, root):
     """The supervisor's answer cannot replace the employee's current completion or its required tool receipt."""
-    from app.team.feishu_assignment import required_tool
+    from app.team import document_delivery
     proof=await proof_for(db,root)
     child,employee=await checked_child(db,root,proof)
     require(child.status=="completed","员工本次派工尚未成功交付。")
-    pin=await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id==child.id,AgentJobEvent.kind=="feishu_assignment"))
-    needed="feishu_publish_knowledge" if proof.get("require_document") else required_tool(pin) if pin else None
+    needed,pin=await document_delivery.requirement(db,child)
+    if proof.get("require_document"):
+        needed=document_delivery.PUBLISH
     if not needed:
         require(child.result and child.result.strip(), "员工没有提交本次结果。")
         return child.result
-    latest=await db.scalar(select(AgentJobEvent).where(AgentJobEvent.job_id==child.id,
-        AgentJobEvent.detail["tool"].as_string()==needed,AgentJobEvent.kind.in_(("feishu_tool_started",
-        "feishu_delivered","feishu_tool_failed","feishu_superseded"))).order_by(AgentJobEvent.id.desc()).limit(1))
-    require(latest and latest.kind=="feishu_delivered" and latest.detail.get("employee")==child.assignee_agent_id
-            and latest.detail.get("epoch")==child.assignment_epoch,"员工缺少本轮有效的飞书交付回执。")
-    result=latest.detail.get("result") or {}
-    if needed=="feishu_publish_knowledge":
-        url, count=result.get("url"),result.get("messages_read")
-        target=urlsplit(url) if isinstance(url,str) else None
-        require(target and target.scheme=="https" and target.hostname and target.path.startswith("/docx/")
-                and not target.query and not target.fragment and type(count) is int and count>=0,
-                "本轮飞书发布回执缺少文档或来源数量。")
-        later_failure=await db.scalar(select(AgentJobEvent.kind).where(AgentJobEvent.job_id==child.id,
-            AgentJobEvent.id>latest.id,AgentJobEvent.detail["tool"].as_string()=="feishu_read_document",
-            AgentJobEvent.kind.in_(("feishu_read_verified","feishu_delivered","feishu_superseded","feishu_tool_failed")))
-            .order_by(AgentJobEvent.id.desc()).limit(1))
-        require(later_failure not in ("feishu_superseded","feishu_tool_failed"),"后续飞书文档核对未通过。")
-        return f"老板，{employee.name}已发布工单 #{child.task_id} 的知识库。我核对了飞书回执，这份文档整理了 {count} 条来源消息。\n{url}"
+    receipt=await document_delivery.evidence(db,child,needed,pin=pin)
+    require(receipt.result,receipt.error)
+    if needed in document_delivery.WRITES:
+        return "老板，"+document_delivery.verified_line(child,employee.name,receipt)
     return child.result or "员工已取得本轮飞书工具回执。"
 
 

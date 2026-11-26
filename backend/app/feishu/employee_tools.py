@@ -6,7 +6,7 @@ import time
 from types import SimpleNamespace
 from uuid import NAMESPACE_URL, uuid5
 
-from . import document_access, documents, employee_draft, history, knowledge_document, workspace_access
+from . import document_access, documents, employee_draft, history, knowledge_document, knowledge_folder, workspace_access
 from .owner_oauth import employee_config
 from .publisher import API, checked
 
@@ -122,6 +122,8 @@ async def execute(cfg,employee_id,name,arguments,*,owner_id,journal_db,client,al
             employee_id==cfg["steward"].get("agent_id") or not invocation_id or
             name not in ARGUMENTS or name not in allowed_actions):
         raise ValueError("此派工没有这项飞书权限。")
+    if assignment and (assignment.get("employee",employee_id)!=employee_id or assignment.get("contact",contact)!=contact):
+        raise ValueError("此派工的员工或联系人不匹配。")
     if not isinstance(arguments,dict) or arguments.keys()-ARGUMENTS[name]:
         raise ValueError("不支持这些参数。")
     staff=await staff_name(cfg,employee_id)
@@ -176,28 +178,35 @@ async def execute(cfg,employee_id,name,arguments,*,owner_id,journal_db,client,al
         key=knowledge_document.binding_key(cfg["steward"]["app_id"],employee_id,contact,sources[contact],dest,title)
         exists=journal_db.execute("select 1 from sqlite_master where type='table' and name='knowledge_documents'").fetchone()
         row=journal_db.execute("select document from knowledge_documents where binding=?",(key,)).fetchone() if exists else None
-        return dest,title,row[0] if row else None
+        return dest,title,row
     if name=="feishu_list_sources":
         result={"contacts":list(sources)}
-        if contact in sources and ("feishu_publish_knowledge" in allowed_actions or "feishu_read_document" in allowed_actions):
+        proof = assignment or {}
+        knowledge_scope = proof.get("action", "employee") in ("employee", "update", "restructure") and (
+            proof.get("expected_tool") != "feishu_read_history")
+        if knowledge_scope and contact in sources and (
+                "feishu_publish_knowledge" in allowed_actions or "feishu_read_document" in allowed_actions):
             from .owner_oauth import status
+            source = sources[contact]
+            profile = await history.reviewer(cfg,source,staff)
+            if profile[0] != employee_id or not workspace_access.permits_model(policy,profile,assignment):
+                raise ValueError("该员工当前模型没有这个联系人的知识库核对授权。")
             try:
-                dest,title,doc=known_document()
+                dest,title,binding=known_document()
             except (OSError,KeyError,ValueError):
                 return {**result,"knowledge_target":{"sync_available":False,"reason":"知识库目标未配置"}}
-            grant=status(identity)
-            sufficient=(history.SCOPES|documents.SCOPES).issubset(grant["scopes"])
-            profile=await history.reviewer(cfg,sources[contact],staff)
-            target={"title":title,"url":None,"sync_available":bool("feishu_publish_knowledge" in allowed_actions
-                    and grant["connected"] and sufficient and workspace_access.permits_model(policy, profile, assignment))}
-            if doc:
-                metadata=knowledge_document.inspect_document(client,
-                    lambda:documents.user_headers(identity,required={document_access.READ_SCOPE}),doc)
-                target["remote_state"]="present" if metadata else "missing"
-                if metadata:
-                    target["url"]=dest["tenant_origin"]+"/docx/"+doc
-                    target["remote_title"]=metadata.get("title")
-            result["knowledge_target"]=target
+            def check_scope():
+                current,bound=scoped()
+                if (bound.get(contact)!=source or knowledge_document.target(cfg,employee_id,contact)!=(dest,title)
+                        or not workspace_access.permits_model(current,profile,assignment)):
+                    raise ValueError("知识库的联系人、模型授权或目标位置已变更。")
+            def headers(required):
+                check_scope()
+                return documents.user_headers(identity,required=required)
+            result["knowledge_target"]=knowledge_folder.status(client,headers,dest,title,binding,grant=status(identity),
+                may_publish="feishu_publish_knowledge" in allowed_actions and not proof.get("read_only"),
+                weekly=proof.get("weekly"))
+            check_scope()
         return result
     if not contact or contact not in sources:
         raise ValueError("此派工未绑定该员工获准读取的联系人。")
@@ -222,11 +231,15 @@ async def execute(cfg,employee_id,name,arguments,*,owner_id,journal_db,client,al
                 "select 1 from employee_source_links where app=? and employee=? and job=? and chat=? and url=?",
                 (*source_key,url)).fetchone()
         if not indexed_url:
-            dest,_,doc=known_document()
+            dest,_,binding=known_document()
+            doc=binding[0] if binding else None
             if not doc or url!=dest["tenant_origin"]+"/docx/"+doc:
                 raise ValueError("只能读取此员工的知识库或本次聊天中已核对的链接。")
         return await document_access.read_page(client,identity,journal_db,employee_id,invocation_id,url,arguments.get("offset",0))
     if name=="feishu_publish_knowledge":
+        if assignment and (assignment.get("read_only") or assignment.get("expected_tool")=="feishu_read_history"
+                           or assignment.get("action") not in ("employee","update","restructure")):
+            raise ValueError("原派工没有授权写入知识库。")
         worker=SimpleNamespace(cfg=cfg,db=journal_db,pub=SimpleNamespace(http=client))
         instructions=""
         if assignment and assignment.get("action")=="restructure":
@@ -244,11 +257,12 @@ async def execute(cfg,employee_id,name,arguments,*,owner_id,journal_db,client,al
             from .knowledge_revision import employee_blocks
             employee_draft.require_read(journal_db,source_key,records)
             return employee_blocks(arguments["topics"],records,source["chat_id"])
+        verification={}
         result,count=await knowledge_document.publish(worker,{"app":cfg["steward"]["app_id"],"event":invocation_id},
             [None,staff,None,contact],source,read[0],revise=True,instructions=instructions,
-            employee_draft=draft, assignment=assignment)
-        url=re.search(r"https://[a-z0-9-]+\.feishu\.cn/docx/[a-zA-Z0-9]+",result)
-        return {"message":result,"messages_read":count,"url":url[0] if url else None,"confirmed":bool(url)}
+            employee_draft=draft, assignment=assignment,verification=verification)
+        return {"message":result,"messages_read":count,"url":verification.get("url"),
+                "confirmed":bool(verification),"verification":verification}
     pinned_cutoff,filters=None,{}
     if weekly:
         pinned_cutoff = assignment["cutoff"]

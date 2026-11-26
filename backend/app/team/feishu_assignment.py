@@ -44,7 +44,9 @@ async def resolve(db, owner, lead, thread, turn, employee, *, delivery=None, ori
     if receipt:
         pin = gateway_pin(cfg,receipt.event_key)
         if pin:
-            return {key:pin[key] for key in ("app","event","event_key","employee","contact","action","original")}
+            return {key:pin[key] for key in ("app","event","event_key","employee","contact","action","original","target_url") if key in pin}
+    if delivery=="none":
+        return None
     # A human-originated work order also inherits the employee's configured
     # contact when the lead delegates it without any special channel command.
     sources = workspace_access.settings_for(cfg)["history_sources"]
@@ -81,10 +83,51 @@ async def for_job(db, job_id):
 
 def required_tool(assignment):
     """Use the same delivery requirement when exposing, executing and verifying a tool."""
+    if not isinstance(assignment.get("action"),str):
+        return assignment.get("expected_tool")
     return {"read_document":"feishu_read_document", "edit_document":"feishu_edit_document", "delete_document":"feishu_delete_document",
             "read": "feishu_read_history", "update": "feishu_publish_knowledge",
             "restructure": "feishu_publish_knowledge", "create_document": "feishu_create_document"}.get(
-                assignment["action"], assignment.get("expected_tool"))
+                assignment.get("action"), assignment.get("expected_tool"))
+
+
+def owner_choices(owner, lead, event_key=None):
+    """New owner orders select a delivery. Existing authenticated gateway orders already carry it."""
+    cfg=configuration()
+    if not cfg or cfg["owner_id"]!=owner or cfg["steward"]["agent_id"]!=lead:
+        return (),None
+    expected=gateway_pin(cfg,event_key) if event_key else None
+    choices=tuple(role["agent_id"] for role in cfg.get("roles",{}).values()
+                  if role.get("app_id") and type(role.get("agent_id")) is int
+                  and (not expected or role["agent_id"]!=expected["employee"]))
+    return choices,expected
+
+
+def delivery_choice(args):
+    choice=args.get("feishu_delivery")
+    if choice is None and isinstance(check:=args.get("completion_check"),dict):
+        if check.get("kind") in ("files","inspection","commands"):
+            return "none"
+    return choice
+
+
+def choice_missing(run,args):
+    targets=args.get("agent_ids")
+    return (isinstance(targets,list) and args.get("mode","work")=="work" and delivery_choice(args) is None and
+            any(target in getattr(run,"delivery_choices",()) for target in targets))
+
+
+def rework_contract(previous, current, tool, choice):
+    """An employee retry uses the same owner's grant and cannot replace a document with a chat answer."""
+    from app.team.service import TeamError
+    if not tool:
+        return current
+    if (not current or previous.get("employee")!=current.get("employee") or
+            previous.get("contact")!=current.get("contact") or
+            (current.get("target_url") and current["target_url"]!=previous.get("target_url")) or
+            (choice is not None and required_tool({"action":choice})!=tool)):
+        raise TeamError("changed_delivery","返工需要沿用原飞书目标和交付要求。")
+    return previous
 
 
 def delivery_contract(pin, delivery, original):

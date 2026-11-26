@@ -11,7 +11,7 @@ def test_catalog_requires_job_actions_and_employee_oauth(monkeypatch,tmp_path):
     pin = {"employee":4,"contact":"李晗","action":"employee"}
     monkeypatch.setattr(bridge.owner_oauth, "employee_config", lambda cfg, employee:
         {"_employee_oauth":True,"steward":{"app_id":"worker"}})
-    actions = {"history":True,"doc":True}
+    actions = {"history":True,"doc":True,"folder":True}
     monkeypatch.setattr(bridge.owner_oauth,"status",lambda cfg:{"actions":actions})
     monkeypatch.setattr(bridge.workspace_access,"settings_for",lambda cfg:{
         "history_sources":{"李晗":{"agent_id":4,"oauth_app":"worker"}},"allow_codex_summary":True})
@@ -26,11 +26,21 @@ def test_catalog_requires_job_actions_and_employee_oauth(monkeypatch,tmp_path):
     server = mcp_server.Server(tmp_path, project_consult=True, feishu_tools=tools,employee_only=True)
     names = [t["name"] for t in server.handle(request)["result"]["tools"]]
     assert names == ["employee_capabilities","enable_local_skill","feishu_list_sources","feishu_read_history","feishu_read_document","feishu_read_message","feishu_publish_knowledge"]
+    from app.services.codex_adapter import feature_team_tools
+    assert set(names)==set(feature_team_tools(SimpleNamespace(team=SimpleNamespace(feishu_tools=tools,delegation_enabled=False))))
+    descriptions={t["name"]:t["description"] for t in server.handle(request)["result"]["tools"]}
+    assert "same-title" in descriptions["feishu_list_sources"] and "creates one" in descriptions["feishu_publish_knowledge"]
     for name in names:
         assert policy.automatic("mcp__team__"+name,"ask",team,{})[0]=="allowed"
     assert policy.automatic("mcp__team__feishu_create_document","ask",team,{})[0]=="denied"
     assert not any(t["name"].startswith("feishu_") for t in mcp_server.Server(tmp_path).tools)
     assert bridge.configured(cfg,5,pin) is None
+    assert "feishu_publish_knowledge" not in bridge.configured(cfg,4,{**pin,"read_only":True})[1]
+    actions["folder"] = False
+    blocked, read_tools = bridge.configured(cfg,4,pin)
+    assert "space:document:retrieve" in blocked["delivery_blocker"]
+    assert "feishu_list_sources" in read_tools and "feishu_publish_knowledge" not in read_tools
+    actions["folder"] = True
     actions["doc"] = False
     assert "feishu_publish_knowledge" not in bridge.configured(cfg,4,pin)[1]
     actions["history"] = False
@@ -88,6 +98,12 @@ async def test_authorized_employee_call_reaches_handler_and_records_receipt(monk
     assert handler.await_args.kwargs["invocation_id"]=="job-42"
     assert events[0][0]=="feishu_delivered"
     assert events[0][1]["result"]=={"url":"https://example.com/docx/example"}
+    verified={"document_resolution":"created","parent_verified":True,"body_verified":True,
+              "source_messages_verified":3,"same_title_entries":1}
+    handler.return_value={"url":"https://example.com/docx/example","confirmed":True,
+                          "messages_read":3,"verification":{**verified,"folder_url":"employee-only location"}}
+    await bridge.execute(rt,run,tool,{})
+    assert events[-1][1]["result"]=={"url":"https://example.com/docx/example","messages_read":3,"verification":verified}
     handler.side_effect=ValueError("授权变更")
     with pytest.raises(bridge.service.TeamError):
         await bridge.execute(rt,run,tool,{})
