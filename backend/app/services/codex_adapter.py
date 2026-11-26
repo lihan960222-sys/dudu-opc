@@ -547,12 +547,12 @@ class CodexAdapter:
         finally:
             self._active_turns.pop(ctx.turn_id, None)
 
-    async def run_project_command(self, ctx, args, check):
+    async def run_project_command(self, ctx, args, check, *, scope=None):
         from app.services import employee_terminal
         run = self._active_turns.get(ctx.turn_id)
         if run is None or run.ctx is not ctx or run.project is not ctx.project_runtime:
             raise ValueError("项目命令会话已变更。")
-        return await employee_terminal.execute(run, args, check)
+        return await employee_terminal.execute(run, args, check, scope=scope)
 
     async def steer_turn(self, turn_id: int, text: str) -> str:
         run = self._active_turns.get(turn_id)
@@ -916,7 +916,7 @@ class _CodexTurn:
             elif self.project and "run_project_command" in feature_team_tools(self.ctx):
                 note = ("Use the native terminal and editor for ordinary work within the named project permissions. "
                         "If a project check needs review, use team.run_project_command with its complete argv and relative cwd. "
-                        "It always stays within the same project permissions.")
+                        "An unchanged check recorded by your assigning steward can run read-only. Other operations need an individual review.")
                 instructions = f"{instructions}\n\n{note}" if instructions else note
         launch = self.ctx.memory_launch
         if self.computer is not None:

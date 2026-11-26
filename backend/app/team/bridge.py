@@ -18,7 +18,7 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
 
 
-async def consume_allowed_approval(db, turn_id, owner_token, tool, arguments):
+async def consume_allowed_approval(db, turn_id, owner_token, tool, arguments, *, return_id=False):
     await begin_write(db)
     turn = await db.get(Turn, turn_id)
     from app.services.feature_tasks import turn_assignment_current
@@ -39,7 +39,9 @@ async def consume_allowed_approval(db, turn_id, owner_token, tool, arguments):
             continue
         claimed = await db.execute(update(Approval).where(Approval.id == approval.id, Approval.consumed_at.is_(None), Approval.status == 'allowed').values(consumed_at=service.now()))
         await db.commit()
-        return claimed.rowcount == 1
+        if claimed.rowcount == 1:
+            return approval.id if return_id else True
+        return False
     await db.rollback()
     return False
 
@@ -111,11 +113,11 @@ class TeamBridge:
                 if args is None:
                     raise service.TeamError("recovery_scope","仅可续办原工单指定的派工。")
             async with self.runtime.session() as db:
-                allowed = await consume_allowed_approval(db, self.run.turn_id, self.run.owner_token, 'mcp__team__' + name, args)
+                allowed = await consume_allowed_approval(db, self.run.turn_id, self.run.owner_token, 'mcp__team__' + name, args, return_id=True)
             if not allowed:
                 result = {'error': 'This call has no matching, unused approval.', 'code': 'not_approved'}
             else:
-                result = await self.execute(name, args)
+                result = await self.execute(name, args, approval_id=allowed)
         except service.TeamError as exc:
             result = {'error': str(exc), 'code': exc.code}
         except Exception:
@@ -128,11 +130,11 @@ class TeamBridge:
         if getattr(self.run,"recovery_call",None) is not None and "error" in result:
             self.run.ctx.abort()
 
-    async def execute(self, name, args):
+    async def execute(self, name, args, *, approval_id=None):
         rt, run = self.runtime, self.run
         if name in ('read_project_text','replace_project_text'):
             from app.core.config import settings
-            from app.services import employee_project_files, employee_runtime, employee_terminal, feature_tasks, workspace_files
+            from app.services import employee_project_files, employee_runtime, employee_terminal, workspace_files
             from app.team.steward_review import current_native_job
 
             writing = name == 'replace_project_text'
@@ -142,15 +144,8 @@ class TeamBridge:
                 if (not job or name not in employee_terminal.allowed_tools(run.ctx, live=True)
                         or not getattr(run, 'recorder', None) or run.recorder.lost):
                     raise service.TeamError('outside_scope','工单归属或项目权限已变更。')
-                project = run.ctx.project_runtime
                 try:
-                    employee = await db.get(Agent,project.employee_id)
-                    turn = await db.get(Turn,run.turn_id,with_for_update=True)
-                    if (not turn or turn.thread_id!=run.thread_id or turn.owner_token!=run.owner_token or turn.status!='running'
-                            or not employee or not employee_runtime.native_enabled(project.owner_id, project.employee_id)
-                            or not employee.role_path or Path(employee.role_path)!=project.root):
-                        raise ValueError('员工岗位或项目授权已变更。')
-                    await feature_tasks.check_employee_root(db, project.owner_id, employee, project.root)
+                    project = await employee_runtime.checked_active_project(db, run)
                     if writing:
                         result = await asyncio.to_thread(employee_project_files.edit,project,args,storage=settings.SQLITE_FILE.parent)
                     else:
@@ -167,8 +162,8 @@ class TeamBridge:
                 raise service.TeamError('receipt_lost','文件操作已结束，工单回执未保存，请先核对文件。')
             return result
         if name == 'run_project_command':
-            from app.db.models import AgentJobEvent
-            from app.services import employee_terminal
+            from app.db.models import AgentJobEvent, Event
+            from app.services import employee_check_review, employee_runtime, employee_terminal
             from app.team.steward_review import current_native_job
             if not employee_terminal.available(run.ctx, live=True):
                 raise service.TeamError('outside_scope','这项派工未授权项目命令。')
@@ -177,11 +172,35 @@ class TeamBridge:
                 job = await current_native_job(db, run, write=True, lock=True)
                 if not job:
                     raise service.TeamError('outside_scope','工单归属或项目权限已变更。')
+                try:
+                    await employee_runtime.checked_active_project(db, run)
+                except (OSError, ValueError) as exc:
+                    raise service.TeamError('outside_scope', str(exc)) from exc
+                approval = await db.get(Approval, approval_id) if approval_id else None
+                if (not approval or approval.turn_id != run.turn_id or approval.thread_id != run.thread_id
+                        or approval.tool != 'mcp__team__run_project_command' or approval.status != 'allowed'
+                        or not approval.consumed_at or not approval.delivered_at or canonical(approval.input) != canonical(args)):
+                    raise service.TeamError('not_approved', '这次命令没有已送达的对应决定。')
+                trace = await db.scalar(select(Event.data).where(Event.turn_id == run.turn_id, Event.type == 'approval.resolved',
+                    Event.data['approval_id'].as_string() == approval.id).order_by(Event.id.desc()).limit(1))
+                if not trace or trace.get('status') != 'allowed':
+                    raise service.TeamError('not_approved', '找不到这次命令的决定来源。')
+                scope = None
+                if trace.get('by') == employee_check_review.SOURCE:
+                    try:
+                        scope = await employee_check_review.current(db, run, args)
+                    except (OSError, ValueError) as exc:
+                        raise service.TeamError('scope_changed', '现在无法核实验收脚本或岗位目录。') from exc
+                    if not scope or scope != trace.get('project_check'):
+                        raise service.TeamError('scope_changed', '原验收命令、脚本或岗位权限已变更。')
+                elif (trace.get('by') != 'person' or trace.get('assignment_epoch') != job.assignment_epoch
+                      or trace.get('employee_id') != job.assignee_agent_id):
+                    raise service.TeamError('not_approved', '这条命令需要对应的人员决定。')
                 check = await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id==job.id,
                     AgentJobEvent.kind=='completion_check').limit(1))
                 await db.commit()
             try:
-                return await rt.adapters['codex'].run_project_command(run.ctx, args, check)
+                return await rt.adapters['codex'].run_project_command(run.ctx, args, check, scope=scope)
             except ValueError as exc:
                 raise service.TeamError('project_command_failed',str(exc)) from exc
         if name in ("employee_capabilities","enable_local_skill"):

@@ -61,9 +61,10 @@ def _directory(path):
 
 
 @contextmanager
-def _pinned_parent(project, target):
+def pinned_parent(root, target):
+    """Hold the trusted root and every parent of a project file during an operation."""
     with ExitStack() as stack:
-        current = feature_files.checked(project.root)
+        current = feature_files.checked(root)
         descriptor = stack.enter_context(_directory(current))
         for part in target.parent.relative_to(current).parts:
             current = feature_files.checked(current / part)
@@ -87,7 +88,7 @@ def read(project, args):
     if not isinstance(args, dict) or set(args) != {"path"}:
         raise ValueError("读取操作只接受一个岗位内的相对文件名。")
     path = _target(project, args["path"])
-    with _pinned_parent(project, path):
+    with pinned_parent(project.root, path):
         data, _ = _contents(project, path)
     return {"path":path.relative_to(project.root).as_posix(), "text":data.decode("utf-8-sig"),
             "sha256":hashlib.sha256(data).hexdigest()}
@@ -101,7 +102,7 @@ def edit(project, args, *, storage):
             or not args["old"] or args["old"] == args["new"]):
         raise ValueError("需要一处可以核对的文本替换。")
     path = _target(project, args["path"])
-    with _pinned_parent(project, path) as parent_fd:
+    with pinned_parent(project.root, path) as parent_fd:
         data, info = _contents(project, path)
         data.decode("utf-8-sig")
         old, new = args["old"].encode(), args["new"].encode()
