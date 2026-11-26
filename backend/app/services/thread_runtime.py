@@ -1315,7 +1315,10 @@ class ThreadRuntime:
                         ctx.codex_prompt.background["owner_feishu_request"] = str(original)
                     if "feishu_publish_knowledge" in feishu.tools:
                         ctx.codex_prompt.instructions = _with_brief(ctx.codex_prompt.instructions,
-                            "For a knowledge document, inspect the destination and read the authorized source pages, "
+                            "Use feishu_list_sources to inspect the configured knowledge folder, same-title count "
+                            "and publish_action. A confirmed missing document with create_in_bound_folder can be "
+                            "rebuilt in its original folder by feishu_publish_knowledge. No separate create call is needed. "
+                            "Read the authorized source pages, "
                             "following next_offset and next_text_offset. Read linked materials when relevant. "
                             "Decide how to group the material and write your own draft, citing observed message IDs. "
                             "Submit topics to feishu_publish_knowledge only when the requested outcome includes writing. "

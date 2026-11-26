@@ -94,11 +94,14 @@ def configured(cfg, employee, proof):
     publish_requested = required_tool(proof) == "feishu_publish_knowledge"
     if publish_requested and not actions["doc"]:
         return doc_blocker(), tuple(tools)
-    if not read_only and actions["doc"]:
+    if publish_requested and not read_only and not actions.get("folder"):
+        return folder_blocker, tuple(tools)
+    if not read_only and actions["doc"] and actions.get("folder"):
         try:
             knowledge_document.target(cfg, employee, alias)
         except (KeyError, ValueError, OSError):
-            pass
+            if publish_requested:
+                return {**proof,"delivery_blocker":"请核对该员工知识库登记的联系人、文档名称和目标文件夹。"},tuple(tools)
         else:
             tools.append("feishu_publish_knowledge")
     return proof, tuple(tools)
@@ -254,6 +257,9 @@ async def execute(rt, run, name, args):
             receipt["message"] = result["message"]
         if "messages_read" in result:
             receipt["messages_read"] = result["messages_read"]
+        if name=="feishu_publish_knowledge" and result.get("verification"):
+            receipt["verification"]={key:result["verification"][key] for key in (
+                "document_resolution","parent_verified","body_verified","source_messages_verified","same_title_entries")}
     if receipt is not None:
         await record_delivery(rt,job_id,run,name,logical_tool,action,operation,receipt)
     return result

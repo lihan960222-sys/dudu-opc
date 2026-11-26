@@ -168,7 +168,14 @@ class TeamBridge:
                     if not await current_native_job(db, run):
                         raise service.TeamError("parent_gone", "这项派工已结束或已交给其他员工。")
                 if name=="employee_capabilities":
+                    from app.team.feishu_tools_bridge import grant
+                    from app.team.mcp_server import FEISHU_TOOLS
                     management.strict(args,set())
+                    feishu_tools=set(run.ctx.team.feishu_tools)
+                    if feishu_tools:
+                        team=await service.team_for(db,rt.owner_id)
+                        current=await grant(db,rt.owner_id,run,team)
+                        feishu_tools.intersection_update(current.tools if current else ())
                     connector_tools = run.ctx.composio_exact_tools
                     if connector_tools is None and run.ctx.composio_launch is not None:
                         connector_tools = [item["name"] for item in composio_tools.mcp_tools(run.ctx.composio_apps or {})]
@@ -176,9 +183,11 @@ class TeamBridge:
                               "source":skill.source, "revision":skill.revision}
                              for skill in agent_skills.list_skills(caller.id) if skill.enabled]
                     return {**agent_skills.bundled_catalog(caller.id), "saved_skills":saved,
+                            "feishu_tool_details":{t["name"]:t["description"] for t in FEISHU_TOOLS
+                                                   if t["name"] in feishu_tools},
                             "project_skills":[s for s in agent_skills.project_skill_catalog(project.root, caller.id) if s["enabled"]] if project else [],
                             "granted_tools":sorted(
-                        set(run.ctx.team.feishu_tools)|set(run.ctx.community_tools)|set(connector_tools or []))}
+                        feishu_tools|set(run.ctx.community_tools)|set(connector_tools or []))}
                 management.strict(args,{"template_id","name"})
                 try:
                     skill=agent_skills.selected_employee_skill(caller.id,args.get("name"),args.get("template_id"),

@@ -121,9 +121,10 @@ async def test_pinned_worker_publishes_semantic_revision_and_returns_receipt(run
     monkeypatch.setattr(tools.history,"headers",lambda *_:{})
     monkeypatch.setattr(tools.history,"peer_for",lambda *_:"ou_peer")
     monkeypatch.setattr(tools.knowledge_document,"collect",lambda *_:records)
-    async def publish(worker,row,review,source,cutoff,*,revise,instructions,employee_draft,assignment):
+    async def publish(worker,row,review,source,cutoff,*,revise,instructions,employee_draft,assignment,verification):
         assert row["app"]=="lead" and review[1]=="二狗" and source["oauth_app"]=="employee" and revise
         assert employee_draft(records)[-1]["text"]["elements"][0]["text_run"]["content"]=="员工写的摘要"
+        verification.update(url="https://demo.feishu.cn/docx/test123",parent_verified=True,body_verified=True)
         return "已写入 https://demo.feishu.cn/docx/test123",11
     monkeypatch.setattr(tools.knowledge_document,"publish",publish)
     draft={"topics":[{"title":"进展","summary":"员工写的摘要","sources":["m1"]}]}
@@ -166,7 +167,9 @@ async def test_source_metadata_only_discloses_confirmed_bound_document(run,monke
     monkeypatch.setattr(owner_oauth,"status",lambda _:{"connected":True,"scopes":list(tools.history.SCOPES|tools.documents.SCOPES)})
     actions={"feishu_list_sources","feishu_publish_knowledge"}
     result=await call("feishu_list_sources",{},allowed_actions=actions)
-    assert result["contacts"]==["李晗"] and result["knowledge_target"]=={"title":"知识库","url":None,"sync_available":True}
+    target=result["knowledge_target"]
+    assert result["contacts"]==["李晗"] and target["title"]=="知识库" and target["url"] is None
+    assert target["folder"]["state"]=="permission_required" and not target["sync_available"]
     assert "knowledge_target" not in await call("feishu_list_sources",{})
 
 @pytest.mark.parametrize("suffix,expected",[
