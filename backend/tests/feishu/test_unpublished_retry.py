@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import httpx
 import pytest
 
 from app.db.models import AgentJob, AgentJobEvent, AgentJobInbox, FeatureMessage, WorkItem
@@ -61,7 +62,7 @@ def test_incomplete_or_unknown_host_effect_cannot_be_replayed():
 @pytest.mark.parametrize("change", ["folder","actor","revoked","registered_document","before_body"])
 async def test_publish_uses_only_the_original_resource_and_rechecks_before_writing(monkeypatch,change,tmp_path):
     from types import SimpleNamespace
-    from app.feishu import document_access, knowledge_document as knowledge, knowledge_revision
+    from app.feishu import knowledge_document as knowledge, knowledge_revision
     cfg={"steward":{"app_id":"lead","open_id":"owner","tenant_key":"t"},
          "_access_config_path":str(tmp_path/"config.json"),"state_dir":"state"}
     identity={"_employee_oauth":True,"steward":{"app_id":"staff","open_id":"original-actor"}}
@@ -89,19 +90,26 @@ async def test_publish_uses_only_the_original_resource_and_rechecks_before_writi
         resolved.append(True)
         return "oldDoc"
     monkeypatch.setattr(knowledge,"resolve_document",resolve)
-    monkeypatch.setattr(document_access,"verify_destination",lambda *args:None)
+    def inspect(req):
+        assert req.method=="GET"
+        if req.url.path.endswith("/drive/v1/files"):
+            return httpx.Response(200,json={"code":0,"data":{"has_more":False,"files":[
+                {"token":"oldDoc","parent_token":"folder","name":"title","type":"docx"}]}})
+        assert req.url.path.endswith("/documents/oldDoc")
+        return httpx.Response(200,json={"code":0,"data":{"document":{"title":"title","document_id":"oldDoc"}}})
     async def revise(db,client,headers,authorized,*args,**kwargs):
         assert not await authorized()
         raise ValueError("撤回")
     monkeypatch.setattr(knowledge_revision,"revise_document",revise)
-    with pytest.raises(ValueError):
-        await knowledge.publish(SimpleNamespace(cfg=cfg,db=db,pub=SimpleNamespace(http=None)),{"app":"lead","event":"original"},
+    with httpx.Client(transport=httpx.MockTransport(inspect)) as client, pytest.raises(ValueError):
+        await knowledge.publish(SimpleNamespace(cfg=cfg,db=db,pub=SimpleNamespace(http=client)),{"app":"lead","event":"original"},
             [None,"staff",None,"contact"],source,12,revise=True,employee_draft=lambda _:["draft"],assignment=proof)
     assert bool(resolved)==(change=="before_body")
     db.close()
 
 
 @pytest.mark.parametrize("change", ["none","attempted","other_worker","stale_turn","new_message","changed_folder_before_release",
+                                    "removed_config_before_release","busy_before_release",
                                     "other_invocation","new_contact","no_old_document","another_retry"])
 async def test_retry_reuses_original_card_and_rearms_only_its_sent_reply(setup_case,sessions,change,monkeypatch):
     cfg, lead_thread, owner_turn, task, employee, _ = setup_case
@@ -165,6 +173,23 @@ async def test_retry_reuses_original_card_and_rearms_only_its_sent_reply(setup_c
     if change=="changed_folder_before_release":
         snapshots = iter([scope,{**scope,"binding":"another-folder"}])
         monkeypatch.setattr(unpublished_retry,"resource_scope",lambda *_:next(snapshots))
+    if change in ("removed_config_before_release","busy_before_release"):
+        snapshots=iter([scope,None])
+        def changing_config(*_):
+            if first:=next(snapshots):
+                return first
+            if change=="busy_before_release":
+                raise sqlite3.OperationalError("database is locked")
+            raise ValueError("员工还没有配置知识库任务。")
+        monkeypatch.setattr(unpublished_retry,"resource_scope",changing_config)
+    if change=="busy_before_release":
+        with pytest.raises(sqlite3.OperationalError,match="locked"):
+            await unpublished_retry.retry(*args,apply=True)
+        async with sessions() as db:
+            assert (await db.get(AgentJob,parent.id)).status==unpublished_retry.STAGED
+        monkeypatch.setattr(unpublished_retry,"resource_scope",lambda *_:scope)
+        assert (await unpublished_retry.retry(*args,apply=True))["state"]=="queued"
+        return
     if change!="none":
         with pytest.raises(recovery.RecoveryDenied):
             await unpublished_retry.retry(*args,apply=True)

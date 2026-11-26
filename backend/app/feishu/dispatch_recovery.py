@@ -410,9 +410,13 @@ def main():
         else:
             operation=recover(AsyncSessionLocal,cfg,args.turn,args.task,apply=args.apply,require_document=args.require_published_document)
         print(json.dumps(asyncio.run(operation)))
+    except RecoveryDenied as exc:
+        cli.exit(2, str(exc)+"\n")
     except (ValueError,OSError,sqlite3.Error):
         cli.exit(2,"原来信、工单或授权条件不满足，未启动新的续办。\n")
 
 
 if __name__=="__main__":
-    main()
+    # Recovery helpers import this module. Use the same exception type at the CLI boundary.
+    from app.feishu.dispatch_recovery import main as run
+    run()

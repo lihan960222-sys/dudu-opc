@@ -62,6 +62,15 @@ def resource_scope(cfg, employee, pin):
     return outbound_scope(cfg,employee.id,alias,source,dest,title,auth,vendor)
 
 
+def required_resource(cfg, employee, pin):
+    try:
+        return resource_scope(cfg,employee,pin)
+    except recovery.RecoveryDenied:
+        raise
+    except (ValueError, KeyError, FileNotFoundError):
+        raise recovery.RecoveryDenied("员工的飞书授权或知识库配置已变更，无法按原授权续办。") from None
+
+
 def outbound_scope(cfg, employee, alias, source, dest, title, identity, vendor):
     from app.feishu import knowledge_document
     recovery.require(source and identity.get("_employee_oauth") and source.get("agent_id")==employee
@@ -285,7 +294,7 @@ async def _retry(sessions,cfg,owner_turn,task,previous_turn,*,apply):
             and int(turn.started_at.timestamp())<=int(history.at.timestamp())<=int(turn.finished_at.timestamp())
             and any(kind=="tool.completed" and d.get("call_id") in read_ids and d.get("ok") for kind,d in events),
             "已有写入、未知执行结果或缺少本轮完整读取回执，不能重新发布。")
-        scope=resource_scope(cfg,employee,pin)
+        scope=required_resource(cfg,employee,pin)
         resource=recovery.fingerprint(scope)
         observed=observed_target(events)
         count=(history.detail.get("result") or {}).get("messages_read")
@@ -330,7 +339,7 @@ async def _retry(sessions,cfg,owner_turn,task,previous_turn,*,apply):
             current_pin=await feishu_assignment.for_job(db,child.id)
             saved=await db.get(FeatureMessage,(owner,resume_key))
             recovery.require(current_pin and saved and not saved.result.get("withdrawn"))
-            current_scope=resource_scope(cfg,employee,current_pin)
+            current_scope=required_resource(cfg,employee,current_pin)
             with recovery.channel(cfg) as journal:
                 journal.execute("begin")
                 current_prior,_=prior_resource(journal,current_scope,employee.id,operation,count,observed,settings_file,started)
