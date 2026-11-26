@@ -52,6 +52,35 @@ async def test_unrelated_routine_cannot_acquire_the_weekly_grant():
     assert await weekly.proof_for_job(db, {}, NS(origin_kind="person")) is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sender,origin_key,expected", [
+    ("boss", "original", "om_request"), ("colleague", "original", None),
+    ("boss", "unrelated", None), ("boss", None, "om_request"),
+])
+async def test_weekly_reply_uses_the_signed_owner_request_after_an_internal_wake(tmp_path, sender, origin_key, expected):
+    from contextlib import closing
+    from unittest.mock import AsyncMock
+    from app.feishu.routing import journal
+    from app.feishu.submissions import event_key
+    from app.db.models import DirectTurnReceipt
+
+    original = event_key({"app":"lead_app", "event":"original"})
+    key = event_key({"app":"lead_app", "event":origin_key}) if origin_key else None
+    cfg = {"owner_id":"local", "steward":{"app_id":"lead_app", "open_id":"boss", "tenant_key":"tenant"}}
+    job = NS(id=8, owner_id="local", requester_thread_id=10, requester_turn_id=90 if key else 80)
+    db = AsyncMock()
+    db.scalar.return_value = {"turn_id":80, "thread_id":10, "event_key":key} if key else None
+    db.get.side_effect = lambda model, pair: (
+        NS(thread_id=10, turn_id=80) if model is DirectTurnReceipt and pair == ("local", original) else None)
+    with closing(journal(tmp_path / "channel.sqlite3")) as store:
+        store.execute("create table direct_turns(app text,event text,thread integer,turn integer)")
+        store.execute("insert into direct_turns values('lead_app','original',10,80)")
+        store.execute("insert into inbox(app,event,message) values('lead_app','original','om_request')")
+        store.execute("insert into owner_dm_sources(app,event,message,owner,tenant) values('lead_app','original','om_request',?,'tenant')", (sender,))
+        worker = NS(cfg=cfg, db=store)
+        assert await weekly.original_message(db, worker, job) == expected
+
+
 from tests.services.thread_harness import owner, sessions
 
 

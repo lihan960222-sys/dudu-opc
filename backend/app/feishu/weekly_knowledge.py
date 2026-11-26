@@ -307,6 +307,33 @@ def merged_draft(db, proof, prior, additions):
     return merged
 
 
+async def original_message(db, worker, job):
+    """Find the owner's original DM, including work continued by an internal supervisor turn."""
+    from app.db.models import DirectTurnReceipt
+    from .submissions import event_key
+
+    cfg = worker.cfg
+    if not job or job.owner_id != cfg["owner_id"]:
+        return None
+    thread, turn = job.requester_thread_id, job.requester_turn_id
+    origin = await db.scalar(select(AgentJobEvent.detail).where(
+        AgentJobEvent.job_id == job.id, AgentJobEvent.kind == "owner_request").order_by(AgentJobEvent.id).limit(1))
+    key = origin.get("event_key") if origin else None
+    if key:
+        receipt = await db.get(DirectTurnReceipt, (job.owner_id, key))
+        if not receipt or (receipt.thread_id, receipt.turn_id) != (thread, origin.get("turn_id")) or origin.get("thread_id") != thread:
+            return None
+        turn = receipt.turn_id
+    identity = cfg["steward"]
+    rows = worker.db.execute("""select i.app,i.event,i.message from direct_turns d
+        join inbox i using(app,event) join owner_dm_sources s using(app,event,message)
+        where d.thread=? and d.turn=? and i.app=? and s.owner=? and s.tenant=?""",
+        (thread, turn, identity["app_id"], identity["open_id"], identity["tenant_key"])).fetchall()
+    if len(rows) == 1 and (not key or event_key(rows[0]) == key):
+        return rows[0]["message"]
+    return None
+
+
 async def tick(worker):
     owner = worker.cfg.get("owner_id")
     imports = []
@@ -362,12 +389,9 @@ async def tick(worker):
             body = {"text":(f"每周知识库已核对，工单 #{job.task_id}。\n{url}" if verified else
                             f"每周知识库尚未确认，工单 #{job.task_id}。{(job.outcome_detail or '请查看派工记录。')[:130]}")}
             original = await db.get(AgentJob, grant.source_job_id)
-            if original:
-                target = worker.db.execute("""select i.message from direct_turns d join inbox i using(app,event)
-                    where d.thread=? and d.turn=? and i.app=?""",
-                    (original.requester_thread_id, original.requester_turn_id, worker.cfg["steward"]["app_id"])).fetchone()
-                if target and target[0]:
-                    body["reply_to"] = target[0]
+            target = await original_message(db, worker, original)
+            if target:
+                body["reply_to"] = target
             with worker.db:
                 marker = worker.db.execute("insert or ignore into knowledge_weekly_notice values(?, '')", (slot.event_key,))
                 if marker.rowcount:
