@@ -305,6 +305,19 @@ class Jobs:
                     if earlier and earlier.task_id and 'task_id' not in args:
                         args = {**args, 'task_id': earlier.task_id}
                     await feature_tasks.attach_command(db, job, args, subtask=nested)
+                    if context and not nested and approval_mode == "accept_edits" and check.get("commands"):
+                        from pathlib import Path
+                        from app.services import employee_check_review
+                        from app.services.role_workspace import checked_root, validate_configured_location
+                        from app.team.steward_review import direct_project_mode
+                        # Only a verified owner gave the employee this standing role grant.
+                        if await direct_project_mode(db, self.rt.owner_id, child, context.turn_id, "ask") == "accept_edits":
+                            folder = checked_root(Path(child.role_path))
+                            validate_configured_location(folder)
+                            await feature_tasks.check_employee_root(db, self.rt.owner_id, child, folder)
+                            recorded = employee_check_review.capture(job, folder, check)
+                            if recorded:
+                                event(db, job, employee_check_review.EVENT, {"checks": recorded})
                     if context:
                         event(db, job, "owner_request", {"turn_id":context.turn_id, "thread_id":context.thread_id,
                             "event_key":context.event_key, "text":context.original_text, "attachments":list(context.attachments),

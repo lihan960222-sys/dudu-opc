@@ -418,12 +418,25 @@ class ThreadApprovalGate:
                 auto = routine_auto
             elif auto is None and getattr(run, "uninterrupted_access", False):
                 auto = ("denied", "routine_tool_not_granted")
+        project_check = None
+        if auto is None and tool == "mcp__team__run_project_command" and run.ctx.approval_mode == "accept_edits":
+            from app.services import employee_check_review
+            try:
+                async with runtime.session() as db:
+                    project_check = await employee_check_review.current(db, run, input)
+            except (OSError, ValueError):
+                project_check = None
+            if project_check:
+                auto = ("allowed", employee_check_review.SOURCE)
         if auto is not None:
             status, source = auto
             if source == "routine_uninterrupted_grant":
                 self._uninterrupted_requests.add(request_id)
             async with runtime.session() as db:
-                won = await store.decide_approval(db, approval.id, status, by={"by": source})
+                decision_source = {"by": source}
+                if project_check:
+                    decision_source["project_check"] = project_check
+                won = await store.decide_approval(db, approval.id, status, by=decision_source)
             if won:
                 if status == "denied":
                     self._policy_denials[approval.id] = source

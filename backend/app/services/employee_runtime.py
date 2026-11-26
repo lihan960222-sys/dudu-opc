@@ -61,6 +61,22 @@ def _host_native_default(owner_id: str, employee_id: int) -> bool:
     return f"{owner_id}/{employee_id}" in {entry.strip() for entry in entries}
 
 
+async def checked_active_project(db, run):
+    """Verify the live role, project opt-in, peer boundaries and the process's turn lease."""
+    from app.db.models import Agent, Turn
+    from app.services import feature_tasks
+
+    project = run.ctx.project_runtime
+    employee = await db.get(Agent, project.employee_id)
+    turn = await db.get(Turn, run.turn_id, with_for_update=True)
+    if (not turn or turn.thread_id != run.thread_id or turn.owner_token != run.owner_token or turn.status != "running"
+            or not employee or employee.owner_id != project.owner_id or not employee.role_path
+            or Path(employee.role_path) != project.root or not native_enabled(project.owner_id, project.employee_id)):
+        raise ValueError("员工岗位、工单或项目授权已变更。")
+    await feature_tasks.check_employee_root(db, project.owner_id, employee, project.root)
+    return project
+
+
 def save_native_enabled(owner_id: str, employee_id: int, enabled: bool) -> None:
     from app.services.agent_memory import write_atomic
     if type(enabled) is not bool:
@@ -336,18 +352,24 @@ class ProjectRuntime:
         finally:
             pending.unlink(missing_ok=True)
 
-    def cli_options(self) -> list[str]:
-        # Named profiles express restricted reads on Windows. Legacy workspace-write
-        # grants broad reads and is never substituted for these options.
+    @property
+    def check_permission_name(self) -> str:
+        return self.permission_name + "-check"
+
+    def _filesystem(self, *, check=False):
         fs = {":root": "deny", ":minimal": "read", **{str(p): "read" for _, _, p in self.installed_tools},
-              str(self.root): "write" if self.writable else "read",
-              **{str(path): "read" for path in self.readable_roots}, str(_default_service_root()): "deny",
+              str(self.root): "write" if self.writable and not check else "read",
+              **{str(path): "read" for path in self.readable_roots if not check}, str(_default_service_root()): "deny",
               str(self.profile.parents[3]): "deny", str(_service_root()): "deny"}
-        fields = ", ".join(f"{json.dumps(k, ensure_ascii=False)}={json.dumps(v)}" for k, v in fs.items())
+        return "{" + ", ".join(f"{json.dumps(k, ensure_ascii=False)}={json.dumps(v)}" for k, v in fs.items()) + "}"
+
+    def cli_options(self) -> list[str]:
+        # Additional review can narrow an operation without changing the normal
+        # thread's named permissions. Neither profile can grant external access.
         config = {
             "windows.sandbox": '"mxc"',
             "default_permissions": json.dumps(self.permission_name),
-            f"permissions.{self.permission_name}.filesystem": "{" + fields + "}",
+            f"permissions.{self.permission_name}.filesystem": self._filesystem(),
             f"permissions.{self.permission_name}.network.enabled": "false",
             "cli_auth_credentials_store": '"file"',
             "projects": "{" + json.dumps(str(self.root), ensure_ascii=False) + '={trust_level="untrusted"}}',
@@ -357,6 +379,9 @@ class ProjectRuntime:
             "shell_environment_policy.inherit": '"core"', "allow_login_shell": "false",
             "analytics.enabled": "false", "check_for_update_on_startup": "false",
         }
+        if self.writable:
+            config[f"permissions.{self.check_permission_name}.filesystem"] = self._filesystem(check=True)
+            config[f"permissions.{self.check_permission_name}.network.enabled"] = "false"
         return [part for key, value in config.items() for part in ("-c", f"{key}={value}")]
 
     def sandbox_command(self, exe: Path, argv: list[str]) -> list[str]:
