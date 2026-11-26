@@ -112,6 +112,24 @@ def test_policy_mapping():
     assert codex_policy("ask", False).sandbox == "read-only"
 
 
+def test_employee_only_uses_scoped_tools_when_global_setting_is_implicit():
+    from dataclasses import replace
+    from app.core import app_settings
+    from app.services import feature_files
+
+    project = SimpleNamespace(writable=True)
+    frozen = app_settings.capture()
+    key = "LOCAL_TOOLS_ENABLED"
+    for source, enabled in (("default", True), ("environment", False), ("database", False)):
+        frozen[key] = replace(frozen[key], source=source, value=False, effective_value=False)
+        with app_settings.use(frozen):
+            assert not _turn("ask").tools
+            assert _turn("ask", project_runtime=project).tools is enabled
+            assert not _turn("plan", project_runtime=project).tools
+            features = feature_files.turn_config({}, None, False, project_runtime=project)["features"]
+            assert not features["unified_exec"] and not features["shell_tool"]
+
+
 async def test_service_restarts_resume_private_thread(codex, tmp_path, monkeypatch):
     from unittest.mock import AsyncMock
     from app.core import host_exec
@@ -210,9 +228,10 @@ async def test_private_turn_requires_same_scoped_feature_root(tmp_path, monkeypa
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows employee launch policy")
 async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
+    from dataclasses import replace
     from unittest.mock import AsyncMock, Mock
     from uuid import uuid4
-    from app.core import host_exec
+    from app.core import app_settings, host_exec
     from app.services import employee_runtime
     from app.services.provider_adapter import TurnContext
     from tests.services.test_employee_runtime import employee_project
@@ -220,7 +239,9 @@ async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
     project = employee_project(tmp_path, monkeypatch)
     monkeypatch.setattr(host_exec, "noninteractive_window_station", lambda: False)
     monkeypatch.setattr(host_exec, "windows_worker_token_status", lambda: "standard")
-    monkeypatch.setattr(settings, "LOCAL_TOOLS_ENABLED", True)
+    snapshot = app_settings.capture()
+    key = "LOCAL_TOOLS_ENABLED"
+    snapshot[key] = replace(snapshot[key], value=False, effective_value=False, source="default")
     probe = AsyncMock(side_effect=AssertionError("a regular assignment must never launch external checks"))
     monkeypatch.setattr(employee_runtime.cli_probe, "run", probe)
     exe = tmp_path / "codex.exe"
@@ -235,10 +256,13 @@ async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
                      "ephemeral": False, "status": {"type": "idle"}}
     requests = []
     workspace_roots = [str(project.root)]
+    attached_tools = {}
     async def rpc(method, params, **_options):
         requests.append((method, params))
         if method in {"thread/start", "thread/resume"}:
-            return {"thread": dict(stored_thread), "modelProvider": "openai", "model": params["model"],
+            attached_tools.update(params["config"]["mcp_servers"])
+            environments = {"environments": params["environments"]} if "environments" in params else {}
+            return {"thread": {**stored_thread, **environments}, "modelProvider": "openai", "model": params["model"],
                 "approvalPolicy": params["approvalPolicy"], "activePermissionProfile": {"id": params["permissions"]},
                 "cwd": str(project.root), "runtimeWorkspaceRoots": list(workspace_roots),
                 "instructionSources": [str(project.root / "AGENTS.md")]}
@@ -247,7 +271,8 @@ async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
         return {"initialize": {}, "account/read": {"account": {"type": "chatgpt"}},
                 "config/read": {"config": {}}, "thread/turns/list": {"data": []},
                 "skills/list": {"data": [{"cwd": str(project.root), "skills": []}]},
-                "mcpServerStatus/list": {"data": [], "nextCursor": None},
+                "mcpServerStatus/list": {"data": [{"name": server, "tools": {tool:{"name":tool} for tool in conf["enabled_tools"]}}
+                    for server,conf in attached_tools.items()], "nextCursor": None},
                 "turn/start": {"turn": {"id": "turn-1"}}}[method]
 
     async def done(run):
@@ -257,12 +282,17 @@ async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
     monkeypatch.setattr(codex_adapter.StdioRpc, "spawn", spawn)
     monkeypatch.setattr(codex_adapter._CodexTurn, "_pump", done)
 
-    async def start(state, number):
+    async def start(state, number, *, cloud=False):
         ctx = TurnContext(thread_id=12, turn_id=number, prompt="continue", workspace=project.root, model="gpt-fake",
             provider_session_id="backend", provider_state=state, resume=number > 1, history=AsyncMock(),
             feature_workspace=str(project.root), project_runtime=project, model_vendor="openai",
             approval_mode="accept_edits", bind_native_session=AsyncMock(return_value=True))
-        return await CodexAdapter().run_turn(ctx, SimpleNamespace(lost=False, emit=AsyncMock(return_value=True)), None)
+        if cloud:
+            ctx.team = SimpleNamespace(is_lead=False, strict_hierarchy=True, delegation_enabled=False,
+                feishu_tools=("feishu_list_sources",))
+            ctx.team_launch = SimpleNamespace(command="synthetic-mcp", args=(), env={})
+        with app_settings.use(snapshot):
+            return await CodexAdapter().run_turn(ctx, SimpleNamespace(lost=False, emit=AsyncMock(return_value=True)), None)
 
     state = {"employee_project": project.stamp}
     for number in (1, 2, 3):
@@ -284,6 +314,17 @@ async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
     monkeypatch.setattr(host_exec, "windows_worker_token_status", lambda: "administrator")
     rejected = await start(state, 6)
     assert rejected.error_code == "employee_boundary_unavailable" and spawn.await_count == 5
+    monkeypatch.setattr(host_exec, "windows_worker_token_status", lambda: "standard")
+    for source in ("environment", "database"):
+        snapshot[key] = replace(snapshot[key], source=source)
+        assert (await start(state, 7)).error_code == "local_tools_disabled" and spawn.await_count == 5
+    workspace_roots[:] = [str(project.root)]
+    cloud = await start(state, 8, cloud=True)
+    assert cloud.status == "succeeded", cloud.error
+    thread_config = next(p for m,p in reversed(requests) if m == "thread/resume")
+    assert thread_config["environments"] == [] and not thread_config["config"]["features"]["shell_tool"]
+    assert "feishu_list_sources" in thread_config["config"]["mcp_servers"]["team"]["enabled_tools"]
+    assert next(p for m,p in reversed(requests) if m == "turn/start")["environments"] == []
     probe.assert_not_awaited()
 
 

@@ -38,7 +38,7 @@ def turn_config(current, root, writable, *, consult_only=False, peer_access=None
     if project_runtime is not None:
         # Native tools run in the verified OS sandbox. Only backend-created MCP
         # brokers may be attached below; project/user MCP commands run as the host.
-        native_tools = not scheduled_knowledge
+        native_tools = writable and not scheduled_knowledge
         return {"mcp_servers": servers, "plugins": plugins, "web_search": "disabled",
                 **({"project_doc_max_bytes": 0} if scheduled_knowledge else {}),
                 "features": {"shell_tool": native_tools, "unified_exec": native_tools, "view_image": native_tools,

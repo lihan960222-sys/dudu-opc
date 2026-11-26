@@ -479,8 +479,10 @@ class CodexAdapter:
                     or getattr(ctx, "model_vendor", None) != project.model_vendor
                     or not callable(getattr(ctx, "bind_native_session", None))):
                 return TurnOutcome("failed", error="员工身份、项目目录或会话绑定已变更。", error_code="project_binding_changed")
-            if not app_settings.get("LOCAL_TOOLS_ENABLED"):
-                return TurnOutcome("failed", error="工作台尚未启用本地项目工具。", error_code="local_tools_disabled")
+            scoped_cloud = ((ctx.team_launch is not None and bool(getattr(ctx.team, "feishu_tools", ())))
+                            or (ctx.community_launch is not None and bool(ctx.community_tools)))
+            if ctx.approval_mode != "plan" and not _project_tools_allowed() and not scoped_cloud:
+                return TurnOutcome("failed", error="管理员已停用本机终端，本轮没有启动员工命令。", error_code="local_tools_disabled")
             if (ctx.computer or ctx.browser or ctx.composio_launch or ctx.memory_launch
                     or ctx.consult_only or (project.writable and ctx.approval_mode == "plan")):
                 return TurnOutcome("failed", error="本次派工的工具或读写范围与员工项目不符。", error_code="project_scope_mismatch")
@@ -593,12 +595,19 @@ def _private_thread_matches(thread, project, expected_id=None):
             and rollout.resolve().is_relative_to(project.profile))
 
 
-def _private_workspace_matches(started, project, scheduled):
+def _project_tools_allowed():
+    setting = app_settings.resolve("LOCAL_TOOLS_ENABLED")
+    # A project reaches this adapter only with its own owner grant and named filesystem profile.
+    # An administrator's explicit false applies to those grants as well.
+    return setting.effective_value is True or (setting.source == "default" and setting.error is None)
+
+
+def _private_workspace_matches(started, project, no_environment):
     if _native_path(started.get("cwd")) != project.root:
         return False
     roots = started.get("runtimeWorkspaceRoots")
     if roots is not None and (not isinstance(roots, list) or
-            (not (scheduled and not roots) and {_native_path(p) for p in roots} != {project.root})):
+            (not (no_environment and not roots) and {_native_path(p) for p in roots} != {project.root})):
         return False
     sources = started.get("instructionSources", [])
     if not isinstance(sources, list):
@@ -681,6 +690,8 @@ class _CodexTurn:
         # A computer is the agent's sandbox: its turns always have tools, and they are the computer's.
         self.tools = bool(app_settings.get("LOCAL_TOOLS_ENABLED")) or self.computer is not None
         self.mode = self.ctx.approval_mode or "ask"
+        if self.project:
+            self.tools = self.mode != "plan" and not self.scheduled_knowledge and self.project.writable and _project_tools_allowed()
         has_gated_mcp = (self.ctx.team_launch is not None or self.ctx.composio_launch is not None
                          or self.ctx.browser is not None or self.ctx.community_launch is not None)
         if self.mode == "approve_for_me" and has_gated_mcp:
@@ -881,7 +892,7 @@ class _CodexTurn:
                     scheduled_knowledge=self.scheduled_knowledge)
             except (AttributeError, TypeError, ValueError, RpcError, RpcClosed, asyncio.TimeoutError):
                 return self._failed("Could not confirm scoped task tools.", "codex_error")
-            if not self.project or self.scheduled_knowledge:
+            if not self.project or not self.tools:
                 common["environments"] = []
         launch = self.ctx.memory_launch
         if self.computer is not None:
@@ -1040,8 +1051,8 @@ class _CodexTurn:
             self.model = started["model"]
             if (not isinstance(profile, dict) or profile.get("id") != self.project.permission_name
                     or started.get("approvalPolicy") != self.policy.approval
-                    or not _private_workspace_matches(started, self.project, self.scheduled_knowledge)
-                    or (self.scheduled_knowledge and thread.get("environments") != [])
+                    or not _private_workspace_matches(started, self.project, not self.tools)
+                    or (not self.tools and thread.get("environments") != [])
                     or not _private_thread_matches(thread, self.project)):
                 return self._failed("引擎未确认员工项目目录、读写权限或后台会话保存位置。", "codex_policy_mismatch")
         self.thread_id = thread.get("id") if isinstance(thread, dict) and isinstance(thread.get("id"), str) else None
@@ -1125,7 +1136,7 @@ class _CodexTurn:
             turn_params["model"] = self.ctx.model
         if self.ctx.effort:
             turn_params["effort"] = self.ctx.effort
-        if self.computer is not None or (self.feature and not self.project) or self.scheduled_knowledge:
+        if self.computer is not None or (self.feature and (not self.project or not self.tools)):
             turn_params["environments"] = []
         try:
             turn = await self._call("turn/start", turn_params)
@@ -1371,7 +1382,7 @@ class _CodexTurn:
         if self.project:
             remote = (self.ctx.community_launch is not None and item.get("server") == community_mcp_bridge.SERVER
                       and item.get("tool") in self.ctx.community_tools)
-            if ((kind == "commandExecution" and not self.scheduled_knowledge) or (kind == "fileChange" and self.project.writable)
+            if ((kind in {"commandExecution", "fileChange"} and self.tools and self.project.writable)
                     or (kind == "mcpToolCall" and (project_tool or remote))):
                 self.project_items[item_id] = item
             else:
