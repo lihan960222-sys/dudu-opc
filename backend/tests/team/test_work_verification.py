@@ -8,6 +8,15 @@ from app.db.models import Agent, Thread
 from app.team import service, work_verification as verify
 
 
+def test_windows_shell_receipt_matches_one_whole_command():
+    command = "cmd.exe /d /c verify.cmd"
+    prefix = r'"C:\Program Files\Codex\pwsh.exe" -NoProfile -Command '
+    for quoted in (f"'{command}'", f'"{command}"'):
+        assert verify._matches_command(prefix + quoted, command)
+        assert not verify._matches_command(prefix + quoted + "; echo done", command)
+    assert not verify._matches_command(prefix + f"'{command}; echo done'", command)
+
+
 def test_receipts_are_typed_and_paths_cannot_escape():
     call=("feature_files","read_text",{"scope":"role","path":"docs/note.md"})
     result={"content":[{"text":json.dumps({"text":"hello"})}]}

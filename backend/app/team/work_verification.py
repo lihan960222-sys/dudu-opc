@@ -142,8 +142,8 @@ def _matches_command(command, wanted):
     if command.strip()==wanted:
         return True
     # The Windows host may include its PowerShell launcher in the event.
-    launcher=re.fullmatch(r'''(?is)(?:"[^"]*(?:powershell|pwsh)\.exe"|(?:[^"\s]*[\\/])?(?:powershell|pwsh)(?:\.exe)?)\s+(?:(?:-NoLogo|-NoProfile|-NonInteractive)\s+)*-Command\s+"([^"]*)"''',command.strip())
-    return bool(launcher and launcher[1]==wanted)
+    launcher=re.fullmatch(r'''(?is)(?:"[^"]*(?:powershell|pwsh)\.exe"|(?:[^"\s]*[\\/])?(?:powershell|pwsh)(?:\.exe)?)\s+(?:(?:-NoLogo|-NoProfile|-NonInteractive)\s+)*-Command\s+(?:"([^"]*)"|'([^']*)')''',command.strip())
+    return bool(launcher and wanted in launcher.groups())
 
 
 def local_receipt(call, result):
