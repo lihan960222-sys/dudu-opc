@@ -11,6 +11,36 @@ from app.feishu.routing import journal
 from app.feishu.worker import Worker
 
 
+async def read_history(worker, row):
+    """Exercise the scoped history adapter; dispatch itself is covered separately."""
+    msg = json.loads(row["payload"])
+    return await history.answer(worker,row,msg,json.loads(msg["content"])["text"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first",["让二狗整理一下和李晗的聊天内容","叫二狗把我跟李晗聊的东西归归类"])
+async def test_named_history_and_quoted_followups_share_one_dispatch(tmp_path,first):
+    identity={'app_id':'lead','open_id':'ou_owner','tenant_key':'tenant'}
+    cfg={'steward':identity,'roles':{},'steward_thread':1}
+    with closing(journal(tmp_path/'db')) as db:
+        worker=Worker(cfg,Publisher(cfg,db,tmp_path))
+        for index,text in enumerate([first,'你看一下','怎么样了']):
+            msg={'chat_type':'p2p','message_type':'text','message_id':str(index),
+                 'parent_id':str(index-1),'content':json.dumps({'text':text})}
+            event={'header':{'app_id':'lead','tenant_key':'tenant','event_id':str(index)},
+                   'event':{'sender':{'sender_type':'user','sender_id':{'open_id':'ou_owner'}},'message':msg}}
+            assert receive(db,identity,event)
+            row=db.execute('select * from inbox where event=?',(str(index),)).fetchone()
+            if index:
+                await worker.process(row)
+            else:
+                await read_history(worker,row)
+            reply=json.loads(db.execute('select body from outbox order by rowid desc limit 1').fetchone()[0])['text']
+            assert '二狗' in reply and '李晗' in reply
+        assert db.execute('select count(*) from history_dispatch').fetchone()[0]==1
+        assert db.execute('select count(*) from submissions').fetchone()[0]==0
+
+
 @pytest.mark.asyncio
 async def test_owner_only_bounded_history_survives_reopen(tmp_path,monkeypatch):
     identity={'app_id':'cli_test','open_id':'ou_owner','tenant_key':'tenant'}
@@ -150,12 +180,12 @@ async def test_named_private_job_uses_pinned_active_employee_and_one_owner_reply
                   'content':json.dumps({'text':f'请让{agent}总结我和小周最近6小时的聊天记录'})}}}
         wrong=event('wrong','渲染')
         assert receive(db,identity,wrong)
-        await worker.process(db.execute("select * from inbox where event='wrong'").fetchone())
+        await read_history(worker,db.execute("select * from inbox where event='wrong'").fetchone())
         assert not calls
         right=event('right','焊接')
         assert receive(db,identity,right)
         row=db.execute("select * from inbox where event='right'").fetchone()
-        await worker.process(row)
+        await read_history(worker,row)
         if cloud:
             await asyncio.gather(*worker.private_summary_tasks.values())
         assert len(calls)==2
@@ -173,7 +203,7 @@ async def test_named_private_job_uses_pinned_active_employee_and_one_owner_reply
         assert answer['reply_to']=='om_right'
         assert db.execute('select count(*) from submissions').fetchone()[0]==0
         assert not receive(db,identity,right)
-        await worker.process(row)
+        await read_history(worker,row)
         assert len(calls)==2
         if not revoke:
             delivered=[]

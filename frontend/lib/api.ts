@@ -493,6 +493,7 @@ export type Agent = {
   model: string | null;
   effort?: string | null;
   workspace_path: string | null;
+  team_workspaces_readable?: boolean;
   approval_mode: ApprovalMode;
   pinned?: boolean;
   role_path?: string | null;
@@ -562,6 +563,7 @@ export type AgentInput = {
   model?: string | null;
   effort?: string | null;
   workspace_path?: string | null;
+  team_workspaces_readable?: boolean;
   approval_mode?: ApprovalMode;
   pinned?: boolean;
   memory_enabled?: boolean;

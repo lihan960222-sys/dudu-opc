@@ -5,6 +5,7 @@ import { RefreshCw, X } from "lucide-react";
 import { useVersionUpdate } from "@/lib/use-version-update";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { directoryMode, directoryModes } from "@/lib/directory-mode";
 import { api, ApiError, isLaunchTokenMissing, type Agent, type Engine, type LocalStatus, type NotificationPreferences, type Thread } from "@/lib/api";
 import { notifyApprovalNeeded, notifyTurnCompletion } from "@/lib/desktop-notifications";
 import { activeAgents, chatModelLabel, modelChoice } from "@/lib/agents";
@@ -1160,8 +1161,8 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
       approvalMode={
         ready && gate.phase === "ready" && (gate.status.tools_enabled || threadComputer) && threadId !== null
           ? {
-              label: t(`workspace.${threadAgent?.approval_mode ?? "ask"}`),
-              hint: t("workspace.approvalHint"),
+              label: unified && threadAgent ? directoryModes[directoryMode(threadAgent.approval_mode)].label : t(`workspace.${threadAgent?.approval_mode ?? "ask"}`),
+              hint: unified && threadAgent ? directoryModes[directoryMode(threadAgent.approval_mode)].help : t("workspace.approvalHint"),
             }
           : undefined
       }
@@ -1445,6 +1446,7 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
             <Notice title={t("workspace.chatFailed")}>{stream.error}</Notice>
           ) : (
             <Conversation
+              steward={Boolean(thread?.kind === "chat" && thread.agent_id && (teamState === undefined || thread.agent_id === leadId))}
               threadId={threadId}
               workspacePath={thread?.workspace_path ?? null}
               loading={threadId !== null && thread === null}

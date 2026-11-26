@@ -196,6 +196,7 @@ class TurnContext:
     claude_account: str | None = None
     # Confined turns cannot act through alternate tools.
     draft_only: bool = False
+    peer_workspaces: dict[str,str] | None = None
     feature_workspace: str | None = None
     consult_only: bool = False
     steward_deepseek: bool = False

@@ -51,6 +51,7 @@ class AgentCreateRequest(BaseModel):
     workspace_path: str | None = Field(default=None, max_length=1000)
     approval_mode: ApprovalMode = "ask"
     pinned: bool = False
+    team_workspaces_readable: bool = False
     memory_enabled: bool = True
     # Before each turn, add relevant notes and earlier conversations to the
     # person's message (docs/MEMORY.md). Has no effect while memory is off.
@@ -105,6 +106,7 @@ class AgentUpdateRequest(BaseModel):
     workspace_path: str | None = Field(default=None, max_length=1000)
     approval_mode: ApprovalMode | None = None
     pinned: bool | None = None
+    team_workspaces_readable: bool | None = None
     memory_enabled: bool | None = None
     recall_enabled: bool | None = None
     memory_upkeep: bool | None = None
@@ -140,7 +142,7 @@ class AgentUpdateRequest(BaseModel):
     def _something_to_change(self):
         if not self.model_fields_set:
             raise ValueError("send at least one field to change")
-        for field in ("name", "instructions", "provider", "approval_mode", "pinned", "memory_enabled", "recall_enabled", "memory_upkeep", "compaction_summary", "use_helper", "archived"):
+        for field in ("name", "instructions", "provider", "approval_mode", "pinned", "team_workspaces_readable", "memory_enabled", "recall_enabled", "memory_upkeep", "compaction_summary", "use_helper", "archived"):
             if field in self.model_fields_set and getattr(self, field) is None:
                 raise ValueError(f"{field} cannot be null")
         return self
@@ -165,6 +167,7 @@ class AgentResponse(BaseModel):
     can_staff_team: bool = False
     approval_mode: ApprovalMode
     pinned: bool
+    team_workspaces_readable: bool = False
     memory_enabled: bool
     recall_enabled: bool = True
     memory_upkeep: bool = True

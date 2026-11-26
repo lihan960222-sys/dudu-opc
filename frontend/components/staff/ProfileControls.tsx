@@ -10,10 +10,14 @@ export function FolderField({
   value,
   onChange,
   disabled = false,
+  label = "工作目录 · 家中主机",
+  access,
 }: {
   value: string;
   onChange: (path: string) => void;
   disabled?: boolean;
+  label?: string;
+  access?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [address, setAddress] = useState("");
@@ -45,7 +49,7 @@ export function FolderField({
   return (
     <div className="dp-field">
       <label>
-        工作目录 · 家中主机
+        <span className="flex flex-wrap items-center justify-between gap-2">{label}{access && <small className="font-normal text-muted">{access}</small>}</span>
         <input
           className="dp-input dp-mono"
           value={value}

@@ -116,6 +116,11 @@ async def _serving(app: FastAPI):
             # A damaged settings row must never stop startup (D-013 4.4a);
             # the resolver then serves the profile defaults.
             logger.exception("could not load saved settings; using defaults")
+    if settings.STEWARD_STRICT_OWNER and not settings.TENANT_SCHEMAS_ENABLED:
+        from app.db.session import AsyncSessionLocal
+        from app.services.agent_store import cap_existing_employee_modes
+        async with AsyncSessionLocal() as db:
+            await cap_existing_employee_modes(db,settings.STEWARD_STRICT_OWNER)
     logger.info(f"Database in use: {settings.DATABASE_DESCRIPTION}")
     # Engine processes a hard kill of an earlier backend left running (they
     # run in sessions of their own) are ended now; only ones verifiably ours

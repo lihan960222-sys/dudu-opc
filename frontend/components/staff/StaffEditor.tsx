@@ -2,14 +2,16 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Check, FileText, MessageSquare, Pencil, UserRound } from "lucide-react";
-import { api, request, type Agent, type ApprovalMode, type Engine } from "@/lib/api";
+import { api, request, type Agent, type Engine } from "@/lib/api";
 import { teamActionsFor, type ProfileTeamAction } from "@/lib/staff-team";
 import { canOpenWorkbench } from "@/lib/session";
 import { reportingPath } from "@/lib/reporting";
 import { useT } from "@/lib/use-i18n";
 import { collaboration, type TeamState } from "@/lib/collaboration";
-import type { SkillSummary } from "@/lib/skills";
+import { StaffCapabilities } from "./StaffCapabilities";
 import { StaffModelFields } from "./ProfileControls";
+import { directoryMode, directoryModes } from "@/lib/directory-mode";
+import { TeamWorkspaceAccess } from "./TeamWorkspaceAccess";
 import { DeepSeekKey } from "./DeepSeekKey";
 import { FeishuAccess } from "./FeishuAccess";
 import { useSession } from "../AuthGate";
@@ -51,7 +53,8 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
   const [provider, setProvider] = useState(agent?.provider ?? "codex"),
     [model, setModel] = useState<string | null>(agent?.model ?? null);
   const [effort,setEffort] = useState<string | null>(agent?.effort ?? null);
-  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(agent?.approval_mode ?? "ask");
+  const [teamFiles, setTeamFiles] = useState(agent?.team_workspaces_readable ?? false);
+  const [approvalMode, setApprovalMode] = useState(directoryMode(agent?.approval_mode));
   const [confirm,setConfirm] = useState<ProfileTeamAction | null>(null);
   const [teamError,setTeamError] = useState("");
   const [path, setPath] = useState(
@@ -67,26 +70,9 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
   const [busy, setBusy] = useState(false),
     [notice, setNotice] = useState(""),
     [error, setError] = useState("");
-  const [skills, setSkills] = useState<SkillSummary[]>([]),
-    [skillError, setSkillError] = useState("");
   const [canStaff, setCanStaff] = useState(agent?.can_staff_team ?? false);
   const [makeLead, setMakeLead] = useState(false);
   const [teamMember, setTeamMember] = useState(!!lead);
-  useEffect(() => {
-    if (tab !== "tools" || !agent) return;
-    let live = true;
-    api.listSkills(agent.id).then(
-      (s) => {
-        if (live) setSkills(s);
-      },
-      (e) => {
-        if (live) setSkillError(String(e));
-      },
-    );
-    return () => {
-      live = false;
-    };
-  }, [agent, tab]);
   const persisted = useRef<Agent | null>(agent);
   const [loadTick, reload] = useState(0);
   useEffect(() => {
@@ -154,6 +140,8 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
         description: summary.trim() || null,
         provider,
         model, effort, ...(ownsHost ? { approval_mode: approvalMode } : {}),
+        ...(ownsHost && !isLead && !makeLead && ((provider === "codex" && teamFiles) !== (agent?.team_workspaces_readable ?? false))
+          ? { team_workspaces_readable: provider === "codex" && teamFiles } : {}),
       };
       const before = persisted.current;
       if (agent?.role_path && !rules) throw Error("请先重新读取工作指令");
@@ -232,6 +220,22 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
       setBusy(false);
     }
   }
+  const accessFields = (<>
+              <section className="dp-workspace-policy">
+                <FolderField value={path} onChange={setPath} label="自己的工作目录" />
+                {ownsHost && <label className="dp-field">
+                  <span>工作目录权限</span>
+                  <select className="dp-input" value={approvalMode} disabled={busy}
+                    onChange={e => setApprovalMode(directoryMode(e.target.value))}>
+                    {Object.entries(directoryModes).map(([value, mode]) => <option key={value} value={value}>{mode.label}</option>)}
+                  </select>
+                  <small>{directoryModes[approvalMode].help}</small>
+                </label>}
+                {ownsHost && !isLead && !makeLead && provider === "codex" && (
+                  <TeamWorkspaceAccess value={teamFiles} onChange={setTeamFiles} disabled={busy} />
+                )}
+              </section>
+  </>);
   return (
     <div className="dp-profile">
       <div className="dp-profilehead">
@@ -261,8 +265,8 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
       <div className="dp-tabs dp-profiletabs" aria-label="档案栏目">
         {[
           ["basic", "基本资料"],
-          ["rules", "AGENTS.md"],
-          ["tools", "能力"],
+          ["rules", "岗位指令"],
+          ...(agent ? [["tools", "技能与连接"], ["access", "目录与权限"], ["team", "汇报关系"]] : []),
         ].map(([id, label]) => (
           <button key={id} aria-pressed={tab === id} onClick={() => setTab(id)}>
             {label}
@@ -317,16 +321,6 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
                   setModel(m);
                 }}
               />
-              {ownsHost && <label className="dp-field">
-                <span>岗位操作权限</span>
-                <select className="dp-input" value={approvalMode} onChange={e => setApprovalMode(e.target.value as ApprovalMode)}>
-                  <option value="ask">按次审批</option>
-                  <option value="plan">只读计划</option>
-                  <option value="accept_edits">允许编辑（管家可代审任务文件）</option>
-                  {approvalMode === "approve_for_me" && <option value="approve_for_me">引擎自动审查</option>}
-                  {approvalMode === "full_access" && <option value="full_access">完全访问</option>}
-                </select>
-              </label>}
               {ownsHost && (isLead || (!agent && makeLead)) && <label className="dp-field">
                 <span><input type="checkbox" checked={canStaff} onChange={e => setCanStaff(e.target.checked)} /> 允许大管家按需招人</span>
                 <small>大管家可代审只读岗位，沿用发起员工的模型，使用独立工作目录，不增加工具权限。超出范围仍由你审批。</small>
@@ -350,9 +344,14 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
                   </span>
                 </label>
               )}
-              <FolderField value={path} onChange={setPath} />
+
+              {!agent && accessFields}
             </>
-          ) : tab === "rules" ? (
+          ) : tab === "access" ? (<>
+            {accessFields}
+            <div className="dp-cap-row"><span>工作记忆</span><small>{agent?.memory_enabled === false ? "已关闭" : "已开启"}</small></div>
+            {onOpenAdvanced && <button type="button" className="dp-link" onClick={onOpenAdvanced}>管理执行引擎与应用授权</button>}
+          </>) : tab === "rules" ? (
             <>
               <div className="dp-filehead dp-mono">
                 <FileText />
@@ -370,35 +369,20 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
                 />
               </label>
             </>
-          ) : (
+          ) : tab === "tools" && agent ? (
             <>
-              <h3>技能与工具</h3>
-              {skills.map((s) => (
-                <p key={s.name}>
-                  {s.name} · {s.enabled ? "已启用" : "已停用"}
-                </p>
-              ))}
-              {skills.length === 0 && !skillError && (
-                <small>暂无已登记技能。</small>
-              )}
-              {skillError && <small role="alert">{skillError}</small>}
+              <StaffCapabilities employee={agent.id} />
               {agent && (member || isLead) && ownsHost && (
-                <>
-                  <button type="button" className="dp-link" aria-expanded={showFeishu}
+                <section className="dp-cap-section">
+                  <button type="button" className="dp-cap-toggle" aria-expanded={showFeishu}
                     onClick={() => setShowFeishu(!showFeishu)}>
-                    {showFeishu ? "收起飞书能力" : "配置飞书能力"}
+                    <strong>飞书连接</strong><span>{showFeishu ? "收起" : "管理授权"}</span>
                   </button>
                   {showFeishu && <FeishuAccess employee={agent.id} name={agent.name} isLead={isLead} members={members} />}
-                </>
+                </section>
               )}
-              <h3>执行权限</h3>
-              <p>审批模式 · {t(`profile.approval.${agent?.approval_mode ?? "ask"}`)}</p>
-              <p>
-                工作记忆 · {agent?.memory_enabled === false ? "关闭" : "开启"}
-              </p>
-              {agent && onOpenAdvanced && <button type="button" className="dp-link" onClick={onOpenAdvanced}>更多员工设置</button>}
             </>
-          )}
+          ) : null}
           {ruleError && (
             <p role="alert" className="dp-error">
               {ruleError}{" "}
@@ -408,8 +392,8 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
             </p>
           )}
         </div>
-        <details className="dp-reporting">
-          <summary>汇报关系与团队管理</summary>
+        {tab === "team" && <section className="dp-cap-section dp-reporting">
+          <h3>汇报关系</h3>
           <div className="dp-chain">
             <div className="dp-chainrow">
               <span className="dp-face blue">
@@ -450,17 +434,17 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
             </div>}
             {teamError && <p role="alert" className="dp-error">{teamError}</p>}
           </div>}
-        </details>
+        </section>}
       </div>
       <div className="dp-actions">
-        <button
+        {(tab === "basic" || tab === "access" || tab === "rules") && <button
           className="dp-button primary"
           disabled={busy || !name.trim() || (!!agent?.role_path && !rules)}
           onClick={() => void save()}
         >
           <Check />
           {busy ? "保存中…" : agent ? "保存更改" : "确认入职"}
-        </button>
+        </button>}
         {notice && <small role="status">{notice}</small>}
       </div>
       {error && (

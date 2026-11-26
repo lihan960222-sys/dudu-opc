@@ -247,3 +247,19 @@
 #workbench .dp-org-tree ul>li::before {content:"";position:absolute;left:0;top:0;height:100%;border-left:1px solid var(--line)}
 #workbench .dp-org-tree ul>li:last-child::before {height:21px}
 #workbench .dp-org-tree ul>li::after {content:"";position:absolute;left:0;top:21px;width:15px;border-top:1px solid var(--line)}
+
+#workbench .dp-workspace-policy {display:grid;gap:12px;min-width:0;border:1px solid var(--line);border-radius:12px;padding:14px}
+#workbench .dp-workspace-policy > label {padding-top:12px;border-top:1px solid var(--line)}
+#workbench .dp-workspace-policy > label select {width:auto;max-width:100%}
+#workbench .dp-cap-section{border:1px solid var(--line);border-radius:14px;padding:16px 18px;min-width:0}
+#workbench .dp-cap-section h3{font-size:15px;margin:0 0 10px;font-weight:650}
+#workbench .dp-cap-section p,#workbench .dp-cap-row small{color:var(--sub);font-size:13px}
+#workbench .dp-cap-row,#workbench .dp-cap-toggle{display:flex;align-items:center;justify-content:space-between;gap:12px}
+#workbench .dp-cap-row{padding:9px 0;border-top:1px solid var(--line)}
+#workbench .dp-cap-row strong,#workbench .dp-cap-row small{display:block;overflow-wrap:anywhere}
+#workbench .dp-cap-row span,#workbench .dp-cap-toggle span{color:var(--sub);font-size:12px;white-space:nowrap}
+#workbench .dp-cap-toggle{width:100%;text-align:left}
+#workbench .dp-cap-catalog{margin-top:10px;color:var(--sub);font-size:13px}
+#workbench .dp-cap-catalog summary{cursor:pointer}
+#workbench .dp-profiletabs{overflow-x:auto}
+#workbench .dp-profiletabs button{white-space:nowrap}

@@ -61,6 +61,7 @@ class Agent(Base):
     # Null means the default workspace root, resolved when a thread is created.
     workspace_path: Mapped[str | None] = mapped_column(String, nullable=True)
     manager_agent_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    team_workspaces_readable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=expression.false())
     can_staff_team: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=expression.false())
     role_path: Mapped[str | None] = mapped_column(String, nullable=True)
     approval_mode: Mapped[str] = mapped_column(

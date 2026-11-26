@@ -26,6 +26,7 @@ class TurnTeam:
     setup_allowed: bool = False
     strict_hierarchy: bool = False
     feature_consult: bool = False
+    feishu_tools: tuple[str, ...] = ()
 
 
 def automatic(tool, mode, team, arguments):
@@ -34,6 +35,16 @@ def automatic(tool, mode, team, arguments):
     if team is None:
         return 'denied', 'no_team'
     name = tool.removeprefix('mcp__team__')
+    if name == "employee_capabilities":
+        return "allowed","own_capabilities"
+    if name == "enable_local_skill":
+        if mode=="plan" or team.origin!="person":
+            return "denied","outside_skill_scope"
+        return "allowed","vetted_local_skill"
+    if name.startswith('feishu_'):
+        if name in team.feishu_tools and not team.is_lead and mode != 'plan':
+            return 'allowed', 'owner_feishu_assignment'
+        return 'denied', 'outside_feishu_assignment'
     if name == 'propose_direct_report':
         if team.feature_consult and team.strict_hierarchy and team.delegation_enabled and mode != 'plan' and team.origin == 'person':
             return 'allowed','staff_proposal'

@@ -16,10 +16,14 @@ from .setup_specialist import APP, dpapi
 
 AUTHORIZE = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
 TOKEN = "https://accounts.feishu.cn/oauth/v3/token"
+PKCE_TOKEN = "https://open.feishu.cn/open-apis/authen/v2/oauth/token"
 USER_INFO = "https://open.feishu.cn/open-apis/authen/v1/user_info"
 ACTIONS = {
+    "wiki":{"wiki:node:read"},
+    "folder": {"space:document:retrieve"},
+    "delete": {"space:document:delete", "space:document:retrieve"},
     "history": {"im:chat:read", "im:message:readonly", "im:message.p2p_msg:get_as_user"},
-    "doc": {"docx:document:create", "docx:document:write_only"},
+    "doc": {"docx:document:create", "docx:document:write_only", "docx:document:readonly"},
 }
 ALL_SCOPES = frozenset().union(*ACTIONS.values(), {"offline_access"})
 
@@ -34,6 +38,16 @@ class _GrantExpired(OwnerOAuthError):
 
 def _hash(value):
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def employee_config(cfg, employee):
+    if employee is None or employee == cfg["steward"].get("agent_id"):
+        return cfg
+    for role in cfg.get("roles", {}).values():
+        if role["agent_id"] == employee and role.get("owner_open_id"):
+            return {**cfg, "_employee_oauth": True, "steward": {
+                **role, "open_id": role["owner_open_id"], "tenant_key": cfg["steward"]["tenant_key"]}}
+    raise ValueError("请先绑定该员工的飞书应用。")
 
 
 def _profile(cfg):
@@ -76,6 +90,12 @@ def _app_secret(cfg):
     path, _ = _profile(cfg)
     role = cfg["steward"]
     secret = os.environ.get(role["secret_env"])
+    if not secret and os.name == "nt" and cfg.get("_employee_oauth"):
+        from .setup_specialist import credential_path
+        try:
+            return dpapi(credential_path(path,role["app_id"]).read_bytes(),unlock=True).decode("utf-8")
+        except (OSError, ValueError):
+            raise OwnerOAuthError("本机无法读取该员工的飞书密钥。") from None
     if not secret and os.name == "nt":
         try:
             # set-feishu-secret.ps1 writes CurrentUser DPAPI as hex over UTF-16LE.
@@ -93,9 +113,17 @@ def _request(method, url, **kwargs):
         with httpx.Client(timeout=8, follow_redirects=False) as client:
             response = client.request(method, url, **kwargs)
             data = response.json()
-            if isinstance(data,dict) and (data.get("error") == "invalid_grant"
-                    or str(data.get("code","")) in {"20037","20073"}):
-                raise _GrantExpired("老板的飞书授权已失效，请重新连接。")
+            if isinstance(data,dict) and (response.is_error or data.get("code",0) != 0 or data.get("error")):
+                label = "核对飞书账号" if url == USER_INFO else "换取飞书凭证"
+                number = str(data.get("code",""))
+                suffix = f"，飞书错误码 {number}" if number.isascii() and number.isdigit() else ""
+                rejected = data.get("error") == "invalid_grant" or number in {"20037","20073"}
+                grant_type = (kwargs.get("data") or kwargs.get("json") or {}).get("grant_type")
+                if rejected and grant_type == "refresh_token":
+                    raise _GrantExpired("飞书续期凭据已失效，请重新连接。")
+                if rejected and grant_type == "authorization_code":
+                    raise OwnerOAuthError(f"飞书拒绝了本次授权码（HTTP {response.status_code}{suffix}）。")
+                raise OwnerOAuthError(f"{label}失败（HTTP {response.status_code}{suffix}）。")
             response.raise_for_status()
             if not isinstance(data, dict) or data.get("error") or data.get("code", 0) != 0:
                 raise ValueError
@@ -105,14 +133,18 @@ def _request(method, url, **kwargs):
 
 
 def _token(cfg, **form):
-    return _request("POST", TOKEN, data={"client_id":cfg["steward"]["app_id"],
-                                         "client_secret":_app_secret(cfg), **form})
+    payload = {"client_id": cfg["steward"]["app_id"], "client_secret": _app_secret(cfg), **form}
+    if form["grant_type"] == "authorization_code":
+        return _request("POST", PKCE_TOKEN, json=payload)
+    return _request("POST", TOKEN, data=payload)
 
 
 def start(cfg, action, uri, browser):
     if action not in ("both", *ACTIONS):
         raise OwnerOAuthError("请选择聊天记录、云文档或两项授权。")
-    scopes = set(ALL_SCOPES) if action == "both" else ACTIONS[action] | {"offline_access"}
+    if action == "delete" and not cfg.get("_employee_oauth"):
+        raise OwnerOAuthError("请在员工自己的飞书应用中授权删除。")
+    scopes = (ACTIONS["history"] | ACTIONS["doc"] if action == "both" else ACTIONS[action]) | {"offline_access"}
     state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(64)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     with _db(cfg, lock=True) as (db, key):

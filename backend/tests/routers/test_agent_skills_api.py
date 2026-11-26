@@ -296,3 +296,13 @@ ROUTES.extend([
     ("POST", "/api/v1/agents/1/skills/learn/x", {"thread_id": 1, "turn_id": 1, "description": "d", "body": "b", "reviewed": True}),
     ("POST", "/api/v1/agents/1/skills/x/undo", {"revision": "a" * 64}),
 ])
+
+
+async def test_local_skill_catalog_preserves_named_skill_and_lists_only_own_tools(api):
+    agent = await make(api)
+    await put(api,agent,"catalog",description="Private notes",body="Original")
+    listing=await api.get(url(agent,"catalog/available"))
+    assert listing.status_code==200
+    assert listing.json()["enabled"]==["catalog"] and listing.json()["tools"]==[]
+    assert listing.json()["available"][0]["template_id"]
+    assert (await api.get(url(agent,"catalog"))).json()["body"]=="Original"

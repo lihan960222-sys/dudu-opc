@@ -11,6 +11,12 @@ from app.feishu.routing import journal
 from app.feishu.worker import Worker
 
 
+async def publish_document(worker, row):
+    """Exercise the publishing adapter independently of employee job dispatch."""
+    msg = json.loads(row["payload"])
+    await documents.handle(worker,row,msg,json.loads(msg["content"])["text"])
+
+
 @pytest.fixture
 def setup_case(tmp_path, monkeypatch):
     identity = {'app_id': 'app', 'tenant_key': 'tenant', 'open_id': 'owner'}
@@ -27,8 +33,16 @@ def setup_case(tmp_path, monkeypatch):
         return httpx.Response(200, json={'code': 0, 'data': data})
     pub = SimpleNamespace(db=db, http=httpx.Client(transport=httpx.MockTransport(respond)))
     worker = Worker(cfg, pub)
+    employee_cfg={"_employee_oauth":True}
+    async def writer(config,name):
+        assert config is cfg and name=="二狗"
+        target=documents.settings_for(cfg)["document_target"]
+        if not target:
+            raise ValueError("请配置目标文件夹。")
+        return employee_cfg,12,target
+    monkeypatch.setattr(documents,"writer",writer)
     def user_headers(config, *, required):
-        assert config is cfg and required == {'docx:document:create', 'docx:document:write_only'}
+        assert config is employee_cfg and required == {'docx:document:create', 'docx:document:write_only'}
         return {'Authorization': 'Bearer fake-user'}
     monkeypatch.setattr(documents, 'user_headers', user_headers)
     def request(text='写飞书文档 周报\n## 进展\n完成验收', **options):
@@ -53,8 +67,8 @@ def reply(db):
 async def test_owner_dm_creates_sectioned_document_once(setup_case):
     worker, request, calls = setup_case
     row = request()
-    await worker.process(row)
-    await worker.process(row)
+    await publish_document(worker,row)
+    await publish_document(worker,row)
     assert len(calls) == 2
     create, write = calls
     assert create.url.path == '/open-apis/docx/v1/documents'
@@ -81,12 +95,12 @@ async def test_crash_around_remote_change_stops_republication(setup_case, stage,
         return result
     worker.pub.http.post = interrupted
     with pytest.raises(KeyboardInterrupt):
-        await worker.process(row)
+        await publish_document(worker,row)
     with closing(journal(tmp_path / 'gateway.sqlite')) as recovered_db:
         reopened = Worker(worker.cfg, SimpleNamespace(db=recovered_db, http=worker.pub.http))
         recovered = recovered_db.execute('select * from inbox').fetchone()
-        await reopened.process(recovered)
-        await reopened.process(recovered)
+        await publish_document(reopened,recovered)
+        await publish_document(reopened,recovered)
         assert len(calls) == (1 if stage == 'create' else 2)
         assert '核对' in reply(recovered_db)['text']
         assert ('https://demo.feishu.cn/docx/doc123' in reply(recovered_db)['text']) == (stage == 'write')
@@ -111,7 +125,7 @@ async def test_no_remote_write_on_unverified_source_or_destination(setup_case, i
         def denied(*args, **kwargs):
             raise ValueError('private details')
         monkeypatch.setattr(documents, 'user_headers', denied)
-    await worker.process(row)
+    await publish_document(worker,row)
     assert not calls
     if issue != 'missing_proof':
         assert 'private details' not in reply(worker.db)['text']
@@ -131,7 +145,7 @@ def seed_answer(db, chat):
 async def test_replied_completed_answer_only(setup_case):
     worker, request, calls = setup_case
     seed_answer(worker.db,'chat1')
-    await worker.process(request('写飞书文档 周报', parent_id='om_old'))
+    await publish_document(worker,request('写飞书文档 周报', parent_id='om_old'))
     assert json.loads(calls[1].content)['children'][0]['text']['elements'][0]['text_run']['content']=='上次的回答'
 @pytest.mark.asyncio
 @pytest.mark.parametrize('stage', ['create','write'])
@@ -145,8 +159,8 @@ async def test_permission_errors_are_private_and_not_replayed(setup_case, stage)
             return httpx.Response(403, request=response.request, json={'code':1770040,'msg':'private diagnostic'})
         return response
     worker.pub.http.post = denied
-    await worker.process(row)
-    await worker.process(row)
+    await publish_document(worker,row)
+    await publish_document(worker,row)
     feedback = reply(worker.db)['text']
     assert '目标文件夹' in feedback and 'private diagnostic' not in feedback
     assert ('https://demo.feishu.cn/docx/doc123' in feedback) == (stage == 'write')
@@ -220,8 +234,8 @@ async def test_explicit_private_summary_export_validates_origin_and_current_cons
     monkeypatch.setattr(history, 'reviewer', reviewer)
     monkeypatch.setattr(history, 'headers', authorized)
     row = request('写飞书文档 项目摘要', parent_id='om_old')
-    await worker.process(row)
-    await worker.process(row)
+    await publish_document(worker,row)
+    await publish_document(worker,row)
     if case=='approved':
         assert len(calls)==2
         children = json.loads(calls[1].content)['children']

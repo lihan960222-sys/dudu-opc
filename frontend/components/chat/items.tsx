@@ -14,6 +14,7 @@ import { useT } from "@/lib/use-i18n";
 import { toolRunSummary } from "@/lib/transcript-view";
 import { Button } from "@/components/ui/Button";
 import { useSession } from "../AuthGate";
+import { stewardPreview, downloadStewardReply } from "@/lib/steward-preview";
 import { Markdown } from "./Markdown";
 import { copyToClipboard } from "@/lib/clipboard";
 import { MessageAttachments } from "./Attachments";
@@ -181,6 +182,7 @@ export function UserMessage({
 
 export function AssistantMessage({
   text,
+  steward = false,
   speaker,
   portrait,
   usage,
@@ -194,6 +196,7 @@ export function AssistantMessage({
   workspacePath = null,
 }: {
   text: string;
+  steward?: boolean;
   speaker?: string;
   portrait?: React.ReactNode;
   usage?: Record<string, unknown>;
@@ -208,11 +211,15 @@ export function AssistantMessage({
 }) {
   const t = useT();
   const timeStr = formatMessageTime(ts, t);
+  const visible = steward ? stewardPreview(text) : text;
   const usageSummary = turnUsageText(usage, t);
   return (
     <div className="conversation-answer group/msg max-w-full">
       <div className="conversation-byline">{portrait ?? <span aria-hidden="true" className="conversation-speaker-mark" />}{speaker || t("search.kindAgent")}</div>
-      <Markdown text={text} threadId={live ? null : threadId} workspacePath={live ? null : workspacePath} />
+      <Markdown text={visible} threadId={live ? null : threadId} workspacePath={live ? null : workspacePath} />
+      {!live && steward && Array.from(text).length > 200 && (
+        <button type="button" className="text-sm text-accent underline" onClick={() => downloadStewardReply(text, (speaker || "管家") + "完整回复")}>下载完整回复（.md）</button>
+      )}
       {live && <span aria-hidden="true" className="animate-pulse text-muted motion-reduce:animate-none">▍</span>}
       {!live && text && (
         <div className="-ml-1 mt-1 flex flex-wrap items-center gap-1.5">

@@ -37,7 +37,7 @@ def _sources(value, owner_open_id):
     for alias, contact in value.items():
         if not re.fullmatch(r"[\w·.\-]{1,40}", alias) or alias in {"列表","来源","有哪些"}:
             raise ValueError("联系人简称限 1 至 40 个字，可用文字、数字、点和短横线。")
-        if not isinstance(contact, dict) or set(contact) != {"chat_id", "peer_open_id", "agent_id"}:
+        if not isinstance(contact, dict) or set(contact) - {"oauth_app"} != {"chat_id", "peer_open_id", "agent_id"}:
             raise ValueError("联系人需要经过核对的单聊和对方身份。")
         chat, peer, agent = contact["chat_id"], contact["peer_open_id"], contact["agent_id"]
         if (not isinstance(chat, str) or not re.fullmatch(r"oc_[a-zA-Z0-9]{1,100}", chat) or

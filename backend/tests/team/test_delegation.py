@@ -19,7 +19,9 @@ class FakeEngine(Engine):
 
     async def run_turn(self, ctx, sink, gate):
         if 'NESTED' in ctx.prompt and self.nested is not None:
-            await self.nested(ctx)
+            outcome = await self.nested(ctx)
+            if isinstance(outcome, TurnOutcome):
+                return outcome
         if ctx.thread_id not in self.handlers:
             if 'FAIL' in ctx.prompt:
                 self.contexts.append(ctx)
@@ -449,3 +451,53 @@ async def test_owner_clarifies_external_delivery_only_in_steward_chat(team, sess
         employee_turns=await turns_of(sessions,rows[0].assignee_thread_id)
         assert len(employee_turns)==2 and owner_answer.replace('，', ',') in employee_turns[-1].prompt_text
         assert asked == [chat.id]
+
+
+@pytest.mark.parametrize("case",["complete","no_scope","blocked_after_write","engine_failed_after_write","readback_failed","deleted"])
+async def test_steward_receives_verified_document_or_actual_scope_error(team,sessions,case):
+    from app.team.jobs import event
+    rt,engine,boss,worker,_=team
+    thread=await rt.create_thread(agent_id=boss.id)
+    tool="feishu_delete_document" if case=="deleted" else "feishu_publish_knowledge"
+    repair="缺少 docx:document:readonly，请重新授权文档读写。"
+    async def employee_runs(ctx):
+        # Test driver records the same events as the real employee bridge.
+        async with sessions() as db:
+            job=await db.scalar(select(AgentJob).where(AgentJob.assignee_thread_id==ctx.thread_id,
+                                                       AgentJob.kind=="job"))
+            event(db,job,"feishu_assignment",{"action":"delete_document" if case=="deleted" else "restructure"})
+            if case!="no_scope":
+                receipt={"deleted":True} if case=="deleted" else {"url":"https://example.test/docx/a"}
+                event(db,job,"feishu_delivered",{"tool":tool,"result":receipt})
+                if case=="readback_failed":
+                    event(db,job,"feishu_tool_failed",{"tool":"feishu_read_document","detail":repair})
+            else:
+                event(db,job,"feishu_tool_failed",{"tool":tool,"detail":repair})
+            await db.commit()
+        if case=="engine_failed_after_write":
+            return TurnOutcome("failed",error="engine failed",error_code="provider_error")
+        return TurnOutcome("succeeded",result="BLOCKED: 尚未核对来源。" if case=="blocked_after_write" else "员工交付说明。")
+    engine.nested=employee_runs
+    async def assign(run):
+        await rt.team_jobs.delegate(run,{"agent_ids":[worker.id],"brief":"NESTED","done_when":"doc link"})
+    calls=lead_script(rt,engine,thread,assign)
+    await rt.send_turn(thread.id,"update the document")
+    async def done():
+        root=await root_of(sessions,thread.id)
+        return root and root.status=="completed"
+    await wait_until(done)
+    assert len(calls)==2
+    report=(await turns_of(sessions,thread.id))[-1].prompt_text
+    entry=json.loads(report.split("\n",1)[1])["reports"][0]
+    if case!="no_scope":
+        assert entry["verified_document"]["operation"]==tool
+    if case in ("complete","deleted"):
+        assert entry["status"]=="completed" and "员工交付说明" in entry["result"]
+        if case=="deleted":
+            assert "url" not in entry["verified_document"]
+    elif case=="engine_failed_after_write":
+        assert entry["status"]=="failed" and entry["outcome"]=="provider_error"
+    elif case=="blocked_after_write":
+        assert entry["status"]=="failed" and "尚未核对来源" in entry["detail"]
+    else:
+        assert "docx:document:readonly" in report and "missing_delivery" in report

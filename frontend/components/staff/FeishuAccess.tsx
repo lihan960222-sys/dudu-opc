@@ -13,7 +13,7 @@ type Access = {
 type OAuth = {
   connected: boolean;
   scopes: string[];
-  actions: { history: boolean; doc: boolean };
+  actions: { history: boolean; doc: boolean; delete?: boolean; wiki?: boolean; folder?: boolean };
   redirect_uri: string;
 };
 const oauth = "/feishu/owner-oauth";
@@ -41,7 +41,7 @@ export function FeishuAccess({ employee, name, isLead, members }: {
     const current = Symbol();
     loadId.current = current;
     return Promise.allSettled([
-      request<Access>(settings + "/access"), request<OAuth>(oauth + "/status")
+      request<Access>(settings + "/access"), request<OAuth>(oauth + "/status?employee=" + employee)
     ]).then(([policy, connection]) => {
       if (current !== loadId.current) return;
       if (policy.status === "fulfilled") accept(policy.value);
@@ -49,7 +49,7 @@ export function FeishuAccess({ employee, name, isLead, members }: {
       const errors = [policy, connection].flatMap(r => r.status === "rejected" ? [String(r.reason)] : []);
       setError(errors.join("。"));
     });
-  }, [accept]);
+  }, [accept, employee]);
   useEffect(() => {
     void load();
     return () => { loadId.current = null; };
@@ -60,8 +60,8 @@ export function FeishuAccess({ employee, name, isLead, members }: {
     try { await work(); } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setBusy(false); }
   }
-  async function connect(action: "doc" | "history" | "both") {
-    const next = await request<{authorize_url: string}>(oauth + "/start", {
+  async function connect(action: "doc" | "history" | "both" | "delete" | "folder" | "wiki") {
+    const next = await request<{authorize_url: string}>(oauth + "/start?employee=" + employee, {
       method: "POST", body: JSON.stringify({ action })
     });
     const url = new URL(next.authorize_url);
@@ -100,19 +100,25 @@ export function FeishuAccess({ employee, name, isLead, members }: {
       <p>在和管家的私聊中发起查阅或整理。{isLead ? "管家可查阅你已登记的联系人。" : "点名这位员工整理时，只能使用分配给该岗位的联系人。"}</p>
       <fieldset disabled={busy} className="dp-fields">
         <legend>老板的飞书账号</legend>
-        <p>授权由本机共用。{auth?.actions.history ? "已授权读取私聊。" : "读取私聊待授权。"}{isLead && (auth?.actions.doc ? "已授权新建文档。" : "新建文档待授权。")}</p>
+        <p>当前应用：{name}。{auth?.actions.history ? "已授权读取私聊。" : "读取私聊待授权。"}{auth?.actions.doc ? "已授权文档读写。" : "文档读写待授权。"}</p>
         <div className="dp-actions">
           <button className="dp-button" onClick={() => void run(() => connect("history"))}>授权读取私聊</button>
-          {isLead && <button className="dp-button" onClick={() => void run(() => connect("doc"))}>授权新建文档</button>}
+          <button className="dp-button" onClick={() => void run(() => connect("doc"))}>授权文档读写</button>
+          {!isLead && (auth?.actions.wiki ? <span>已授权识别知识库链接</span> :
+            <button className="dp-button" onClick={() => void run(() => connect("wiki"))}>授权识别知识库链接</button>)}
+          {!isLead && (auth?.actions.folder ? <span>已授权核对目标文件夹</span> :
+            <button className="dp-button" onClick={() => void run(() => connect("folder"))}>授权核对目标文件夹</button>)}
+          {!isLead && (auth?.actions.delete ? <span>已授权删除员工创建的指定文档</span> :
+            <button className="dp-button" onClick={() => void run(() => connect("delete"))}>授权删除指定文档</button>)}
           {isLead && auth && !auth.actions.history && !auth.actions.doc && <button className="dp-link" onClick={() => void run(() => connect("both"))}>同时授权两项</button>}
-          {isLead && auth?.connected && <button className="dp-link" onClick={() => void run(async () => {
-            setAuth(await request<OAuth>(oauth + "/connection", {method:"DELETE"}));
-            setNotice("已断开本机的飞书个人授权。");
-          })}>断开本机共享授权</button>}
+          {auth?.connected && <button className="dp-link" onClick={() => void run(async () => {
+            setAuth(await request<OAuth>(oauth + "/connection?employee=" + employee, {method:"DELETE"}));
+            setNotice("已断开该应用在本机的飞书授权。");
+          })}>断开此应用授权</button>}
         </div>
         <details>
           <summary>在飞书开放平台开通权限</summary>
-          <p>在应用的权限管理中选择用户身份。读取私聊需要 <code>im:chat:read</code>、<code>im:message:readonly</code> 和 <code>im:message.p2p_msg:get_as_user</code>。新建文档需要 <code>docx:document:create</code> 和 <code>docx:document:write_only</code>。持续使用还需要 <code>offline_access</code>。</p>
+          <p>在应用的权限管理中选择用户身份。读取私聊需要 <code>im:chat:read</code>、<code>im:message:readonly</code> 和 <code>im:message.p2p_msg:get_as_user</code>。文档读写需要 <code>docx:document:create</code>、<code>docx:document:write_only</code> 和 <code>docx:document:readonly</code>。打开知识库链接还需要 <code>wiki:node:read</code>。核对文档所在文件夹需要 <code>space:document:retrieve</code>。删除指定文档需要单独开通 <code>space:document:delete</code>。持续使用还需要 <code>offline_access</code>。</p>
           <p>把下面的地址填入应用的「安全设置 → 重定向 URL」，发布新版本，再回这里授权。</p>
           {auth?.redirect_uri && <input aria-label="飞书重定向 URL" readOnly value={auth.redirect_uri} onFocus={e => e.target.select()} />}
         </details>
@@ -127,6 +133,10 @@ export function FeishuAccess({ employee, name, isLead, members }: {
             </div></div>)}
         <label>联系人简称<input value={alias} maxLength={40} onChange={e => setAlias(e.target.value)} placeholder="如小周" /></label>
         <label>所选单聊的链接或会话 ID<input value={chat} onChange={e => setChat(e.target.value)} placeholder="粘贴带会话 ID 的链接，或 oc_ 开头的 ID" /></label>
+        {auth && !auth.actions.history && <p role="status">
+          工作台还没有收到{name}的读取凭据。完成授权后才能核对这个联系人。
+          <button type="button" className="dp-link" disabled={busy} onClick={() => void run(() => connect("history"))}>去授权读取私聊</button>
+        </p>}
         <button className="dp-button" disabled={!alias.trim() || !chat.trim() || !auth?.actions.history} onClick={() => void run(saveContact)}>核对并保存联系人</button>
         {orphaned.length > 0 && <details><summary>经办人已离开团队的联系人</summary>
           {orphaned.map(([alias]) => <div key={alias}>{alias} <button className="dp-link" onClick={() => void run(() => remove(alias))}>移除</button></div>)}

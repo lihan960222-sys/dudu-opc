@@ -157,11 +157,11 @@ async def publish_reports(worker):
                     text = f'有一份招人申请需要你决定。请在这段管家会话里打开招人卡片。\n{origin}/chat?thread={thread_id}'
                     enqueue(worker.db, None, 'steward', {'text': text, 'reply_to': row['message']})
             if job.status=='needs_input' and job.question and signature(job.question)!=row['question']:
-                enqueue(worker.db,None,'steward',{'text':job.question[:2000],'reply_to':row['message']})
+                enqueue(worker.db,None,'steward',{'text':job.question,'reply_to':row['message']})
                 worker.db.execute('update direct_team_reports set question=? where job=?',(signature(job.question),job.id))
             elif job.status in ('completed','failed','cancelled'):
                 report=job.result if job.status=='completed' else job.outcome_detail
                 if not report:
                     report='团队任务已结束。可在管家会话中查看派工记录。'
                 worker.db.execute('update direct_team_reports set finished=1 where job=?',(job.id,))
-                worker.direct_final(row,'done',report[:12000])
+                worker.direct_final(row,'done',report)

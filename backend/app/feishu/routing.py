@@ -26,6 +26,22 @@ def journal(path):
         app text,event text,request text,primary key(app,event,request));
     create table if not exists owner_readwrite_requests(
         app text,event text,message text,owner text,tenant text,primary key(app,event));
+    create table if not exists direct_finals(
+        app text,event text,outgoing text unique not null,primary key(app,event));
+    create table if not exists employee_feishu_assignments(
+        app text,event text,message text,employee integer not null,command text not null,original text not null,
+        event_key text unique not null,contact text not null,action text not null,title text not null,body text not null,
+        primary key(app,event));
+    create table if not exists knowledge_intent_candidates(
+        app text,event text,message text,owner text,tenant text,command text,decision text,
+        primary key(app,event));
+    create table if not exists knowledge_followups(app text,message text,parent_event text not null,primary key(app,message));
+    create table if not exists history_continuations(
+        app text,event text,command text,primary key(app,event));
+    create table if not exists history_dispatch(
+        id integer primary key,app text,event text,employee text,contact text,unique(app,event));
+    create table if not exists history_dispatch_links(
+        app text,event text,dispatch integer,primary key(app,event));
     create table if not exists private_voice(
         outgoing text primary key,app text,event text,duration integer,unique(app,event));
     create table if not exists private_history_jobs(
@@ -91,8 +107,11 @@ def bind_config(db, cfg):
             or len(set(agents)) != len(agents)):
         raise ValueError('每个角色需要独立的应用身份和本地角色 ID')
     ids = {'owner':[cfg['owner_id'],cfg['project'],steward['tenant_key'],steward['open_id'],apps[0],agents[0]]}
-    ids.update({'role:'+name:[r['app_id'],r['agent_id'],r['chat_id']] for name,r in roles.items()})
     for name, role in roles.items():
+        destination = role.get('chat_id') or role.get('owner_open_id')
+        if not destination:
+            raise ValueError('请指定工作群或该员工应用下老板的 open_id')
+        ids['role:'+name] = [role['app_id'],role['agent_id'],destination]
         if role.get('owner_open_id'):
             if not role['owner_open_id'].startswith('ou_'):
                 raise ValueError('专业机器人必须配置该应用下老板的 open_id')

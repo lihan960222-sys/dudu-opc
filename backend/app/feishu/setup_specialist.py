@@ -62,12 +62,12 @@ def prompt_secret():
     return getpass.getpass('输入此专业应用的 App Secret（输入时不显示）：').strip()
 
 
-def add(config, name, agent, app, owner, group, env_name=None, *, env_only=False):
+def add(config, name, agent, app, owner, group=None, env_name=None, *, env_only=False):
     original=config.read_bytes()
     cfg=json.loads(original.decode('utf-8-sig'))
     env_name=env_name or f'FEISHU_AGENT_{agent}_SECRET'
     if not (name.strip() and name!='steward' and agent>0 and APP.fullmatch(app)
-            and re.fullmatch(r'ou_[A-Za-z0-9]+',owner) and re.fullmatch(r'oc_[A-Za-z0-9]+',group)
+            and re.fullmatch(r'ou_[A-Za-z0-9]+',owner) and (group is None or re.fullmatch(r'oc_[A-Za-z0-9]+',group))
             and SECRET_ENV.fullmatch(env_name)):
         raise ValueError('请核对角色名、本地角色 ID、飞书应用 ID、老板 open_id、群 chat_id 和密钥变量名')
     identities=[cfg['steward'],*cfg['roles'].values()]
@@ -116,7 +116,7 @@ def main():
         add(config,args.role or input('角色名：').strip(),args.agent or int(input('本地数字角色 ID：')),
             args.app_id or input('此角色的飞书 App ID：').strip(),
             args.owner_open_id or input('老板在该应用下的 open_id：').strip(),
-            args.group or input('授权工作群的 chat_id：').strip(),args.secret_env,env_only=args.env_only)
+            args.group,args.secret_env,env_only=args.env_only)
     except (OSError,KeyError,ValueError) as error:
         parser.exit(1,f'登记未完成：{error}\n')
     print('已保存本地角色配置，将在网关下次启动时生效。')

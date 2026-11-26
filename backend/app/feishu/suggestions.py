@@ -178,7 +178,7 @@ def answer(worker,row,msg,text):
             result = resp.json()
             message = {'approve':'已采纳。','defer':'已选择稍后处理。','dismiss':'已忽略这条建议。'}[choice]
             if result.get('report') and not result.get('followup_task_id'):
-                message += '\n'+str(result['report'])[:3500]
+                message += '\n'+str(result['report'])
             if result.get('followup_task_id'):
                 message += f"\n已建立跟进任务 #{result['followup_task_id']}。"
 

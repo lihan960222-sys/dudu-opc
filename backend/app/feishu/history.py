@@ -18,16 +18,29 @@ PEER = re.compile(r'ou_[A-Za-z0-9]{1,100}')
 SCOPES={'im:chat:read','im:message:readonly','im:message.p2p_msg:get_as_user'}
 TAIL = re.compile(r'(?:最近\s*(\d{1,2})\s*(小时|天))?\s*(?:的?\s*(\d{1,2})\s*条)?[。！？!?]?')
 NATURAL = re.compile(r'^(?:请(?:帮我)?|帮我)?(?:查看|查阅|查一下|看看|读一下|读取)\s*(?:我[和与跟])?[「“]?([\w·.\-]{1,40}?)[」”]?\s*(最近\s*\d{1,2}\s*(?:小时|天))?\s*的?(?:飞书)?(?:聊天记录|会话历史|单聊记录)(.*)$')
-REVIEW=re.compile(r'^(?:请(?:帮我)?|帮我)?(?:让([\w·.\-]{1,40}?))?(总结|整理|提炼)(?:一下)?我[和与跟][「“]?([\w·.\-]{1,40}?)[」”]?\s*(最近\s*\d{1,2}\s*(?:小时|天))?\s*的?(?:飞书)?(?:聊天记录|单聊记录|私聊记录)(.*)$')
+REVIEW=re.compile(r'^(?:请(?:帮我)?|帮我)?(?:(?:让|叫|请)([\w·.\-]{1,40}?))?(总结|整理|提炼)(?:一下)?(?:我)?[和与跟][「“]?([\w·.\-]{1,40}?)[」”]?\s*(最近\s*\d{1,2}\s*(?:小时|天))?\s*的?(?:飞书)?(?:聊天记录|聊天内容|单聊记录|私聊记录)(.*)$')
+REPHRASED = re.compile(r"^(?:请)?(?:叫|让)([\w·.\-]{1,40}?)把我?[和跟与]([\w·.\-]{1,40}?)聊的(?:东西|内容)(?:归归类|整理一下|整理|总结一下)[。！]?$")
+
+
+def canonical(text):
+    match = REPHRASED.fullmatch(text.strip())
+    if match:
+        employee, contact = match.groups()
+        return f"让{employee}整理我和{contact}的聊天记录"
+    return text.strip()
+
 GUIDE='例如「查看飞书聊天记录 小周 最近6小时 10条」。支持最近1到72小时、1到30条消息，可在末尾加“关键词：交付”。'
 MAX_PAGES=3
+SHORT_RETRY=re.compile(r"(?:现在)?(?:再)?(?:试试看|试一下|试试|重试)[吧。！!？? ]*")
 
 
 def is_command(text):
+    text = canonical(text)
     return bool(PREFIX.match(text.strip()) or NATURAL.fullmatch(text.strip()) or REVIEW.fullmatch(text.strip()))
 
 
 def parse(text,sources):
+    text = canonical(text)
     review=REVIEW.fullmatch(text.strip())
     natural=None if PREFIX.match(text.strip()) else NATURAL.fullmatch(text.strip())
     tail=(natural[1]+' '+(natural[2] or '')+' '+natural[3] if natural
@@ -66,6 +79,16 @@ def excerpt(item):
         return ' '.join(value.split())[:220] or '［无文字］'
     except (KeyError,TypeError,ValueError,AttributeError):
         return '［此消息无法显示］'
+
+
+def source_config(cfg, source):
+    from .owner_oauth import employee_config
+    if "oauth_app" not in source:
+        return cfg
+    selected = employee_config(cfg, source["agent_id"])
+    if selected["steward"]["app_id"] != source["oauth_app"]:
+        raise ValueError("联系人绑定的飞书应用已变更。")
+    return selected
 
 
 def headers(cfg,scopes):
@@ -162,7 +185,7 @@ async def current_policy(worker,row):
             return False
         if row['actor'] is not None and (await reviewer(worker.cfg,source,row['staff']))[0]!=row['actor']:
             return False
-        headers(worker.cfg,SCOPES)
+        headers(source_config(worker.cfg,source),SCOPES)
         return True
     except (ValueError,KeyError,TypeError,RuntimeError,OSError):
         return False
@@ -210,7 +233,7 @@ async def cloud_job(worker,row,job_id,alias,source,profile,entries,staff,local):
         current=settings_for(worker.cfg)
         if current.get('allow_codex_summary') is not True or current['history_sources'].get(alias)!=source:
             return False
-        headers(worker.cfg,SCOPES)
+        headers(source_config(worker.cfg,source),SCOPES)
         return await reviewer(worker.cfg,source,staff)==profile
     try:
         points,notes=await analyze(profile,entries,authorized)
@@ -276,6 +299,7 @@ def read(publisher,auth,chat,hours,count,end,*,owner,peer,alias):
 
 
 async def answer(worker,row,msg,text):
+    text = canonical(text)
     if msg.get('message_type')!='text' or not is_command(text):
         return False
     identity=worker.cfg['steward']
@@ -289,11 +313,50 @@ async def answer(worker,row,msg,text):
     current=worker.db.execute('select state from inbox where app=? and event=?',(row['app'],row['event'])).fetchone()
     if not current or current[0]!='received':
         return True
+    review = REVIEW.fullmatch(text)
+    if review:
+        with worker.db:
+            worker.db.execute("insert or ignore into history_dispatch(app,event,employee,contact) values(?,?,?,?)",
+                              (row['app'],row['event'],review[1] or '管家',review[3]))
+            worker.db.execute("""insert or ignore into history_dispatch_links
+                select app,event,id from history_dispatch where app=? and event=?""",(row['app'],row['event']))
     from .workspace_access import settings_for
     sources={k:v for k,v in settings_for(worker.cfg)['history_sources'].items()
              if NAME.fullmatch(k) and isinstance(v,dict) and CHAT.fullmatch(v.get('chat_id') or '')
              and PEER.fullmatch(v.get('peer_open_id') or '')}
+    full_read=False
+    if review and review[1] and not review[4] and review[5].strip() in ("","全部") and review[3] in sources and worker.cfg.get("_access_config_path"):
+        from .knowledge_document import target
+        try:
+            target(worker.cfg,sources[review[3]]["agent_id"],review[3])
+            full_read=True
+        except (KeyError,OSError,ValueError):
+            pass
+    if review and review[1] and (full_read or review[5].strip() in ("全部并写入云盘","全部并重整知识库")):
+        from .knowledge_document import publish
+        try:
+            if review[3] not in sources:
+                raise ValueError("该联系人还没有绑定到员工。")
+            source=sources[review[3]]
+            message,total=await publish(worker,row,review,source,int(proof['received']),read_only=full_read,revise=review[5].strip()=='全部并重整知识库')
+            outcome='completed'
+        except (ValueError,OSError,RuntimeError,httpx.HTTPError,KeyError,TypeError) as error:
+            outcome,total='failed',0
+            reason=str(error) if isinstance(error,(ValueError,PlatformError)) else type(error).__name__
+            message=f"{review[1]}整理知识库时遇到问题：{reason[:180]}"
+        if review[3] in sources:
+            source=sources[review[3]]
+            with worker.db:
+                worker.db.execute('''insert or ignore into private_history_jobs
+                    (app,event,alias,chat,peer,assignee,start,end,cap,state,matched)
+                    values(?,?,?,?,?,?,0,?,0,?,?)''',(row['app'],row['event'],review[3],source['chat_id'],
+                    source['peer_open_id'],source['agent_id'],int(proof['received']),outcome,total))
+        with worker.db:
+            worker.direct_final(row,'done',message,history_policy=policy(review[3],source,review[1],(source["agent_id"],)) if outcome=="completed" and full_read else None)
+        return True
     request,message=parse(text,sources)
+    if review and review[3] not in sources:
+        message=f"{review[1] or '管家'}还没开始整理：请先在员工的飞书能力里绑定「{review[3]}」的单聊。"
     job=None
     job_state='failed'
     matched=0
@@ -313,11 +376,12 @@ async def answer(worker,row,msg,text):
                     job=worker.db.execute('select * from private_history_jobs where app=? and event=?',key).fetchone()
                 if (job['alias'],job['chat'],job['peer'],job['assignee'])!=(alias,source['chat_id'],source['peer_open_id'],profile[0]):
                     raise ValueError('联系人或员工授权已变更，请重新发起整理。')
-            auth=headers(worker.cfg,SCOPES)
+            auth=headers(source_config(worker.cfg,source),SCOPES)
+            owner_open_id=source_config(worker.cfg,source)['steward']['open_id']
             chat=source['chat_id']
-            if peer_for(worker.pub.http,auth,chat,identity['open_id'])!=source['peer_open_id']:
+            if peer_for(worker.pub.http,auth,chat,owner_open_id)!=source['peer_open_id']:
                 raise ValueError('会话对方与本机登记的同事不符，请在老板设置中核对。')
-            entries=read(worker.pub,auth,chat,hours,count,end,owner=identity['open_id'],peer=source['peer_open_id'],alias=alias)
+            entries=read(worker.pub,auth,chat,hours,count,end,owner=owner_open_id,peer=source['peer_open_id'],alias=alias)
             if keyword:
                 entries=[line for line in entries if keyword.casefold() in line.casefold()]
             message=(f'「{alias}」最近{hours}小时的可见记录（最多查阅{count}条，较新在前）'
@@ -325,7 +389,7 @@ async def answer(worker,row,msg,text):
                      +('\n'.join(entries) if entries else '在本次查询范围内没有找到可显示的消息。'))
             if settings_for(worker.cfg)['history_sources'].get(alias)!=source:
                 raise ValueError('联系人授权已变更，请重新发起查询。')
-            headers(worker.cfg,SCOPES)
+            headers(source_config(worker.cfg,source),SCOPES)
             if profile:
                 profile=await reviewer(worker.cfg,source,review[1])
                 message=(f'私密任务 #{job["id"]} · {profile[1]} · 本机摘录整理\n'

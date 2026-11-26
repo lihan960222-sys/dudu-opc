@@ -2,6 +2,8 @@
 import json
 import ntpath
 import os
+import sqlite3
+from contextlib import closing
 import stat
 import sys
 import tempfile
@@ -27,14 +29,14 @@ TOOLS = [
 ]
 
 
-def turn_config(current, root, writable, *, consult_only=False):
+def turn_config(current, root, writable, *, consult_only=False, peer_access=None):
     if not isinstance(current, dict):
         raise ValueError("Cannot verify Codex configuration")
     servers = {key: {"enabled": False} for key in (current.get("mcp_servers") or {})}
     plugins = {key: {"enabled": False} for key in (current.get("plugins") or {})}
     names = [t["name"] for t in TOOLS if writable or t["name"] != "write_text"]
     servers[SERVER] = {"command": sys.executable, "args": ["-I", str(Path(__file__).resolve()), str(root),
-                        "write" if writable else "read"], "enabled": True, "required": True,
+                        "write" if writable else "read", *([json.dumps(peer_access)] if peer_access else [])], "enabled": True, "required": True,
                        "enabled_tools": names, "default_tools_approval_mode": "prompt"}
     if consult_only:
         servers[SERVER] = {"enabled": False}
@@ -54,20 +56,67 @@ def checked(path):
 
 
 class FeatureFiles:
-    def __init__(self, task, writable=True):
+    def __init__(self, task, writable=True, peer_access=None):
         self.task = checked(task)
         if not self.task.is_dir() or self.task.parent.name != "任务" or not self.task.name.isdecimal():
             raise ValueError("Invalid task folder")
         self.role = checked(self.task.parent.parent)
         self.writable = writable
+        self.peer_access=peer_access
 
-    def path(self, scope, name):
-        if scope not in ("role", "task") or not isinstance(name, str):
+    def peer_roots(self):
+        if not self.peer_access:
+            return {}
+        cfg=self.peer_access
+        dbpath=Path(cfg["database"]).resolve(strict=True)
+        with closing(sqlite3.connect(dbpath.as_uri()+"?mode=ro",uri=True)) as db:
+            actor=db.execute('''select a.team_id,a.role_path,t.lead_agent_id,a.team_workspaces_readable from agent a join team t on a.team_id=t.id
+                where a.id=? and a.owner_id=? and t.owner_id=a.owner_id
+                and a.archived_at is null and a.id!=t.lead_agent_id''',(cfg["employee"],cfg["owner"])).fetchone()
+            if not actor or not actor[1] or checked(Path(actor[1]))!=self.role:
+                raise ValueError("员工目录授权已变更。")
+            # Include excluded roles as barriers so nesting can never expose their files.
+            rows=db.execute("select id,owner_id,team_id,name,role_path,archived_at from agent where role_path is not null").fetchall()
+        paths={r[0]:Path(r[4]).resolve() for r in rows}
+        result={}
+        for employee,owner,team,name,raw,archived in rows:
+            path=paths[employee]
+            if owner!=cfg["owner"] or team!=actor[0] or employee==actor[2] or archived:
+                continue
+            unsafe=(not Path(raw).is_absolute() or path==Path(path.anchor) or path.drive.startswith(chr(92)*2)
+                    or Path.home().resolve().is_relative_to(path) or dbpath.is_relative_to(path)
+                    or (path.is_relative_to(dbpath.parent) and
+                        (not cfg.get("managed_roles") or path != Path(cfg["managed_roles"]).resolve()/str(employee)))
+                    or any(path.is_relative_to(other) or other.is_relative_to(path)
+                           for i,other in paths.items() if i!=employee))
+            if unsafe:
+                if employee==cfg["employee"]:
+                    raise ValueError("自己的工作目录与受保护目录重叠。")
+                continue
+            if actor[3] and employee!=cfg["employee"] and path.is_dir() and Path(raw)==path:
+                result[f"employee:{employee}:{name}"]=checked(path)
+        return result
+
+    def tools(self):
+        if not self.peer_access:
+            return [t for t in TOOLS if self.writable or t["name"]!="write_text"]
+        import copy
+        items=copy.deepcopy(TOOLS)
+        scopes=["role","task",*self.peer_roots()]
+        for item in items[:2]:
+            item["inputSchema"]["properties"]["scope"]["enum"]=scopes
+        items[2]["inputSchema"]["properties"]["scope"]={"type":"string","enum":["task","role"]}
+        items[2]["description"]="Write a UTF-8 file in your own task (default) or role workspace. Other employees are read-only."
+        return items if self.writable else items[:2]
+
+    def path(self, scope, name, *, peers=None):
+        peers=self.peer_roots() if peers is None else peers
+        if scope not in ("role", "task", *peers) or not isinstance(name, str):
             raise ValueError("Invalid scope or path")
         path = PureWindowsPath(name)
         if path.anchor or (scope == "role" and path.parts and path.parts[0] == "任务"):
             raise ValueError("Path outside scope")
-        result = checked(self.role if scope == "role" else self.task)
+        result = checked(peers.get(scope) or (self.role if scope == "role" else self.task))
         for part in path.parts:
             if (part.startswith(".") or part.endswith((" ", ".")) or part.casefold() in PRIVATE
                     or any(ch in part for ch in ':*?"<>|') or ntpath.isreserved(part)):
@@ -76,12 +125,16 @@ class FeatureFiles:
         return result
 
     def call(self, name, args):
-        path = self.path("task" if name == "write_text" else args.get("scope"), args["path"])
+        scope=args.get("scope","task" if name=="write_text" else None)
+        if name=="write_text" and (not self.writable or scope not in (("task","role") if self.peer_access else ("task",))):
+            raise ValueError("不能写入其他员工的目录。")
+        peers=self.peer_roots()
+        path = self.path(scope,args["path"],peers=peers)
         if name == "list_files":
             entries = []
             for child in sorted(path.iterdir()):
                 try:
-                    self.path(args["scope"], str(PureWindowsPath(args["path"]) / child.name))
+                    self.path(args["scope"], str(PureWindowsPath(args["path"]) / child.name),peers=peers)
                 except (OSError, ValueError):
                     continue
                 entries.append({"name": child.name, "folder": child.is_dir()})
@@ -113,7 +166,7 @@ class FeatureFiles:
 def main():
     sys.stdin.reconfigure(encoding="utf-8", errors="strict")
     sys.stdout.reconfigure(encoding="utf-8", errors="strict")
-    fs = FeatureFiles(Path(sys.argv[1]), sys.argv[2] == "write")
+    fs = FeatureFiles(Path(sys.argv[1]), sys.argv[2] == "write",json.loads(sys.argv[3]) if len(sys.argv)>3 else None)
     for line in sys.stdin:
         req = json.loads(line)
         if "id" not in req:
@@ -126,13 +179,13 @@ def main():
         elif method == "ping":
             reply["result"] = {}
         elif method == "tools/list":
-            reply["result"] = {"tools": [t for t in TOOLS if fs.writable or t["name"] != "write_text"]}
+            reply["result"] = {"tools": fs.tools()}
         elif method == "tools/call":
             try:
                 p = req["params"]
                 body = json.dumps(fs.call(p["name"], p["arguments"]), ensure_ascii=False)
                 error = False
-            except (KeyError, OSError, ValueError, TypeError, AttributeError) as exc:
+            except (KeyError, OSError, sqlite3.Error, ValueError, TypeError, AttributeError) as exc:
                 body, error = str(exc), True
             reply["result"] = {"content": [{"type":"text", "text":body}], "isError":error}
         else:

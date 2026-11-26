@@ -1,5 +1,6 @@
 """Browser-only owner consent for a local steward's Feishu workspace."""
 import hashlib
+from html import escape
 import ipaddress
 import json
 import secrets
@@ -7,7 +8,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict
 
 from app.auth.middleware import principal_of
@@ -24,7 +25,7 @@ CALLBACK = COOKIE_PATH + "/callback"
 
 class StartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["history","doc","both"]
+    action: Literal["history","doc","both","delete","folder","wiki"]
 
 
 def owner_browser(request: Request):
@@ -99,21 +100,29 @@ def _config():
 
 HEADERS = {"Cache-Control":"no-store","Referrer-Policy":"no-referrer"}
 
+def employee_config(employee):
+    try:
+        return owner_oauth.employee_config(_config(), employee)
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from None
+
 
 @router.get("/status")
-def connection_status(request: Request):
+def connection_status(request: Request, employee: int | None = None):
     owner_browser(request)
     uri = redirect_uri(request)
-    return JSONResponse({**owner_oauth.status(_config()),"redirect_uri":uri},headers=HEADERS)
+    return JSONResponse({**owner_oauth.status(employee_config(employee)),"redirect_uri":uri},headers=HEADERS)
 
 
 @router.post("/start")
-def begin(payload: StartRequest, request: Request):
+def begin(payload: StartRequest, request: Request, employee: int | None = None):
     principal = owner_browser(request)
     uri = redirect_uri(request)
     nonce = secrets.token_urlsafe(32)
     try:
-        url = owner_oauth.start(_config(),payload.action,uri,_binding(principal,nonce))
+        if employee is not None:
+            nonce = f"{employee}.{nonce}"
+        url = owner_oauth.start(employee_config(employee),payload.action,uri,_binding(principal,nonce))
     except owner_oauth.OwnerOAuthError as exc:
         raise HTTPException(409,str(exc)) from None
     response = JSONResponse({"authorize_url":url,"redirect_uri":uri},headers=HEADERS)
@@ -126,9 +135,15 @@ def callback(request: Request, state: str = "", code: str = "", error: str = "")
     principal = owner_browser(request)
     uri = redirect_uri(request,callback=True)
     try:
-        owner_oauth.finish(_config(),state,_binding(principal,request.cookies.get(COOKIE)),uri,"" if error else code)
+        nonce = request.cookies.get(COOKIE) or ""
+        prefix, sep, _ = nonce.partition(".")
+        employee = int(prefix) if sep and prefix.isascii() and prefix.isdigit() and len(prefix)<16 else None
+        owner_oauth.finish(employee_config(employee),state,_binding(principal,nonce),uri,"" if error else code)
         outcome = "connected"
-    except owner_oauth.OwnerOAuthError:
+    except owner_oauth.OwnerOAuthError as exc:
+        if employee is not None:
+            return HTMLResponse("<meta charset=utf-8><title>飞书授权</title><h2>授权未保存</h2><p>"
+                                +escape(str(exc))+"</p><a href='/'>返回工作台</a>",headers=HEADERS)
         outcome = "error"
     response = RedirectResponse(uri.removesuffix(CALLBACK)+"/?section=host&feishu_oauth="+outcome,status_code=303,headers=HEADERS)
     if outcome == "connected":
@@ -137,10 +152,10 @@ def callback(request: Request, state: str = "", code: str = "", error: str = "")
 
 
 @router.delete("/connection")
-def unlink(request: Request):
+def unlink(request: Request, employee: int | None = None):
     owner_browser(request)
     uri = redirect_uri(request)
-    cfg = _config()
+    cfg = employee_config(employee)
     owner_oauth.disconnect(cfg)
     response = JSONResponse({**owner_oauth.status(cfg),"redirect_uri":uri},headers=HEADERS)
     response.delete_cookie(COOKIE,path=COOKIE_PATH,secure=uri.startswith("https://"),httponly=True,samesite="lax")

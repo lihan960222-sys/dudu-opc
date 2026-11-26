@@ -114,12 +114,16 @@ async def set_contact(body: Contact, rt: ThreadRuntime = Depends(get_runtime)):
                 raise HTTPException(422,"请选择当前团队中在职的员工。") from None
     try:
         chat_id = chat_reference(body.chat)
-        peer = await run_in_threadpool(resolve_peer, cfg, chat_id)
+        from app.feishu.owner_oauth import employee_config
+        selected = employee_config(cfg, body.agent_id)
+        peer = await run_in_threadpool(resolve_peer, selected, chat_id)
     except (httpx.HTTPError, PlatformError):
         raise HTTPException(502,"飞书无法核对这段单聊，请检查个人授权、应用权限和会话 ID。") from None
     except ValueError as exc:
         raise HTTPException(422,str(exc)) from None
     sources = {**current["history_sources"], body.alias:{"chat_id":chat_id, "peer_open_id":peer, "agent_id":body.agent_id}}
+    if selected.get('_employee_oauth'):
+        sources[body.alias]['oauth_app'] = selected['steward']['app_id']
     return save(cfg,body.revision,history_sources=sources)
 
 

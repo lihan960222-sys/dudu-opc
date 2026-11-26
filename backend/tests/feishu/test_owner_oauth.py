@@ -18,8 +18,9 @@ def test_owner_match_single_use_and_locked_refresh(tmp_path, monkeypatch):
         calls.append((method,url,kwargs))
         if url==oauth.USER_INFO:
             return {"code":0,"data":{"open_id":who[0]}}
-        form=kwargs["data"]
+        form=kwargs.get("json") or kwargs["data"]
         if form["grant_type"]=="authorization_code":
+            assert url=="https://open.feishu.cn/open-apis/authen/v2/oauth/token" and "json" in kwargs
             assert base64.urlsafe_b64encode(hashlib.sha256(form["code_verifier"].encode()).digest()).decode().rstrip("=")==challenge
         else:
             assert form["refresh_token"]=="demo-refresh-1"
@@ -43,7 +44,7 @@ def test_owner_match_single_use_and_locked_refresh(tmp_path, monkeypatch):
     query=parse_qs(urlsplit(oauth.start(config,"doc",uri,"browser-A")).query)
     challenge=query["code_challenge"][0]
     oauth.finish(config,query["state"][0],"browser-A",uri,"code")
-    assert oauth.status(config)["actions"]=={"doc":True,"history":False}
+    assert oauth.status(config)["actions"]=={"doc":True,"history":False,"delete":False,"folder":False,"wiki":False}
     with pytest.raises(oauth.OwnerOAuthError):
         oauth.user_headers(config,required=oauth.ACTIONS["history"])
     assert oauth.user_headers(config,required=oauth.ACTIONS["doc"])=={"Authorization":"Bearer demo-access-0"}
@@ -106,12 +107,12 @@ def test_http_browser_roundtrip_and_dashboard(tmp_path,monkeypatch):
         link=owner.post(prefix+"/start",json={"action":"both"})
         assert link.status_code==200 and "httponly" in link.headers["set-cookie"].lower()
         fields=parse_qs(urlsplit(link.json()["authorize_url"]).query)
-        assert set(fields["scope"][0].split())==oauth.ALL_SCOPES
+        assert set(fields["scope"][0].split())==(oauth.ACTIONS["history"] | oauth.ACTIONS["doc"] | {"offline_access"})
         args={"code":"fake","state":fields["state"][0]}
         assert stranger.get(prefix+"/callback",params=args,follow_redirects=False).headers["location"].endswith("=error")
         done=owner.get(prefix+"/callback",params=args,follow_redirects=False)
         assert done.status_code==303 and done.headers["location"]=="http://localhost:8787/?section=host&feishu_oauth=connected"
-        assert owner.get(prefix+"/status").json()["actions"]=={"doc":True,"history":True}
+        assert owner.get(prefix+"/status").json()["actions"]=={"doc":True,"history":True,"delete":False,"folder":False,"wiki":False}
         assert owner.get(prefix+"/callback",params=args,follow_redirects=False).headers["location"].endswith("=error")
         assert not owner.delete(prefix+"/connection").json()["connected"]
         assert owner.post(prefix+"/start",json={"action":"doc","redirect_uri":"https://public.example"}).status_code==422
@@ -135,15 +136,15 @@ def test_extending_consent_keeps_prior_capabilities_until_confirmed(tmp_path,mon
         oauth.finish(cfg,q["state"][0],"browser","http://localhost/cb","code")
     finish(begin("history"))
     ext=begin("doc")
-    assert set(ext["scope"][0].split())==oauth.ALL_SCOPES
+    assert set(ext["scope"][0].split())==(oauth.ACTIONS["history"] | oauth.ACTIONS["doc"] | {"offline_access"})
     actual.clear()
     actual.update(oauth.ACTIONS["doc"]|{"offline_access"})
     with pytest.raises(oauth.OwnerOAuthError):
         finish(ext)
-    assert oauth.status(cfg)["actions"]=={"history":True,"doc":False}
+    assert oauth.status(cfg)["actions"]=={"history":True,"doc":False,"delete":False,"folder":False,"wiki":False}
     actual.update(oauth.ACTIONS["history"])
     finish(begin("doc"))
-    assert oauth.status(cfg)["actions"]=={"history":True,"doc":True}
+    assert oauth.status(cfg)["actions"]=={"history":True,"doc":True,"delete":False,"folder":False,"wiki":False}
 
 
 @pytest.mark.skipif(__import__("os").name!="nt",reason="Windows credential file format")
@@ -186,3 +187,13 @@ def test_permanent_refresh_rejection_removes_saved_grant(tmp_path,monkeypatch):
     with pytest.raises(oauth.OwnerOAuthError):
         oauth.user_headers(cfg,required=oauth.ACTIONS["doc"])
     assert not oauth.status(cfg)["connected"]
+
+def test_wiki_scope_is_explicit_and_independent(tmp_path):
+    from app.feishu import owner_oauth as oauth
+    cfg={"_access_config_path":str(tmp_path/"feishu.json"),"owner_id":"local",
+         "steward":{"app_id":"cli_test","open_id":"ou_owner"}}
+    def requested(action):
+        link=oauth.start(cfg,action,"http://localhost:3000/callback","browser")
+        return set(parse_qs(urlsplit(link).query)["scope"][0].split())
+    assert requested("wiki")=={"offline_access","wiki:node:read"}
+    assert "wiki:node:read" not in requested("both")

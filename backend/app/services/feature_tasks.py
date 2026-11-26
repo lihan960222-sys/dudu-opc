@@ -121,6 +121,21 @@ async def session_for(db, owner_id, task_id, *, model, workspace_path, job_id=No
     return thread, False
 
 
+async def check_employee_root(db, owner, agent, root):
+    from pathlib import Path
+    from app.core.config import settings
+    from app.db.models import Agent
+    if not settings.STEWARD_STRICT_OWNER or owner!=settings.STEWARD_STRICT_OWNER:
+        return
+    peers=await db.execute(select(Agent.role_path,Agent.workspace_path).where(Agent.id!=agent.id))
+    for paths in peers:
+        for value in paths:
+            if value:
+                other=Path(value).expanduser().resolve()
+                if root.is_relative_to(other) or other.is_relative_to(root):
+                    raise ValueError("员工目录相互重叠，请为每位员工指定独立目录。")
+
+
 async def context_for(db, owner_id, agent, thread):
     from pathlib import Path
     from app.services.role_workspace import checked_root
@@ -133,6 +148,7 @@ async def context_for(db, owner_id, agent, thread):
         raise ValueError("This thread is no longer the current execution session for its task.")
     item, scope, binding = row
     root = checked_root(Path(agent.role_path))
+    await check_employee_root(db,owner_id,agent,root)
     task_dir = checked_root(root / "任务" / str(item.id))
     if Path(thread.workspace_path) != task_dir:
         raise ValueError("Thread workspace differs from the task directory.")
@@ -246,6 +262,14 @@ async def report(db, owner_id, event_key, thread_id, turn_id):
             or parent.assignee_thread_id != job.requester_thread_id or parent.id != job.root_id):
         raise ValueError("Invalid parent job")
     status = "completed" if turn.status == "succeeded" else "cancelled" if turn.status == "cancelled" else "failed"
+    if status == "completed":
+        from app.team import work_verification
+        verdict=await work_verification.assess(db,job,turn,{"kind":"report"})
+        db.add(AgentJobEvent(job_id=job.id,kind="completion_evidence",detail={**verdict,"turn_id":turn.id}))
+        if verdict["state"]!="reported":
+            status="failed"
+            job.outcome="verification_blocked"
+            job.outcome_detail=verdict["detail"]
     item = await db.get(WorkItem, binding.task_id, with_for_update=True)
     latest = await db.scalar(select(Turn.id).where(Turn.thread_id == thread_id).order_by(Turn.seq.desc()).limit(1))
     if item.thread_id == thread_id and latest == turn.id and not item.completed_at and not item.archived:
@@ -571,6 +595,7 @@ async def command_thread(db, owner_id, job):
                 and parent.status in ("running","waiting","needs_input") and job.approval_mode == "plan"):
             raise ValueError("The parent assignment is no longer active.")
     root=checked_root(Path(agent.role_path))
+    await check_employee_root(db,owner_id,agent,root)
     model=load(root, agent.model).model
     folder=root/"任务"/str(job.task_id)
     if folder.resolve() != folder:

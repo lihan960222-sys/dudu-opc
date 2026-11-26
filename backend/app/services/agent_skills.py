@@ -510,3 +510,37 @@ def export_items(agent_id: int) -> list[dict]:
         {"name": s.name, "description": s.description, "body": s.body, **({"triggers": s.triggers} if s.triggers else {})}
         for s in list_skills(agent_id)
     ]
+
+
+def bundled_catalog(agent_id):
+    from app.templates.catalog import TEMPLATES
+    saved = {item.name:item for item in list_skills(agent_id)}
+    available = []
+    for template in TEMPLATES:
+        for entry in template.skills:
+            local = saved.get(entry.name)
+            same = local is not None and _same_bundled_skill(local, template.id, entry)
+            available.append({"template_id":template.id,"name":entry.name,"description":entry.description,
+                              "enabled":bool(same and local.enabled),"conflict":bool(local and not same)})
+    return {"available":available,"enabled":[item.name for item in saved.values() if item.enabled]}
+
+
+def _same_bundled_skill(local, template_id, entry):
+    description, body, source, _ = _clean(entry.description,entry.body,f"template:{template_id}")
+    return (local.description,local.body,local.source)==(description,body.strip("\n"),source)
+
+
+def enable_bundled_skill(agent_id, template_id, name):
+    from app.templates.catalog import get
+    template = get(template_id) if isinstance(template_id,str) else None
+    entry = next((skill for skill in template.skills if skill.name==name),None) if template else None
+    if entry is None:
+        raise SkillError(404,"unknown_bundled_skill","请选择本机技能目录中的条目。")
+    with _mutation_lock(agent_id):
+        local = _read_file(agent_id,entry.name)
+        if local and not _same_bundled_skill(local,template.id,entry):
+            raise SkillError(409,"skill_conflict","同名技能已由用户编辑，请保留现有版本。")
+        if local and local.enabled:
+            return local
+        return _write_skill(agent_id,entry.name,entry.description,entry.body,enabled=True,
+                            source=f"template:{template.id}",triggers=local.triggers if local else [])

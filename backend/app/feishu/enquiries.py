@@ -3,14 +3,64 @@ import json
 import re
 from pathlib import PurePath
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from .routing import enqueue
-from .team_progress import STATUS
+from .team_progress import STATUS, TERMINAL
+
+
+STATUS_SHORTCUTS = {
+    "咋样了", "进度", "状态", "当前状态", "在干嘛", "你好", "hi", "hello",
+    "如何了", "执行状态", "什么状态", "现在什么情况", "现在什么状态",
+}
+
+
+def is_dispatch_enquiry(text):
+    shortcut = text.strip().rstrip("?!.,？！。，…").rstrip().casefold()
+    return shortcut in STATUS_SHORTCUTS or bool(re.search(r"派工|执行状态|聊天记录|工作进度|任务列表", text))
+
+
+def short_result(result):
+    """Use complete clauses only. Keep command transcripts in the detail view."""
+    parts = []
+    for line in (result or "").splitlines():
+        line = line.strip().strip("*`").strip()
+        if not line or re.search(r"https?://|[A-Za-z]:\\|mcp__|^#|^[-|{]", line):
+            continue
+        sentence = re.split(r"(?<=[。！？])", line.replace("**", ""), maxsplit=1)[0]
+        if len(sentence) > 65 or sum(map(len, parts)) + len(sentence) > 65:
+            break
+        parts.append(sentence)
+        if len(parts) == 2 or len(sentence) > 8:
+            break
+    if len(parts) == 2 and all(re.fullmatch(r"[\w.-]+", p) for p in parts):
+        return "、".join(parts)
+    return "".join(parts)
+
+
+def dispatch_digest(rows):
+    active = [job for job, _ in rows if job.status not in TERMINAL]
+    lines = ["手上还有任务。" if active else "我现在没有待办。"]
+    groups = {}
+    for job, title in rows:
+        title = re.sub(r"[（(]只读[^（）()]*[）)]$", "", title or "").strip()
+        if not title and len(job.brief) <= 32 and "\n" not in job.brief:
+            title = job.brief
+        summary = short_result(job.result) if job.status == "completed" else ""
+        if job.status == "failed" and title:
+            groups.setdefault(title, []).append(job.id)
+            continue
+        label = STATUS.get(job.status, job.status)
+        lines.append(f"#{job.id} {label}" + (f" · {title}" if title else "")
+                     + (f"：{summary}" if summary else ""))
+    for title, ids in groups.items():
+        numbers = "、".join(f"#{i}" for i in ids)
+        lines.append(f"{title}有 {len(ids)} 次执行失败（{numbers}）。")
+    return lines[0] + "\n\n" + "\n".join(lines[1:]) + f"\n\n想看详情，发「派工 #{rows[0][0].id}」。"
 
 
 async def employee_updates(session, owner, employee, steward, text):
     """Show the verified owner their employee's dispatches across projects in DM."""
-    from app.db.models import Agent, AgentJob, Team, Thread, Turn
+    from app.db.models import Agent, AgentJob, Team, Thread, Turn, WorkItem
     query = (select(AgentJob).join(Agent, Agent.id == AgentJob.assignee_agent_id)
              .join(Team, Team.id == Agent.team_id)
              .where(AgentJob.owner_id == owner, Agent.owner_id == owner, Team.owner_id == owner,
@@ -18,11 +68,13 @@ async def employee_updates(session, owner, employee, steward, text):
                     Agent.id == employee, AgentJob.kind == "job", AgentJob.mode == "work"))
     number = re.search(r"派工\s*[#＃]?\s*(\d+)", text)
     if not number:
-        rows = (await session.scalars(query.order_by(AgentJob.id.desc()).limit(10))).all()
+        overview = query.add_columns(WorkItem.title).outerjoin(WorkItem, and_(
+            WorkItem.id == AgentJob.task_id, WorkItem.owner_id == owner, WorkItem.agent_id == employee))
+        rows = (await session.execute(overview.order_by(AgentJob.status.in_(TERMINAL),
+                                                       AgentJob.id.desc()).limit(10))).all()
         if not rows:
             return "目前没有派给我的任务。"
-        lines = [f"派工 #{j.id} · {STATUS.get(j.status, j.status)} · {j.brief[:90]}" for j in rows]
-        return "\n".join([*lines, "发送「派工 #编号」查看派工对话。"])
+        return dispatch_digest(rows)
     job = await session.scalar(query.where(AgentJob.id == int(number[1])))
     if not job:
         return "找不到派给我的这份工作。"
@@ -59,7 +111,7 @@ async def answer(worker,row,role,msg,text):
         with db:
             db.execute("update inbox set state='ignored' where app=? and event=?",(row['app'],row['event']))
         return
-    if not group and re.search(r"派工|执行状态|聊天记录|工作进度|任务列表", text):
+    if not group and is_dispatch_enquiry(text):
         async with session.AsyncSessionLocal() as owner:
             reply = await employee_updates(owner, worker.cfg['owner_id'], cfg['agent_id'],
                                            worker.cfg['steward'].get('agent_id'), text)

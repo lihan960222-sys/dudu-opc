@@ -10,6 +10,7 @@ from .routing import enqueue
 from .workspace_access import settings_for
 
 COMMAND = re.compile(r'^(?:请(?:帮我)?|帮我)?(?:写|新建|创建)(?:一篇|一份)?飞书文档(?=$|[\s：:])')
+NAMED = re.compile(r'^(?:请)?(?:让|叫)([\w·.\-]{1,40}?)(?=(?:写|新建|创建)(?:一篇|一份)?飞书文档)')
 TOKEN = re.compile(r'[A-Za-z0-9]{1,128}')
 SCOPES = {'docx:document:create', 'docx:document:write_only'}
 GUIDE = '第一行写「写飞书文档 标题」，从第二行开始写正文。也可以直接回复嘟嘟已发出的回答，第一行写同样的指令。'
@@ -22,7 +23,7 @@ def user_headers(cfg, *, required):
 
 
 def is_command(text):
-    return bool(COMMAND.match(text.strip()))
+    return bool(COMMAND.match(NAMED.sub('',text.strip(),count=1)))
 
 
 def blocks(body):
@@ -71,6 +72,24 @@ def finish(worker, row, text):
             worker.db.execute('update delivery_timing set outgoing=? where app=? and event=?', (outgoing, *keys))
 
 
+async def writer(cfg,name):
+    from .history import reviewer
+    from .owner_oauth import employee_config
+    from .knowledge_document import target
+    for role in cfg.get("roles",{}).values():
+        employee=role["agent_id"]
+        try:
+            await reviewer(cfg,{"agent_id":employee},name)
+        except ValueError:
+            continue
+        selected=employee_config(cfg,employee)
+        if not selected.get("_employee_oauth"):
+            raise ValueError("请指定已绑定飞书应用的员工。")
+        folder,_=target(cfg,employee)
+        return selected,employee,folder
+    raise ValueError(f"请先在工作台为{name}绑定飞书应用。")
+
+
 async def handle(worker, row, msg, text):
     if msg.get('message_type') != 'text' or not is_command(text):
         return False
@@ -96,12 +115,16 @@ async def handle(worker, row, msg, text):
         link = previous['origin'] + '/docx/' + previous['document'] if previous['document'] else ''
         finish(worker, row, '上次写入中断了。请先核对' + (f'这份文档的正文：{link}' if link else '目标文件夹里是否已有同名文档。'))
         return True
+    named=NAMED.match(text.strip())
+    name=named[1] if named else "二狗"
     try:
-        target = settings_for(worker.cfg)['document_target']
-    except ValueError:
-        target = {}
+        cfg,employee,target=await writer(worker.cfg,name)
+    except (ValueError,OSError,KeyError) as error:
+        finish(worker,row,str(error))
+        return True
+    text=NAMED.sub("",text.strip(),count=1)
     if not target:
-        finish(worker, row, '请在后台打开「家庭主机 → 飞书个人授权」，粘贴目标文件夹链接并保存。')
+        finish(worker, row, '请先在工作台保存目标云盘文件夹。')
         return True
     folder, origin = target['folder_token'], target['tenant_origin']
     first, _, draft = text.strip().partition('\n')
@@ -110,7 +133,7 @@ async def handle(worker, row, msg, text):
         finish(worker, row, GUIDE + ' 标题最多 200 个字符。')
         return True
     try:
-        headers = user_headers(worker.cfg, required=SCOPES)
+        headers = user_headers(cfg, required=SCOPES)
     except (ValueError, OSError, RuntimeError, httpx.HTTPError):
         finish(worker, row, ACCESS)
         return True
@@ -118,7 +141,10 @@ async def handle(worker, row, msg, text):
     private_summary = False
     if not body and msg.get('parent_id'):
         from .history import quoted_notes
-        body = await quoted_notes(worker, row, msg)
+        same_actor=db.execute(
+            "select 1 from history_reply_policy h join outbox o on h.outgoing=o.id where o.remote=? and h.actor=?",
+            (msg["parent_id"],employee)).fetchone()
+        body = await quoted_notes(worker,row,msg) if same_actor else ''
         private_summary = bool(body)
     if not body:
         finish(worker, row, GUIDE + ' 如果这条回答是私聊摘录，或已无法核对授权，请手动粘贴你要写入的文字。')
@@ -128,7 +154,12 @@ async def handle(worker, row, msg, text):
     except ValueError as exc:
         finish(worker, row, str(exc))
         return True
-    if private_summary and settings_for(worker.cfg)['document_target'] != target:
+    async def current_target():
+        try:
+            return (await writer(worker.cfg,name))[2]
+        except (ValueError,OSError,KeyError):
+            return {}
+    if private_summary and await current_target() != target:
         finish(worker, row, '目标文件夹已变更，请确认后重新发起建档。')
         return True
     with db:
@@ -146,11 +177,11 @@ async def handle(worker, row, msg, text):
         with db:
             db.execute('update document_publications set document=? where app=? and event=?', (document, *keys))
         if private_summary:
-            if (settings_for(worker.cfg)['document_target'] != target
+            if (await current_target() != target
                     or await quoted_notes(worker, row, msg) != body):
                 finish(worker, row, f'授权或目标文件夹已变更，摘要未写入。已创建的空文档：{link}')
                 return True
-            headers = user_headers(worker.cfg, required=SCOPES)
+            headers = user_headers(cfg, required=SCOPES)
         revision = created['revision_id']
         if type(revision) is not int or revision < 1:
             raise ValueError('Invalid document revision')

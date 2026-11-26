@@ -228,3 +228,26 @@ def test_undo_waits_for_another_backend_worker_and_refuses_its_later_edit(home):
                     process.terminate()
                 process.join(10)
         result.close()
+
+
+def test_employee_enables_only_pinned_local_catalog_skill(home):
+    entry=skills.bundled_catalog(2)["available"][0]
+    template,name=entry["template_id"],entry["name"]
+    original=skills.enable_bundled_skill(2,template,name)
+    assert original.enabled and skills.enable_bundled_skill(2,template,name).revision==original.revision
+    assert skills.bundled_catalog(2)["enabled"]==[name] and not skills.list_skills(3)
+    assert code(skills.enable_bundled_skill,2,"https://example.org/download",name)=="unknown_bundled_skill"
+    skills.write_skill(2,name,"Modified","Other content",enabled=False,source=original.source)
+    assert code(skills.enable_bundled_skill,2,template,name)=="skill_conflict"
+    assert not skills.read_skill(2,name).enabled
+
+
+def test_employee_skill_tools_are_own_only_and_plan_cannot_enable(tmp_path):
+    from app.team import mcp_server,policy
+    team=policy.TurnTeam(1,2,False,False,feature_consult=True)
+    for partial in ({"project_consult":True},{"employee_only":True}):
+        tools={tool["name"]:tool for tool in mcp_server.Server(tmp_path,**partial).tools}
+        assert {"enable_local_skill","employee_capabilities"}<=tools.keys()
+        assert set(tools["enable_local_skill"]["inputSchema"]["properties"])=={"template_id","name"}
+    assert policy.automatic("mcp__team__enable_local_skill","plan",team,{})[0]=="denied"
+    assert policy.automatic("mcp__team__enable_local_skill","ask",team,{})[0]=="allowed"

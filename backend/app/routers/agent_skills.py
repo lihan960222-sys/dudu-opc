@@ -127,6 +127,32 @@ async def list_skills(agent_id: int, rt: ThreadRuntime = Depends(get_runtime)):
         raise _http(exc) from None
 
 
+@router.get("/catalog/available")
+async def bundled_catalog(agent_id: int, rt: ThreadRuntime = Depends(get_runtime)):
+    await _agent_or_404(rt, agent_id)
+    try:
+        from sqlalchemy import select
+        from app.db.models.community_mcp import CommunityMcpConnection, CommunityMcpToolGrant
+        from app.db.models.custom_mcp import CustomMcpConnection, CustomMcpToolGrant
+        from app.db.models.muapi import MuapiToolGrant
+        result=skills.bundled_catalog(agent_id)
+        tools=[]
+        async with rt.session() as db:
+            for grant,connection,label in ((CommunityMcpToolGrant,CommunityMcpConnection,CommunityMcpConnection.slug),
+                                           (CustomMcpToolGrant,CustomMcpConnection,CustomMcpConnection.name)):
+                rows=await db.execute(select(label,grant.tool_name,grant.description).join_from(
+                    grant,connection,grant.connection_id==connection.id).where(
+                    grant.agent_id==agent_id,connection.owner_id==rt.owner_id))
+                tools.extend({"name":f"{source} · {name}","description":desc} for source,name,desc in rows)
+            rows=await db.execute(select(MuapiToolGrant.tool_name,MuapiToolGrant.description)
+                                  .where(MuapiToolGrant.agent_id==agent_id))
+            tools.extend({"name":f"MuAPI · {name}","description":desc} for name,desc in rows)
+        result["tools"]=sorted(tools,key=lambda item:item["name"])
+        return result
+    except skills.SkillError as exc:
+        raise _http(exc) from None
+
+
 @router.post("/suggest", response_model=list[SkillSummary])
 async def suggest_skills(agent_id: int, payload: SkillSuggestRequest, rt: ThreadRuntime = Depends(get_runtime)):
     """Enabled skills whose trigger phrase appears in the text. A suggestion

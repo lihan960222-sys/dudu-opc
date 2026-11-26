@@ -57,6 +57,31 @@ def test_identity_scoped_delivery_and_media(tmp_path):
     assert a != b and a.read_bytes() == b.read_bytes() == b'resource'
 
 
+def test_specialist_private_progress(tmp_path):
+    import httpx
+    from app.feishu.publisher import Publisher
+    from app.feishu.routing import enqueue, bind_config
+    from app.feishu.setup_specialist import add
+    config = tmp_path/'config.json'
+    config.write_text(json.dumps({'owner_id':'u','project':'p','roles':{},'steward':{
+        'agent_id':1,'app_id':'cli_lead','secret_env':'LEAD','open_id':'ou_lead','tenant_key':'tenant'}}))
+    add(config,'Jensen',2,'cli_employee','ou_employeeOwner',env_only=True)
+    cfg = json.loads(config.read_text())
+    db = journal(tmp_path/'state.sqlite')
+    bind_config(db,cfg)
+    pub = Publisher(cfg,db,tmp_path)
+    pub.headers = lambda role: {'Authorization':role['app_id']}
+    def handle(request):
+        assert request.url.params['receive_id_type'] == 'open_id'
+        assert json.loads(request.content)['receive_id'] == 'ou_employeeOwner'
+        assert request.headers['Authorization'] == 'cli_employee'
+        return httpx.Response(200,json={'code':0,'data':{'message_id':'ok'}})
+    pub.http = httpx.Client(transport=httpx.MockTransport(handle))
+    for root in (True,False):
+        key = enqueue(db,42,'Jensen',{'text':'progress'},root=root)
+        assert pub.deliver(db.execute('select * from outbox where id=?',(key,)).fetchone()) == 'ok'
+
+
 def test_queue_cannot_change_destination(tmp_path):
     import pytest
     from app.feishu.routing import bind_config

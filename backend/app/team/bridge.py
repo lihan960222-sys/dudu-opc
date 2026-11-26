@@ -52,6 +52,10 @@ class TeamBridge:
         extra = ['--escalations'] if notices.escalations_on() else []
         if getattr(self.run.ctx.team, 'feature_consult', False):
             extra.append('--project-consult')
+        if getattr(self.run.ctx.team, 'feature_consult', False) and not self.run.ctx.team.delegation_enabled:
+            extra.append('--employee-only')
+        for tool in getattr(self.run.ctx.team, 'feishu_tools', ()):
+            extra.extend(['--employee-tool', tool])
         if getattr(sys, 'frozen', False):
             return SimpleNamespace(command=sys.executable, args=['--team-mcp', '--mailbox', str(self.folder), *extra], env={})
         root = str(Path(__file__).resolve().parents[2])
@@ -108,6 +112,33 @@ class TeamBridge:
 
     async def execute(self, name, args):
         rt, run = self.runtime, self.run
+        if name in ("employee_capabilities","enable_local_skill"):
+            from app import composio_tools
+            from app.services import agent_skills
+            allowed, _ = policy.automatic("mcp__team__"+name,run.ctx.approval_mode,run.ctx.team,args)
+            if allowed!="allowed":
+                raise service.TeamError("outside_skill_scope","当前任务不能启用技能。")
+            async with rt.session() as db:
+                caller=await service.member(db,rt.owner_id,run.agent_id,team_id=run.ctx.team.team_id)
+                turn=await db.get(Turn,run.turn_id)
+                if not turn or turn.owner_token!=run.owner_token or turn.status!="running":
+                    raise service.TeamError("parent_gone","当前任务已结束。")
+                if name=="employee_capabilities":
+                    management.strict(args,set())
+                    connector_tools = run.ctx.composio_exact_tools
+                    if connector_tools is None and run.ctx.composio_launch is not None:
+                        connector_tools = [item["name"] for item in composio_tools.mcp_tools(run.ctx.composio_apps or {})]
+                    return {**agent_skills.bundled_catalog(caller.id),"granted_tools":sorted(
+                        set(run.ctx.team.feishu_tools)|set(run.ctx.community_tools)|set(connector_tools or []))}
+                management.strict(args,{"template_id","name"})
+                try:
+                    skill=agent_skills.enable_bundled_skill(caller.id,args.get("template_id"),args.get("name"))
+                except agent_skills.SkillError as exc:
+                    raise service.TeamError(exc.code,exc.message) from None
+                return {"enabled":True,"name":skill.name,"body":skill.body}
+        if name.startswith('feishu_'):
+            from app.team.feishu_tools_bridge import execute
+            return await execute(rt, run, name, args)
         if name in ('propose_direct_report','review_direct_report'):
             from app.team import staff_hiring
             return await staff_hiring.call(rt,run,name,args)

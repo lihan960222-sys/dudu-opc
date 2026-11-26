@@ -120,7 +120,7 @@ async def test_scoped_codex_asks_and_receives_peer_answer(crt, sessions, owner, 
         protocol=await feature_tasks.protocol(db,owner,task)
         assert protocol["deliverables"]==["unit note"] and protocol["acceptance_criteria"]==["check units"]
     parent_config,child_config=[r["params"]["config"] for r in codex.received("thread/start")]
-    assert set(parent_config["mcp_servers"]["team"]["enabled_tools"])=={"list_agents","ask_agent","delegate","answer_job_question","propose_direct_report"}
+    assert set(parent_config["mcp_servers"]["team"]["enabled_tools"])=={"list_agents","ask_agent","delegate","answer_job_question","propose_direct_report","employee_capabilities","enable_local_skill"}
     assert not any(v.get("enabled",True) for v in child_config["mcp_servers"].values())
     assert all(not v for v in child_config["features"].values())
     assert any("Pa, per supplied sheet." in e.get("content","") for e in codex.log() if e.get("event")=="mcp_result")
@@ -282,3 +282,99 @@ async def test_protocol_http_only_for_current_owner(sessions,owner):
         assert result.value.status_code == 403
     record = await task_protocol(task,request(Principal(kind="browser",role="owner")),rt)
     assert record["objective"] == "owner material"
+
+
+@pytest.mark.asyncio
+async def test_employee_selects_bundled_skill_in_scoped_turn(sessions,owner,tmp_path,monkeypatch):
+    from app.services import local_claude_runner,agent_skills
+    monkeypatch.setattr(local_claude_runner,"workspace_dir",lambda:tmp_path)
+    async with sessions() as db:
+        boss=await agent_store.create_agent(db,owner_id=owner,name="boss",provider="codex")
+        employee=await agent_store.create_agent(db,owner_id=owner,name="employee",provider="codex")
+        team=await service.set_lead(db,owner,boss.id)
+        await service.change_member(db,owner,employee.id)
+        thread=await thread_store.create_thread(db,owner_id=owner,agent_id=employee.id,provider="codex")
+        turn=await thread_store.start_turn(db,thread.id,"Use a suitable local skill")
+    ctx=NS(team=TurnTeam(team.id,employee.id,False,False,feature_consult=True,delegation_enabled=False),
+           approval_mode="ask",community_tools=["already_granted"],composio_launch=None,composio_exact_tools=None)
+    run=NS(turn_id=turn.id,owner_token=turn.owner_token,agent_id=employee.id,ctx=ctx)
+    bridge=TeamBridge(NS(session=sessions,owner_id=owner),run)
+    try:
+        catalog=await bridge.execute("employee_capabilities",{})
+        assert catalog["granted_tools"]==["already_granted"]
+        skill=catalog["available"][0]
+        chosen={k:skill[k] for k in ("template_id","name")}
+        result=await bridge.execute("enable_local_skill",chosen)
+        assert result["enabled"] and result["body"]
+        assert (await bridge.execute("employee_capabilities",{}))["enabled"]==[chosen["name"]]
+        with pytest.raises(service.TeamError):
+            await bridge.execute("enable_local_skill",{**chosen,"agent_id":boss.id})
+        assert not agent_skills.list_skills(boss.id)
+    finally:
+        await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_steward_employee_modes_and_legacy_overlaps(sessions,owner,tmp_path,monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings,"STEWARD_STRICT_OWNER",owner)
+    async with sessions() as db:
+        boss=await agent_store.create_agent(db,owner_id=owner,name="boss",make_lead=True,approval_mode="full_access")
+        member=await agent_store.create_agent(db,owner_id=owner,name="employee",approval_mode="full_access")
+        assert boss.approval_mode=="full_access" and member.approval_mode=="accept_edits"
+        assert (await agent_store.update_agent(db,member.id,approval_mode="approve_for_me")).approval_mode=="ask"
+        member.approval_mode="full_access"
+        await db.commit()
+        await agent_store.cap_existing_employee_modes(db,owner)
+        await db.refresh(member)
+        await db.refresh(boss)
+        assert member.approval_mode=="accept_edits" and boss.approval_mode=="full_access"
+        assert (await agent_store.update_agent(db,member.id,title="updated")).approval_mode=="accept_edits"
+        await service.set_lead(db,owner,member.id)
+        assert boss.approval_mode=="accept_edits"
+        root=tmp_path/"employee"
+        boss.role_path=str(root/"nested")
+        await db.commit()
+        with pytest.raises(ValueError,match="重叠"):
+            await feature_tasks.check_employee_root(db,owner,member,root)
+        assert not root.exists()
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32",reason="Windows scoped Codex")
+@pytest.mark.asyncio
+async def test_missing_scoped_file_rechecks_once_and_reports_blocker(crt,sessions,owner,codex,tmp_path,monkeypatch):
+    from app.core.config import settings
+    from app.services.role_workspace import initialize
+    from app.db.models import AgentJobEvent
+    from tests.services.thread_harness import wait_until
+    monkeypatch.setattr(settings,"TEAM_ENABLED",True)
+    monkeypatch.setattr(settings,"TEAM_LEAD_AUTO",True)
+    monkeypatch.setattr(settings,"STEWARD_STRICT_OWNER",owner)
+    async with sessions() as db:
+        boss=await agent_store.create_agent(db,owner_id=owner,name="Manager",provider="codex",model="gpt-fake")
+        employee=await agent_store.create_agent(db,owner_id=owner,name="Specialist",provider="codex",model="gpt-fake")
+        role=tmp_path/"specialist"
+        role.mkdir()
+        initialize(role,"gpt-fake","Complete assignments")
+        employee.role_path=str(role)
+        await service.set_lead(db,owner,boss.id)
+        await service.change_member(db,owner,employee.id)
+    codex.plan({"type":"team","tool":"delegate","arguments":{"agent_ids":[employee.id],"brief":"Prepare file.",
+               "project":"demo","done_when":"File delivered","completion_check":{"kind":"files",
+               "files":[{"scope":"task","path":"output.md"}]}}},
+               {"type":"chat","text":"File ready."},{"type":"chat","text":"Everything verified."},
+               {"type":"chat","text":"File not confirmed."})
+    lead_chat=await crt.create_thread(provider="codex",agent_id=boss.id)
+    await crt.send_turn(lead_chat.id,"Have the specialist save output.md.")
+    async def manager_received_report():
+        async with sessions() as db:
+            return await db.scalar(select(AgentJob.id).where(AgentJob.owner_id==owner,
+                AgentJob.requester_thread_id==lead_chat.id,AgentJob.kind=="root",AgentJob.status=="completed"))
+    await wait_until(manager_received_report, timeout=60)
+    async with sessions() as db:
+        job=await db.scalar(select(AgentJob).where(AgentJob.owner_id==owner,AgentJob.kind=="job"))
+        assert (job.status,job.outcome,job.executions)==("failed","verification_blocked",2)
+        assert "output.md" in job.outcome_detail
+        events=list(await db.scalars(select(AgentJobEvent.kind).where(AgentJobEvent.job_id==job.id)))
+        assert events.count("verification_retry")==1
+        assert events.count("completion_evidence")==2

@@ -90,21 +90,86 @@ class Worker:
                 with self.db:
                     self.db.execute("update inbox set state='ignored' where app=? and event=?",(row['app'],row['event']))
             return
+        followup = self.db.execute("select command from history_continuations where app=? and event=?",
+                                   (row["app"],row["event"])).fetchone()
+        if followup:
+            if not followup[0]:
+                from . import knowledge_intent
+                if await knowledge_intent.handle(self,row,msg,text):
+                    return
+                other = self.db.execute("""select 1 from knowledge_intent_candidates
+                    where app=? and event=? and decision='other'""",(row["app"],row["event"])).fetchone()
+                if not other:
+                    self.respond(row,"done","你想更新哪份文档？请引用上次的任务，或告诉我联系人和文档名。")
+                    return
+            else:
+                text = followup[0]
         from . import documents,voice
         if await voice.handle(self,row,msg,text):
+            return
+        from . import employee_assignment
+        if await employee_assignment.route(self,row,msg,text):
             return
         if await documents.handle(self,row,msg,text):
             return
         if suggestions.answer(self,row,msg,text) or approvals.answer(self, row, msg, text):
             return
         from . import history
+        retry = re.fullmatch(r"(?:现在)?(?:再)?(?:让|叫)(.+?)(?:再)?(?:试试看|试一下|试试|重试)[吧。！! ]*", text.strip())
+        if retry and retry[1].strip() in self.cfg["roles"] and not self.reference(msg):
+            from .workspace_access import settings_for
+            name = retry[1].strip()
+            agent = self.cfg["roles"][name]["agent_id"]
+            contacts = [alias for alias, source in settings_for(self.cfg)["history_sources"].items()
+                        if source.get("agent_id") == agent]
+            hint = (f"要整理{contacts[0]}的单聊，发「让{name}整理我和{contacts[0]}的聊天记录」。"
+                    if len(contacts) == 1 else "")
+            self.respond(row, "done", f"你想让{name}重试哪件事？{hint}也可以告诉我具体任务。")
+            return
+        tracking = re.fullmatch(r"(?:你)?(?:看一下|看看|怎么样了|进度如何|什么进度|现在什么情况|进度|状态)[？?。！! ]*",text.strip())
+        short_retry = re.fullmatch(r"(?:现在)?(?:再)?(?:试试看|试一下|试试|重试)[吧。！!？? ]*",text.strip())
+        if tracking or short_retry:
+            keys = [msg.get("parent_id"), msg.get("root_id")]
+            if short_retry and not any(keys):
+                previous = self.db.execute("""select message from inbox where app=? and rowid>? and rowid <
+                    (select rowid from inbox where app=? and event=?) order by rowid desc limit 1""",
+                    (row["app"],self.cfg["steward"].get("context_after_rowid",0),row["app"],row["event"])).fetchone()
+                if previous:
+                    keys = [previous["message"]]
+            for key in keys:
+                if not key:
+                    continue
+                receipt = self.db.execute("""select h.* from inbox i
+                    join history_dispatch_links l on l.app=i.app and l.event=i.event
+                    join history_dispatch h on h.id=l.dispatch where i.app=?
+                    and (i.message=? or exists(select 1 from direct_finals f join outbox o on o.id=f.outgoing
+                    where f.app=i.app and f.event=i.event and o.remote=?))""",(row["app"],key,key)).fetchone()
+                if receipt:
+                    job = self.db.execute("select state from private_history_jobs where app=? and event=?",
+                                          (row["app"],receipt["event"])).fetchone()
+                    status = {"assigned":"已登记","analyzing":"正在整理","failed":"读取未完成",
+                              "completed":"本机整理完成","codex_completed":"摘要已完成"}.get(job["state"],"尚未完成") if job else "尚未开始整理，请核对联系人绑定和读取授权"
+                    with self.db:
+                        self.db.execute("insert or ignore into history_dispatch_links values(?,?,?)",
+                                        (row["app"],row["event"],receipt["id"]))
+                        reply = f"{receipt['employee']} · {receipt['contact']}的聊天：{status}。"
+                        if short_retry:
+                            reply += f"要重新读取，发「让{receipt['employee']}整理我和{receipt['contact']}的聊天记录」。"
+                        self.respond(row,"done",reply)
+                    return
+            if short_retry and not self.reference(msg):
+                self.respond(row,"done","要重试哪项工作？请引用原任务，或告诉我经办人和要做的事。")
+                return
         if await history.answer(self,row,msg,text):
+            return
+        from . import knowledge_intent
+        if not command(text)[0] and await knowledge_intent.handle(self,row,msg,text):
             return
         if not self.cfg['roles'] and self.cfg.get('steward_thread'):
             await self.route_direct(row,msg,text)
             return
         intent, role, title, prompt = command(text)
-        ref = self.reference(msg)
+        ref = row['task'] or self.reference(msg)
         parent = msg.get('parent_id') or msg.get('root_id')
         pending = self.db.execute("""select i.* from questions q join outbox o on o.id=q.outgoing
             join inbox i on i.app=q.app and i.event=q.event where o.remote=? and (i.state='clarify' or q.resolved_by=?)""",
@@ -128,10 +193,29 @@ class Worker:
                 source = pending['message']
                 items = original_items
                 prompt = '\n'.join(p['text'] for p in items if 'text' in p) or '补充附件'
+        named = next((name for name in sorted(self.cfg['roles'],key=len,reverse=True)
+                      if re.match(r'^(?:请)?(?:让|叫|交给|派给)\s*'+re.escape(name),text.strip())),None)
+        if named and not intent:
+            binding = self.db.execute('select role from bindings where task=?',(ref,)).fetchone() if ref else None
+            if not binding or binding['role'] != named:
+                ref = None
+            title = text.strip().splitlines()[0][:160]
+            if not ref and self.cfg.get('steward_thread'):
+                from .steward import named_intent
+                try:
+                    kind,title = await named_intent(self.cfg,named,text)
+                except (httpx.HTTPError,ValueError,RuntimeError,KeyError,IndexError,TypeError):
+                    kind = 'clarify'
+                if kind != 'work':
+                    reply = (f'请确认联系人，发「让{named}整理我和联系人姓名的聊天记录」。'
+                             if kind=='history' else f'经办人是{named}。请补充这次要交付什么。')
+                    self.respond(row,'done',reply)
+                    return
+            role, intent = named, 'append' if ref else 'deliver'
         if ref and intent != 'independent':
             binding = self.db.execute('select * from bindings where task=?',(ref,)).fetchone()
             if binding:
-                title, role, intent = binding['title'], binding['role'], intent or 'append'
+                title, role, intent = binding['title'], binding['role'], intent or ('query' if tracking else 'append')
         if not intent and not ref and not pending and self.cfg.get('steward_thread'):
             is_direct_reply = self.db.execute("""select 1 from direct_turns d join inbox i using(app,event)
                 where i.app=? and i.message=? union all select 1 from direct_finals f join outbox o on o.id=f.outgoing
@@ -289,7 +373,7 @@ class Worker:
                     issues.append('有一项产物未通过路径、大小或文件状态核对。')
         with self.db:
             enqueue(self.db,task,role,{'text':f"任务 #{task} 本轮状态：{turn['status']}。已登记 {len(artifacts)} 个公开产物。{public}"})
-            final = enqueue(self.db,task,'steward',{'text':f"任务 #{task}：{summary[:8000]}{''.join(issues)}"})
+            final = enqueue(self.db,task,'steward',{'text':f"任务 #{task}：{summary}{''.join(issues)}"})
             self.bind_final(row,final)
             timing.finished(self.db,row,turn)
             for artifact in artifacts:

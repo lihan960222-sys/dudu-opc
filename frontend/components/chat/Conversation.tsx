@@ -92,6 +92,7 @@ export function Conversation({
   emptyAction,
   agent = null,
   loading = false,
+  steward = false,
 }: {
   // Edit a past message and resend it in a new branch.
   onBranch?: (turnId: number, text: string) => Promise<boolean>;
@@ -107,6 +108,7 @@ export function Conversation({
   agent?: { id: number; name: string; title?: string | null; description?: string | null } | null;
   // The conversation is still being fetched: show placeholders instead of the empty state.
   loading?: boolean;
+  steward?: boolean;
   transcript: Transcript;
   answering: string | null;
   approvalErrors: Record<string, string>;
@@ -240,6 +242,7 @@ export function Conversation({
                     <AssistantMessage
                       key={item.key}
                       text={item.text}
+                      steward={steward}
                       speaker={agent?.name} portrait={speaker}
                       threadId={threadId}
                       workspacePath={workspacePath}
@@ -298,7 +301,7 @@ export function Conversation({
               return node;
             })}
 
-          {transcript.typing !== null && transcript.typing !== "" && <AssistantMessage text={transcript.typing} speaker={agent?.name} portrait={speaker} live />}
+          {transcript.typing !== null && transcript.typing !== "" && <AssistantMessage steward={steward} text={transcript.typing} speaker={agent?.name} portrait={speaker} live />}
 
           {transcript.runningTurnId !== null && (working || waitingOnYou) && (
             <WorkingStatus key={transcript.runningTurnId} phase={workingPhase(transcript.items)} turnId={transcript.runningTurnId} />

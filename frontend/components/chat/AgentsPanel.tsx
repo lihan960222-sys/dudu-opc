@@ -47,6 +47,7 @@ import { AgentHistory } from "./AgentHistory";
 import { AgentImage } from "./AgentImage";
 import { AgentImageGenerator } from "./AgentImageGenerator";
 import { useT } from "@/lib/use-i18n";
+import { TeamWorkspaceAccess } from "../staff/TeamWorkspaceAccess";
 import { AgentEditorFooter } from "./agents/AgentEditorFooter";
 import { ConnectedAppsSection } from "./agents/ConnectedAppsSection";
 import { filterAgents, shouldShowAgentSearch, unavailableEnginesInUse } from "./agents/agent-list";
@@ -64,6 +65,7 @@ type Draft = {
   effort: string | null;
   workspace_path: string;
   approval_mode: ApprovalMode;
+  team_workspaces_readable: boolean;
   memory_enabled: boolean;
   fallback_provider: string | null;
   fallback_model: string | null;
@@ -88,6 +90,7 @@ const EMPTY: Draft = {
   effort: null,
   workspace_path: "",
   approval_mode: "ask",
+  team_workspaces_readable: false,
   memory_enabled: true,
   fallback_provider: null,
   fallback_model: null,
@@ -109,6 +112,7 @@ function toDraft(agent: Agent): Draft {
     effort: agent.effort ?? null,
     workspace_path: agent.workspace_path ?? "",
     approval_mode: !approvalModesForProvider(agent.provider).some((mode) => mode.value === agent.approval_mode) ? "ask" : agent.approval_mode,
+    team_workspaces_readable: agent.team_workspaces_readable ?? false,
     memory_enabled: agent.memory_enabled ?? true,
     fallback_provider: agent.fallback_provider ?? null,
     fallback_model: agent.fallback_model ?? null,
@@ -335,12 +339,18 @@ export function AgentsPanel({
   const save = () => {
     if (!draft || draft.name.trim() === "") return;
     const input = toInput(draft, admin);
+    if (!toolsFor && !creationSources && admin && !isLead && ((draft.provider === "codex" && draft.team_workspaces_readable) !== (originalDraft?.team_workspaces_readable ?? false))) {
+      input.team_workspaces_readable = draft.provider === "codex" && draft.team_workspaces_readable;
+    }
     if (toolsFor) {
       if (!originalDraft || draft.id !== toolsFor.id) return;
-      const changes = employeeToolChanges(toInput(originalDraft, admin), input);
+      const previous = toInput(originalDraft, admin);
+      if (input.team_workspaces_readable !== undefined) previous.team_workspaces_readable = originalDraft.team_workspaces_readable;
+      const changes = employeeToolChanges(previous, input);
       void run(() => api.updateAgent(toolsFor.id, changes), () => { setDraft(null); setOriginalDraft(null); });
       return;
     }
+    if (creationSources && draft.id === null) input.approval_mode = "ask";
     if (draft.id === null && fromTemplate) return createFromTemplate(input, fromTemplate);
     run(
       async () => {
@@ -944,7 +954,7 @@ export function AgentsPanel({
                       </label>
                     )}
                     <p className="text-xs text-muted">{t("agentTeam.fallbackEngineDescription")}</p>
-                    <fieldset className="space-y-2 text-xs text-muted">
+                    {!toolsFor && !creationSources && <fieldset className="space-y-2 text-xs text-muted">
                       <legend>{t("employee.approvals")}</legend>
                       <div className="mt-1 flex flex-wrap gap-2">
                         {availableApprovalModes.map((mode) => (
@@ -968,7 +978,11 @@ export function AgentsPanel({
                         ))}
                       </div>
                       {modeInfo && <p>{t(`emp.approvalHelp.${modeInfo.value}`)}</p>}
-                    </fieldset>
+                    </fieldset>}
+                    {!toolsFor && !creationSources && admin && !isLead && draft.provider === "codex" && (
+                      <TeamWorkspaceAccess value={draft.team_workspaces_readable} disabled={busy}
+                        onChange={team_workspaces_readable => setDraft({ ...draft, team_workspaces_readable })} />
+                    )}
                   </TabPanel>
 
                   {canEditConnectedApps && (

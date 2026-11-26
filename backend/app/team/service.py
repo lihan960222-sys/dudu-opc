@@ -67,7 +67,11 @@ async def set_lead(db, owner, agent_id, name='My team', *, commit=True):
         raise TeamError('other_team', 'This agent already belongs to another team.')
     if team.lead_agent_id != agent.id:
         if team.lead_agent_id:
-            await db.execute(update(Agent).where(Agent.id==team.lead_agent_id,Agent.owner_id==owner).values(can_staff_team=False))
+            from app.services.agent_store import employee_mode
+            previous = await db.get(Agent,team.lead_agent_id,with_for_update=True)
+            if previous and previous.owner_id==owner:
+                previous.can_staff_team=False
+                previous.approval_mode=employee_mode(owner,previous.approval_mode)
         agent.can_staff_team=False
         agent.manager_agent_id=None
         team.lead_agent_id = agent.id

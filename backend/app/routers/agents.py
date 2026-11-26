@@ -99,27 +99,29 @@ def _guard_create(request: Request, payload: AgentCreateRequest) -> None:
     or approvals that loosen. An agent made here asks first or only plans."""
     if not _restricted(request):
         return
+    if payload.team_workspaces_readable:
+        raise _admin_only('team_workspaces_readable')
     if payload.workspace_path is not None:
         raise _admin_only("workspace_path")
     if payload.claude_account is not None:
         raise _admin_only("claude_account")
     if payload.make_lead:
         raise _admin_only("make_lead")
-    if payload.approval_mode == "accept_edits":
-        raise _admin_only("approval_mode accept_edits")
+    if payload.approval_mode in ("accept_edits","full_access","approve_for_me"):
+        raise _admin_only(f"approval_mode {payload.approval_mode}")
 
 
 def _guard_update(request: Request, payload: AgentUpdateRequest, agent) -> None:
     """The same for an edit. Leaving "accept_edits" alone, or moving to "ask" or "plan", is fine."""
     if not _restricted(request):
         return
-    for field in ("workspace_path", "connector_scopes", "connector_account_scopes", "claude_account"):
+    for field in ("team_workspaces_readable", "workspace_path", "connector_scopes", "connector_account_scopes", "claude_account"):
         if field in payload.model_fields_set:
             raise _admin_only(field)
     if payload.make_lead is not None:
         raise _admin_only("make_lead")
-    if payload.approval_mode == "accept_edits" and agent.approval_mode != "accept_edits":
-        raise _admin_only("approval_mode accept_edits")
+    if payload.approval_mode in ("accept_edits","full_access","approve_for_me") and agent.approval_mode != payload.approval_mode:
+        raise _admin_only(f"approval_mode {payload.approval_mode}")
 
 
 def _check_claude_account(account_id: str | None) -> None:
@@ -391,6 +393,7 @@ async def create_agent(payload: AgentCreateRequest, request: Request, rt: Thread
                 workspace_path=workspace,
                 approval_mode=payload.approval_mode,
                 pinned=payload.pinned,
+                team_workspaces_readable=payload.team_workspaces_readable,
                 memory_enabled=payload.memory_enabled,
                 recall_enabled=payload.recall_enabled,
                 memory_upkeep=payload.memory_upkeep,
@@ -529,6 +532,7 @@ async def _apply_update(
             "workspace_path",
             "approval_mode",
             "pinned",
+            "team_workspaces_readable",
             "memory_enabled",
             "recall_enabled",
             "memory_upkeep",

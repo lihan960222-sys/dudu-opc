@@ -12,6 +12,15 @@ from app.services import agent_store, feature_tasks
 from tests.services.thread_harness import sessions, owner
 
 
+@pytest.mark.parametrize("message", "咋样了 进度 状态 当前状态 在干嘛 你好 hi hello 如何了 执行状态 什么状态 现在什么情况 现在什么状态".split()
+                         + ["  HELLO! ", "咋样了？", "派工 #12"])
+def test_dispatch_shortcuts(message):
+    from app.feishu.enquiries import is_dispatch_enquiry
+    assert is_dispatch_enquiry(message)
+    assert not is_dispatch_enquiry("#12 的进度如何？")
+    assert not is_dispatch_enquiry("history")
+
+
 @pytest.mark.asyncio
 async def test_specialist_replies_only_to_bound_owner_message_with_scoped_evidence(tmp_path,sessions,owner,monkeypatch):
     monkeypatch.setattr(session,'AsyncSessionLocal',sessions)

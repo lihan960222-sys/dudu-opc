@@ -24,7 +24,8 @@ async def test_gateway_choice_creates_one_task_through_real_backend(state,tmp_pa
         w.api=backend
         suggestions.poll(w)
         offer=db.execute('select * from outbox').fetchone()
-        assert '1.' in json.loads(offer['body'])['text'] and '2.' in json.loads(offer['body'])['text']
+        menu = json.loads(offer['body'])['text']
+        assert '「1」列出阻塞和已有线索' in menu and '「2」让管家跟进阻塞' in menu
         db.execute("update outbox set state='sent', remote='om_offer'")
         msg={'chat_type':'p2p','parent_id':'om_offer','message_type':'text','content':'{"text":"2"}'}
         db.execute("insert into inbox(app,event,message,payload) values('dudu','e','om_decision',?)",(json.dumps(msg),))

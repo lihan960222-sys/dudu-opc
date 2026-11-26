@@ -12,7 +12,8 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Agent, Thread
+from app.core.config import settings
+from app.db.models import Agent, Team, Thread
 from app.db.models.agent import APPROVAL_MODES
 from app.db.transactions import begin_write
 from app.services import agent_history
@@ -32,6 +33,7 @@ _EDITABLE = (
     "workspace_path",
     "approval_mode",
     "pinned",
+    "team_workspaces_readable",
     "memory_enabled",
     "recall_enabled",
     "memory_upkeep",
@@ -60,6 +62,24 @@ def _utcnow() -> datetime:
 def _check_mode(mode: str) -> None:
     if mode not in APPROVAL_MODES:
         raise ValueError(f"approval_mode must be one of {', '.join(APPROVAL_MODES)}")
+
+
+def employee_mode(owner, mode):
+    if settings.STEWARD_STRICT_OWNER and owner==settings.STEWARD_STRICT_OWNER:
+        return {"full_access":"accept_edits","approve_for_me":"ask"}.get(mode,mode)
+    return mode
+
+
+async def cap_existing_employee_modes(db: AsyncSession, owner: str) -> None:
+    """Apply the local steward's profile policy to pre-existing employees on startup."""
+    if not owner or owner!=settings.STEWARD_STRICT_OWNER:
+        return
+    await begin_write(db)
+    lead = select(Team.lead_agent_id).where(Team.owner_id==owner,Team.lead_agent_id.is_not(None))
+    for old in ("full_access","approve_for_me"):
+        await db.execute(update(Agent).where(Agent.owner_id==owner,Agent.id.not_in(lead),
+            Agent.approval_mode==old).values(approval_mode=employee_mode(owner,old)))
+    await db.commit()
 
 
 async def get_agent(db: AsyncSession, agent_id: int) -> Agent | None:
@@ -91,6 +111,7 @@ async def create_agent(
     workspace_path: str | None = None,
     approval_mode: str = "ask",
     pinned: bool = False,
+    team_workspaces_readable: bool = False,
     memory_enabled: bool = True,
     recall_enabled: bool = True,
     memory_upkeep: bool = True,
@@ -118,8 +139,9 @@ async def create_agent(
         model=model,
         effort=effort,
         workspace_path=workspace_path,
-        approval_mode=approval_mode,
+        approval_mode=approval_mode if make_lead else employee_mode(owner_id,approval_mode),
         pinned=pinned,
+        team_workspaces_readable=team_workspaces_readable,
         memory_enabled=memory_enabled,
         recall_enabled=recall_enabled,
         memory_upkeep=memory_upkeep,
@@ -167,6 +189,12 @@ async def update_agent(
         await db.rollback()
         raise AgentNotFound(agent_id)
     before = agent_history.profile_of(agent)
+    mode = changes.get("approval_mode",agent.approval_mode)
+    capped = employee_mode(agent.owner_id,mode)
+    if capped != mode and not make_lead:
+        lead_id = await db.scalar(select(Team.lead_agent_id).where(Team.owner_id==agent.owner_id))
+        if lead_id != agent.id or make_lead is False:
+            changes["approval_mode"]=capped
     for field, value in changes.items():
         setattr(agent, field, value)
     if "instructions" in changes:

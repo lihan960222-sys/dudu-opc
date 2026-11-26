@@ -8,6 +8,30 @@ from app.core import host_exec
 from app.services.local_claude_runner import child_env
 
 
+async def named_intent(cfg, role, message):
+    """Interpret an explicit assignment without letting the model change its recipient."""
+    from .lead_chat import select_thread
+    from app.services import steward_deepseek
+    import httpx
+    _, model = await select_thread(cfg, with_model=True)
+    instructions = ("只判断老板给指定员工的这句话：普通任务用 work，读取或整理飞书私聊用 history，"
+                    "仅提问或不明确用 clarify。只返回 JSON 对象，字段 kind 和 title（简短任务名）。"
+                    "不执行操作，不猜联系人。")
+    if model not in steward_deepseek.MODELS:
+        return "work", message.splitlines()[0][:160]
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post("https://api.deepseek.com/chat/completions",
+            headers={"Authorization":"Bearer "+steward_deepseek.api_key()}, json={
+                "model":model,"stream":False,"response_format":{"type":"json_object"},
+                "messages":[{"role":"system","content":instructions},{"role":"user","content":
+                    json.dumps({"指定员工":role,"来信":message},ensure_ascii=False)}]})
+        response.raise_for_status()
+        value = json.loads(response.json()["choices"][0]["message"]["content"])
+    if not isinstance(value,dict) or value.get("kind") not in ("work","history","clarify"):
+        raise ValueError("无法确定派工意图")
+    return value["kind"], str(value.get("title") or message.splitlines()[0])[:160]
+
+
 def validate_choice(proposal, roles, tasks):
     if not isinstance(proposal,dict):
         return None

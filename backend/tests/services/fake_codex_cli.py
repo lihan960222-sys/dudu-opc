@@ -35,6 +35,8 @@ import threading
 import time
 import uuid
 
+# The real app-server JSONL stream is UTF-8 on Windows as well.
+sys.stdin.reconfigure(encoding="utf-8")
 base = pathlib.Path(os.environ["FAKE_CODEX_DIR"])
 plan = json.loads((base / "plan.json").read_text())
 threads_dir = base / "threads"

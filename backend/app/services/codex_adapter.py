@@ -126,11 +126,16 @@ COMPUTER_CONFINEMENT = {
     "features": {"shell_tool": False, "unified_exec": False, "view_image": False},
     "web_search": "disabled",
 }
-CONFINEMENT_BREACH = (
-    "Codex tried to use its own tools on this machine during a computer turn, so the turn was stopped. "
-    "Update Codex, or switch this agent to Claude."
-)
 _MCP_TOOL_MESSAGE = re.compile(r'run tool "([A-Za-z0-9_]+)"')
+def feature_team_tools(ctx):
+    team = getattr(ctx, "team", None)
+    feishu = getattr(team, "feishu_tools", ())
+    employee = ("employee_capabilities","enable_local_skill",*feishu)
+    if team and not team.delegation_enabled:
+        return employee
+    return ("list_agents", "propose_direct_report", "delegate", "answer_job_question", "ask_agent", *employee)
+
+
 TOOL_ITEMS = ("commandExecution", "fileChange", "mcpToolCall", "webSearch")
 
 
@@ -520,7 +525,7 @@ class _CodexTurn:
     answering: set = field(default_factory=set)
     mcp_calls: dict = field(default_factory=dict)  # item id -> (server, tool, arguments)
     permit_inputs: dict = field(default_factory=dict)  # request id -> the call's arguments
-    breach: bool = False
+    breach: str | None = None
 
     def __post_init__(self) -> None:
         self.timing_start = time.monotonic()
@@ -686,7 +691,8 @@ class _CodexTurn:
             try:
                 current = await self._call("config/read", {"includeLayers": False, "cwd": str(self.workspace)})
                 common["config"] = feature_files.turn_config(current.get("config"), self.workspace,
-                    self.tools and self.mode != "plan", consult_only=getattr(self.ctx, "consult_only", False))
+                    self.tools and self.mode != "plan", consult_only=getattr(self.ctx, "consult_only", False),
+                    peer_access=getattr(self.ctx,"peer_workspaces",None))
             except (AttributeError, TypeError, ValueError, RpcError, RpcClosed, asyncio.TimeoutError):
                 return self._failed("Could not confirm scoped task tools.", "codex_error")
             common["environments"] = []
@@ -720,7 +726,7 @@ class _CodexTurn:
         if self.ctx.team_launch is not None:
             team_launch = self.ctx.team_launch
             common.setdefault("config", {}).setdefault("mcp_servers", {})["team"] = {
-                **({"enabled":True, "enabled_tools":["list_agents","propose_direct_report","delegate","answer_job_question","ask_agent"]} if self.feature else {}),
+                **({"enabled":True, "enabled_tools":list(feature_team_tools(self.ctx))} if self.feature else {}),
                 "command": team_launch.command, "args": list(team_launch.args), "env": dict(team_launch.env),
                 "default_tools_approval_mode": "prompt",
             }
@@ -824,7 +830,7 @@ class _CodexTurn:
             # Fail closed: the turn never starts with permissions it was not given.
             return self._failed(
                 "Codex did not apply the requested approval policy and sandbox, so the turn was not "
-                "started. Update Codex and try again.",
+                "started.",
                 "codex_policy_mismatch",
             )
         if self.handoff_enabled and self.codex_thread:
@@ -1057,15 +1063,21 @@ class _CodexTurn:
         if kind not in TOOL_ITEMS or not isinstance(item_id, str):
             return
         project_tool = (self.ctx.team_launch is not None and item.get("server") == "team"
-                        and item.get("tool") in ("list_agents", "propose_direct_report", "delegate", "answer_job_question", "ask_agent"))
+                        and item.get("tool") in feature_team_tools(self.ctx))
         if self.feature and (getattr(self.ctx, "consult_only", False) or kind != "mcpToolCall"
                              or (item.get("server") != "feature_files" and not project_tool)):
-            self.breach = True
+            tool = kind
+            if kind == "mcpToolCall" and all(
+                isinstance(item.get(k), str) and re.fullmatch(r"[\w.-]{1,128}", item[k])
+                for k in ("server", "tool")
+            ):
+                tool = f"{item['server']}.{item['tool']}"
+            self.breach = f"工具 {tool} 超出了本次员工任务允许的范围，已停止本轮执行。"
             return
         if self.computer is not None and kind != "mcpToolCall":
             # Codex's own tools were switched off for this thread; one starting anyway
             # means they were not, and the turn does not go on.
-            self.breach = True
+            self.breach = f"员工电脑任务中出现了未获准的 Codex 工具 {kind}，已停止本轮执行。"
             return
         if kind == "commandExecution":
             full = item.get("command") if isinstance(item.get("command"), str) else ""
@@ -1141,10 +1153,16 @@ class _CodexTurn:
         if status == "declined":
             output = (output + "\n" if output else "") + "(declined)"
         stored, truncated = cap_tool_output(output)
-        await self._emit(
-            "tool.completed",
-            {"call_id": item_id, "ok": status not in ("failed", "declined"), "output": stored, "truncated": truncated},
-        )
+        failed_mcp = kind=="mcpToolCall" and (bool(item.get("error")) or
+            isinstance(item.get("result"),dict) and item["result"].get("isError") is True)
+        completed = {"call_id":item_id,"ok":status not in ("failed","declined") and not failed_mcp,
+                     "output":stored,"truncated":truncated}
+        if self.feature and completed["ok"] and kind=="mcpToolCall":
+            from app.team.work_verification import local_receipt
+            evidence=local_receipt(self.mcp_calls.get(item_id),item.get("result"))
+            if evidence:
+                completed["file_receipt"]=evidence
+        await self._emit("tool.completed",completed)
 
     # -- what Codex asks -----------------------------------------------------------------
 
@@ -1172,7 +1190,7 @@ class _CodexTurn:
         if (self.computer is not None or self.feature) and kind != "mcp":
             # A command or file approval during a computer turn: Codex's own tools are on.
             self.rpc.respond(rid, {"decision": "denied" if method in LEGACY_REQUESTS else "decline"})
-            self.breach = True
+            self.breach = f"本轮执行范围不允许 {method}，已拒绝该请求并停止本轮执行。"
             return
 
         legacy = method in LEGACY_REQUESTS
@@ -1210,6 +1228,25 @@ class _CodexTurn:
                 return
             if found[0] != "write_text" or not self.tools or self.mode == "plan":
                 self.rpc.respond(rid, payload(False))
+                return
+            peer_access = getattr(self.ctx, "peer_workspaces", None)
+            if peer_access and self.mode == "accept_edits":
+                # This approval covers only the managed employee's own write_text.
+                # The isolated file service independently validates every access at execution.
+                from app.services.feature_files import FeatureFiles, MAX_TEXT
+                import sqlite3
+                args = found[1]
+                allowed = False
+                try:
+                    scope = args.get("scope", "task")
+                    if (scope in ("role", "task") and isinstance(args["text"], str)
+                            and len(args["text"].encode("utf-8")) <= MAX_TEXT):
+                        files = FeatureFiles(self.workspace, peer_access=peer_access)
+                        target = files.path(scope, args["path"])
+                        allowed = target not in (files.task, files.role) and not target.is_dir()
+                except (AttributeError, KeyError, TypeError, OSError, ValueError, sqlite3.Error):
+                    pass
+                self.rpc.respond(rid, payload(allowed))
                 return
         if not (team_call or composio_call or community_call or browser_call) and (not self.tools or self.mode == "plan"):
             self.rpc.respond(rid, payload(False))
@@ -1250,9 +1287,10 @@ class _CodexTurn:
                     return
                 name, tool_input = found
                 from app.team.mcp_server import TOOLS
-                if (name not in {entry['name'] for entry in TOOLS} or
-                        (self.feature and name not in ('list_agents','propose_direct_report','delegate','answer_job_question') and
-                         (name != 'ask_agent' or tool_input.get('mode') != 'consult'))):
+                feishu_tools = getattr(getattr(self.ctx, 'team', None), 'feishu_tools', ())
+                if ((name not in {entry['name'] for entry in TOOLS} and name not in feishu_tools) or
+                        (self.feature and (name not in feature_team_tools(self.ctx) or
+                         (name == 'ask_agent' and tool_input.get('mode') != 'consult')))):
                     self.rpc.respond(rid, payload(False))
                     return
                 tool, approval_kind = "mcp__team__" + name, "other"
@@ -1293,7 +1331,8 @@ class _CodexTurn:
             elif self.feature:
                 _, tool_input = found
                 tool, approval_kind = "feature_files.write_text", "other"
-                summary = "Save task file " + str(tool_input.get("path", ""))[:150]
+                scope = "岗位目录" if tool_input.get("scope") == "role" else "任务目录"
+                summary = f"写入{scope}文件 " + str(tool_input.get("path", ""))[:150]
             elif self.computer is not None:
                 # Only the computer's own tools can be asked about here.
                 found = self._computer_call(server, text, meta) if server == COMPUTER_SERVER else None
@@ -1356,7 +1395,7 @@ class _CodexTurn:
         if self.ctx.aborted:
             return failed("The run was stopped because it no longer owns its turn.", "lost")
         if self.breach:
-            return failed(CONFINEMENT_BREACH, "codex_confinement_failed")
+            return failed(self.breach, "codex_confinement_failed")
         if crashed:
             return failed("Local run failed unexpectedly", "runner_error")
         if self.timed_out:

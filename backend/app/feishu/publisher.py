@@ -5,7 +5,10 @@ import os
 import time
 from pathlib import Path
 from urllib.parse import quote
-from uuid import uuid4
+from tempfile import TemporaryDirectory
+from uuid import NAMESPACE_URL, uuid4, uuid5
+
+from app.services import steward_reply
 
 import httpx
 
@@ -145,6 +148,10 @@ class Publisher:
             url = API + '/im/v1/messages/' + quote(allowed['message'],safe='') + '/reply'
         elif private and body.get('reply_to'):
             url = API + '/im/v1/messages/' + quote(body['reply_to'],safe='') + '/reply'
+        elif not private and not role.get('chat_id'):
+            params['receive_id_type'] = 'open_id'
+            data['receive_id'] = role['owner_open_id']
+            url = API + '/im/v1/messages'
         elif private or row['is_root']:
             params['receive_id_type'] = 'open_id' if private else 'chat_id'
             data['receive_id'] = role['open_id' if private else 'chat_id']
@@ -155,5 +162,25 @@ class Publisher:
                 raise ValueError('工作群根消息尚未确认')
             url = API + '/im/v1/messages/' + quote(root[0],safe='') + '/reply'
             data['reply_in_thread'] = True
+        if private and kind == "text" and len(body["text"]) > steward_reply.LIMIT:
+            # Both messages use this row's verified destination and authorization.
+            # Persist the attachment receipt before sending the summary; a retry
+            # can resume after that point even if the original process exited.
+            self.db.execute("""create table if not exists steward_reply_files(
+                outgoing text primary key, remote text not null)""")
+            sent = self.db.execute("select remote from steward_reply_files where outgoing=?", (row["id"],)).fetchone()
+            if not sent:
+                with TemporaryDirectory() as temp:
+                    path = Path(temp) / "完整回复.md"
+                    path.write_bytes(body["text"].encode("utf-8"))
+                    file_key = self.upload(role, path, "file")
+                attachment = {**data, "uuid": str(uuid5(NAMESPACE_URL, "steward-reply-file/" + row["id"])),
+                              "msg_type": "file", "content": json.dumps({"file_key": file_key})}
+                reply = checked(self.http.post(url, params=params, json=attachment, headers=self.headers(role)))
+                with self.db:
+                    self.db.execute("insert or replace into steward_reply_files values(?,?)",
+                                    (row["id"], reply["data"]["message_id"]))
+        if private and kind == "text":
+            data["content"] = json.dumps({"text":steward_reply.preview(body["text"])}, ensure_ascii=False)
         result = checked(self.http.post(url,params=params,json=data,headers=self.headers(role)))
         return result['data']['message_id']
