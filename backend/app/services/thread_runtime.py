@@ -778,7 +778,7 @@ class ThreadRuntime:
             project_facts = ''
             if isolated and thread.owner_id==self.owner_id:
                 from app.feishu.lead_chat import project_context
-                project_facts=await project_context(db,self.owner_id,managed.project)
+                project_facts=await project_context(db,self.owner_id,managed.project,managed.thread_id)
         if thread is None or thread.owner_id != self.owner_id:
             raise store.ThreadNotFound(thread_id)
         if direct_event_key is not None:

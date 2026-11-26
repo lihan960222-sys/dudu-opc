@@ -33,6 +33,20 @@ def status_only(text):
         r"|(?:status|progress)(?:\s+update)?[?.!\s]*",token,re.I))
 
 
+def steward_task_scope(owner, project, thread_id):
+    """A channel has a default project and can also continue work it actually assigned."""
+    project_scope = FeatureScope.project == project
+    if thread_id is None:
+        return project_scope
+    channel = select(FeishuLeadChat.channel).where(FeishuLeadChat.thread_id == thread_id).correlate(None).scalar_subquery()
+    assigned = (select(AgentJob.task_id).join(Thread, Thread.id == AgentJob.requester_thread_id)
+                .join(FeishuLeadChat, FeishuLeadChat.thread_id == Thread.id)
+                .where(AgentJob.owner_id == owner, Thread.owner_id == owner, Thread.kind == 'chat',
+                       Thread.agent_id == AgentJob.requester_agent_id, FeishuLeadChat.channel == channel,
+                       AgentJob.origin_kind == 'person', AgentJob.kind == 'job', AgentJob.mode == 'work'))
+    return or_(project_scope, WorkItem.id.in_(assigned))
+
+
 async def status_text(db, owner, context):
     from app.db.models import WorkColumn
     query = select(WorkItem.id, WorkItem.title, WorkColumn.key).join(FeatureScope,FeatureScope.task_id==WorkItem.id
@@ -40,7 +54,7 @@ async def status_text(db, owner, context):
     if context.reference_task_ids:
         query = query.where(WorkItem.id.in_(context.reference_task_ids))
     elif context.project:
-        query = query.where(FeatureScope.project==context.project, WorkItem.archived.is_(False))
+        query = query.where(steward_task_scope(owner, context.project, context.thread_id), WorkItem.archived.is_(False))
     else:
         query = query.where(WorkItem.id.in_(select(AgentJob.task_id).where(
             AgentJob.owner_id==owner, AgentJob.requester_thread_id==context.thread_id)))
@@ -101,7 +115,8 @@ async def resolve_assignment_context(db, owner_id, turn_id):
         legacy = await db.get(FeatureMessage, (owner_id, ref_key))
         if prior:
             cited = prior.turn_id
-        elif legacy and legacy.result.get("task_id") and (not project or legacy.project == project):
+        elif legacy and legacy.result.get("task_id"):
+            # The common card check below also validates the task's channel or default project.
             ids.append(legacy.result["task_id"])
         else:
             raise ValueError("这条引用找不到原工单，请核对任务编号。")
@@ -135,7 +150,7 @@ async def resolve_assignment_context(db, owner_id, turn_id):
         query = select(WorkItem.id).join(FeatureScope, FeatureScope.task_id == WorkItem.id).where(
             WorkItem.owner_id == owner_id, WorkItem.id.in_(ids))
         if project:
-            query = query.where(FeatureScope.project == project)
+            query = query.where(steward_task_scope(owner_id, project, thread.id))
         if set(await db.scalars(query)) != set(ids):
             raise ValueError("任务编号不属于当前老板或项目。")
     members = await db.execute(select(Agent.id, Agent.name).where(Agent.owner_id == owner_id,
@@ -184,7 +199,7 @@ async def steward_context(db, owner, turn):
     else:
         query = query.where(WorkItem.archived.is_(False))
         if context.project:
-            query = query.where(FeatureScope.project == context.project)
+            query = query.where(steward_task_scope(owner, context.project, context.thread_id))
         else:
             query = query.where(WorkItem.id.in_(_chat_tasks(owner, turn.thread_id)))
         if context.named_agent_ids:
@@ -216,7 +231,9 @@ async def resolve_card(db, owner, context, target, args):
     query = select(WorkItem, FeatureScope).join(FeatureScope, FeatureScope.task_id == WorkItem.id).where(
         WorkItem.owner_id == owner)
     if not ids:
-        if project:
+        if context.project:
+            query = query.where(steward_task_scope(owner, context.project, context.thread_id))
+        elif project:
             query = query.where(FeatureScope.project == project)
         if not context.project:
             query = query.where(WorkItem.id.in_(_chat_tasks(owner, context.thread_id)))

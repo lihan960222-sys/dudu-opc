@@ -70,9 +70,10 @@ async def select_thread(cfg,*,with_model=False):
         return (thread.id,model) if with_model else thread.id
 
 
-async def project_context(db,owner,project):
+async def project_context(db,owner,project,thread_id=None):
+    from app.services.assignment_context import steward_task_scope
     rows=(await db.execute(select(WorkItem.id,WorkItem.agent_id).join(FeatureScope,FeatureScope.task_id==WorkItem.id)
-         .where(WorkItem.owner_id==owner,FeatureScope.project==project).order_by(WorkItem.id.desc()).limit(24))).all()
+         .where(WorkItem.owner_id==owner,steward_task_scope(owner, project, thread_id)).order_by(WorkItem.id.desc()).limit(24))).all()
     if not rows:
         return ''
     return '现有项目任务（任务编号、经办角色编号）：'+json.dumps([[a,b] for a,b in rows])
@@ -81,7 +82,7 @@ async def project_context(db,owner,project):
 async def assignment_status(worker, row, message):
     from app.db.session import AsyncSessionLocal
     from app.db.models import DirectTurnReceipt, FeatureMessage, WorkColumn
-    from app.services.assignment_context import _tasks_for_turn
+    from app.services.assignment_context import _tasks_for_turn, steward_task_scope
     from .direct_requests import source_reference
     owner = worker.cfg.get("owner_id")
     project = worker.cfg.get("project")
@@ -92,7 +93,7 @@ async def assignment_status(worker, row, message):
         query = select(WorkItem.id, WorkItem.title, Agent.name, WorkColumn.key).join(
             FeatureScope, FeatureScope.task_id==WorkItem.id).join(Agent,Agent.id==WorkItem.agent_id).join(
                 WorkColumn, WorkColumn.id==WorkItem.column_id).where(WorkItem.owner_id==owner,
-                    FeatureScope.project==project, Agent.owner_id==owner)
+                    steward_task_scope(owner, project, worker.cfg.get('steward_thread')), Agent.owner_id==owner)
         if "reference_event_key" in reference:
             key = reference["reference_event_key"]
             prior = await db.get(DirectTurnReceipt,(owner,key))
