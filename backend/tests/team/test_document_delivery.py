@@ -134,3 +134,57 @@ async def test_failed_document_dispatch_survives_another_employees_success_and_s
     last=(await turns_of(sessions,chat.id))[-1]
     assert root.outcome=="missing_delivery" and root.outcome_detail==last.result
     assert "还没登记" in last.result and analyst.name in last.result and INVENTED not in last.result
+
+@pytest.mark.parametrize("second,stop", [("same",True), ("missing",True), ("changed",False), ("legacy",True)])
+async def test_two_knowledge_deliveries_control_automatic_redispatch(team,sessions,second,stop):
+    rt,engine,lead,employee,_ = team
+    chat = await rt.create_thread(agent_id=lead.id)
+    turns = []
+    responses = []
+    workers = []
+
+    async def worker(ctx):
+        async def claimed():
+            async with sessions() as db:
+                return await db.scalar(select(AgentJob.id).where(AgentJob.assignee_turn_id==ctx.turn_id))
+        job_id = await wait_until(claimed)
+        workers.append(job_id)
+        async with sessions() as db:
+            from app.db.transactions import begin_write
+            await begin_write(db)
+            job = await db.get(AgentJob,job_id)
+            tool = "feishu_publish_knowledge"
+            pin = {"action":"update","employee":employee.id}
+            db.add(AgentJobEvent(job_id=job_id,kind="feishu_assignment",detail=pin))
+            stamp = {"tool":tool,"employee":employee.id,"epoch":job.assignment_epoch,"turn_id":ctx.turn_id}
+            result = {"url":URL,"messages_read":3,"artifact_sha256":"1"*64}
+            if len(workers)==2 and second=="changed":
+                result["artifact_sha256"]="2"*64
+            if second=="legacy":
+                result.pop("artifact_sha256")
+            failed = len(workers)==2 and second=="missing"
+            db.add(AgentJobEvent(job_id=job_id,kind="feishu_tool_failed" if failed else "feishu_delivered",
+                                 detail=stamp if failed else {**stamp,"result":result}))
+            await db.commit()
+        if failed:
+            await rt.team_jobs.settle(job_id,"failed","missing_delivery",detail="未核实")
+        return TurnOutcome("succeeded",result="employee report")
+
+    async def steward(ctx,sink,gate):
+        turns.append(ctx.turn_id)
+        if len(turns)<=3:
+            responses.append(await rt.team_jobs.delegate(rt._runs[ctx.turn_id],
+                {"agent_ids":[employee.id],"brief":"NESTED","rework":len(turns)==2}))
+        return TurnOutcome("succeeded",result="结束")
+    engine.nested,engine.handlers[chat.id]=worker,steward
+    await rt.send_turn(chat.id,"Update knowledge")
+    async def terminal():
+        root=await root_of(sessions,chat.id)
+        return root if root and root.status in ("failed","completed") else None
+    root = await wait_until(terminal)
+    if stop:
+        assert len(workers)==2 and responses[2]["code"]=="revision_stopped"
+        assert URL in (root.result or root.outcome_detail)
+        assert root.status == ("failed" if second=="missing" else "completed")
+    else:
+        assert len(workers)==3

@@ -224,6 +224,11 @@ class Jobs:
                     parent = await db.get(AgentJob, thread.job_id) if thread.job_id else None
                 else:
                     parent = await self._holder(db, run, caller, turn, thread)
+            if parent and parent.kind == "root" and turn.origin == "harness" and mode == "work":
+                from app.team.document_delivery import stopped_revision
+                stopped_reason = await stopped_revision(db, parent, target, args.get("task_id"))
+                if stopped_reason:
+                    raise service.TeamError("revision_stopped", stopped_reason)
             ancestor = parent
             ancestors = {run.agent_id}
             while ancestor is not None:
@@ -659,7 +664,7 @@ class Jobs:
                 receipts.append({'agent_id': target, 'job_id': job.id, **({'task_id':job.task_id} if job.task_id else {}), 'status': 'assigned' if job.status in LIVE else job.status})
             except service.TeamError as exc:
                 requested=required_tool({"action":args.get("feishu_delivery")})
-                if requested and getattr(run,"steward_owner_turn",False):
+                if requested and exc.code != "revision_stopped" and getattr(run,"steward_owner_turn",False):
                     run.delivery_errors[target,requested]="我还没登记这项飞书交付。"+str(exc)
                 receipts.append({'agent_id': target, 'error': str(exc), 'code': exc.code})
         if getattr(run,"steward_owner_turn",False) and (run.delivery_root or run.delivery_errors):

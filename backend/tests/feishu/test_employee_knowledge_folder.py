@@ -213,13 +213,16 @@ async def test_normal_employee_publish_requires_full_cloud_readback(employee,pro
     else:
         result=await submit("feishu_publish_knowledge",topics)
         assert result["confirmed"] and result["messages_read"]==2
-        assert result["verification"]=={"document_resolution":"created","title":"项目摘要",
+        digest=result["verification"]["artifact_sha256"]
+        assert len(bytes.fromhex(digest))==32
+        assert result["verification"]=={"artifact_sha256":digest,"document_resolution":"created","title":"项目摘要",
             "url":"https://example.feishu.cn/docx/new","folder_url":"https://example.feishu.cn/drive/folder/assigned",
             "body_verified":True,"parent_verified":True,"source_messages_verified":2,"same_title_entries":1}
         assert result["url"]==result["verification"]["url"]
         repeated=await submit("feishu_publish_knowledge",topics)
         assert repeated["verification"]["document_resolution"]=="existing"
         assert repeated["verification"]["source_messages_verified"]==2
+        assert repeated["verification"]["artifact_sha256"]==digest
     assert sum(r.method=="POST" and r.url.path.endswith("/docx/v1/documents") for r in calls)==1
 
 

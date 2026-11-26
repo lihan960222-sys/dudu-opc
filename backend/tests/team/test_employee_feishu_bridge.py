@@ -101,9 +101,10 @@ async def test_authorized_employee_call_reaches_handler_and_records_receipt(monk
     verified={"document_resolution":"created","parent_verified":True,"body_verified":True,
               "source_messages_verified":3,"same_title_entries":1}
     handler.return_value={"url":"https://example.com/docx/example","confirmed":True,
-                          "messages_read":3,"verification":{**verified,"folder_url":"employee-only location"}}
+                          "messages_read":3,"verification":{**verified,"artifact_sha256":"ab"*32,"folder_url":"employee-only location"}}
     await bridge.execute(rt,run,tool,{})
-    assert events[-1][1]["result"]=={"url":"https://example.com/docx/example","messages_read":3,"verification":verified}
+    assert events[-1][1]["result"]=={"url":"https://example.com/docx/example","messages_read":3,
+                                     "verification":verified,"artifact_sha256":"ab"*32}
     handler.side_effect=ValueError("授权变更")
     with pytest.raises(bridge.service.TeamError):
         await bridge.execute(rt,run,tool,{})

@@ -146,6 +146,44 @@ def verified_line(job, name, receipt):
     return f"{label}读完指定材料，读取回执已核对。"
 
 
+async def stopped_revision(db, root, employee_id, task_id=None):
+    """Decide from the last two journalled deliveries under this owner's request."""
+    query = select(AgentJob).where(
+        AgentJob.owner_id == root.owner_id, AgentJob.parent_id == root.id,
+        AgentJob.assignee_agent_id == employee_id, AgentJob.kind == "job",
+        AgentJob.mode == "work")
+    if task_id:
+        query = query.where(AgentJob.task_id == task_id)
+    jobs = list(await db.scalars(query.order_by(AgentJob.id.desc()).limit(2)))
+    if len(jobs) != 2:
+        return None
+    latest, prior = jobs
+    if (latest.task_id != prior.task_id or latest.assignment_epoch != prior.assignment_epoch
+            or prior.status != "completed" or latest.status not in ("completed", "failed")):
+        return None
+    records = []
+    for job in (prior, latest):
+        tool, pin = await requirement(db, job)
+        if tool != PUBLISH:
+            return None
+        records.append((pin, await evidence(db, job, tool, pin=pin)))
+    (old_pin, first), (new_pin, second) = records
+    if not first.result or any(old_pin.get(k) != new_pin.get(k) for k in ("contact", "target_url", "event_key")):
+        return None
+    url = first.result["url"]
+    if latest.outcome == "missing_delivery" and not second.result:
+        return f"上一轮已核实的文档：{url}。补充后的内容尚未核实，已停止自动返工。"
+    if not second.result or second.result.get("url") != url:
+        return None
+    digest = first.result.get("artifact_sha256")
+    next_digest = second.result.get("artifact_sha256")
+    if not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) for value in (digest, next_digest)):
+        return f"已取得文档回执，但两轮正文缺少可比较的指纹，变化未核实。已停止自动返工。现有文档：{url}"
+    if digest == next_digest:
+        return f"返工后已读回核对，文档内容没有变化，已停止自动返工。现有文档：{url}"
+    return None
+
+
 async def children_with_contracts(db, root):
     if root.kind!="root" or root.origin_kind!="person":
         return []
@@ -227,6 +265,7 @@ async def owner_report(db, root, draft, *, extra_errors=None):
         return Report("老板，经办团队已经变更，我还不能确认原派工的交付。",True)
     failed, needs_receipt_text, lines = bool(errors), False, list(dict.fromkeys(errors.values()))
     pending=False
+    reported_stops = set()
     for child,tool,pin in children:
         employee = await db.get(Agent,child.assignee_agent_id)
         if (not employee or employee.archived_at or
@@ -244,6 +283,15 @@ async def owner_report(db, root, draft, *, extra_errors=None):
             else:
                 lines.append(f"我已把任务交给{name}，还在等这次的交付回执。")
             continue
+        if tool == PUBLISH:
+            stopped = await stopped_revision(db, root, child.assignee_agent_id, child.task_id)
+            if stopped:
+                if stopped not in reported_stops:
+                    lines.append(stopped)
+                    reported_stops.add(stopped)
+                needs_receipt_text = True
+                failed |= child.outcome == "missing_delivery"
+                continue
         receipt=await evidence(db,child,tool,pin=pin) if tool else None
         if child.status!="completed":
             failed=True

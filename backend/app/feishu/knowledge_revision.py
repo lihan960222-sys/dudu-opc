@@ -1,6 +1,7 @@
 """Versioned topic summaries of an employee's authorized Feishu conversation."""
 import hashlib
 import json
+from difflib import SequenceMatcher
 from uuid import NAMESPACE_URL, uuid5
 
 from . import knowledge_citations
@@ -148,7 +149,69 @@ def matches(actual,expected):
 def remote_digest(blocks):
     return hashlib.sha256(json.dumps(blocks,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest()
 
-async def revise_document(db,client,auth,authorized,profile,key,doc,origin,title,chat,records,*,stage=None,instructions="",layout_key=None,employee_draft=None):
+async def patch_summary(db,client,auth,authorized,key,doc,version,previous,blocks):
+    """Apply one changed run at a time, recording both sides of each uncertain write."""
+    url=API+f"/docx/v1/documents/{doc}"
+    db.execute("""create table if not exists knowledge_patch_steps(
+        binding text primary key, version text, managed text, pending text, tail text)""")
+    while True:
+        step=db.execute("select version,managed,pending,tail from knowledge_patch_steps where binding=?",(key,)).fetchone()
+        if step and step[0]!=version:
+            raise ValueError("上一版局部更新尚待核对，请先恢复原稿。")
+        revision=checked(client.get(url,headers=auth(),timeout=20))["data"]["document"]["revision_id"]
+        current=root_blocks(client,auth,doc)
+        managed=json.loads(step[1]) if step else previous
+        if not step and managed and any(matches(current[i:],managed[:1]) for i in range(len(managed),len(current))):
+            raise ValueError("发现重复的综述标题，无法确认应更新哪一版。")
+        tail=step[3] if step else remote_digest(current[len(managed):])
+        def present(plan):
+            return matches(current,plan) and remote_digest(current[len(plan):])==tail
+        if step and present(json.loads(step[2])):
+            managed=json.loads(step[2])
+        elif not present(managed):
+            raise ValueError("现有综述已变化，无法安全定位本次修改的段落。")
+        def tokens(plan):
+            return [json.dumps(block_signature(block),ensure_ascii=False) for block in plan]
+        changes=SequenceMatcher(None,tokens(managed),tokens(blocks),autojunk=False).get_opcodes()
+        change=next((op for op in changes if op[0]!="equal"),None)
+        if not change:
+            with db:
+                db.execute("update knowledge_revisions set remaining=0,status='done' where binding=? and version=?",(key,version))
+                db.execute("delete from knowledge_patch_steps where binding=?",(key,))
+            return
+        _,start,end,new_start,new_end=change
+        if not await authorized():
+            raise ValueError("整理授权已变更。")
+        params={"document_revision_id":revision}
+        if end>start:
+            if any(not removable(block) for block in current[start:end]):
+                raise ValueError("待更新段落含人工格式或子内容，请先核对。")
+            after=managed[:start]+managed[end:]
+        else:
+            added=blocks[new_start:min(new_end,new_start+30)]
+            after=managed[:start]+added+managed[start:]
+            params["client_token"]=str(uuid5(NAMESPACE_URL,key+version+remote_digest(managed)+str(start)))
+        with db:
+            transition=(version,json.dumps(managed),json.dumps(after),tail)
+            if step:
+                claim=db.execute("""update knowledge_patch_steps set version=?,managed=?,pending=?,tail=?
+                    where binding=? and version=? and managed=? and pending=? and tail=?""",
+                    (*transition,key,*step))
+            else:
+                claim=db.execute("insert or ignore into knowledge_patch_steps values(?,?,?,?,?)",(key,*transition))
+            if not claim.rowcount:
+                raise ValueError("另一次更新正在核对此文档。")
+        if end>start:
+            checked(client.request("DELETE",url+f"/blocks/{doc}/children/batch_delete",
+                    headers=auth(),params=params,json={"start_index":start,"end_index":end},timeout=20))
+        else:
+            checked(client.post(url+f"/blocks/{doc}/children",headers=auth(),params=params,
+                                json={"index":start,"children":added},timeout=20))
+        observed=root_blocks(client,auth,doc)
+        if not matches(observed,after) or remote_digest(observed[len(after):])!=tail:
+            raise ValueError("飞书已接收局部更新，但读回尚未确认，已停止写入。")
+
+async def revise_document(db,client,auth,authorized,profile,key,doc,origin,title,chat,records,*,stage=None,instructions="",layout_key=None,employee_draft=None,existing_document=False):
     snapshot=[(mid,item.get("update_time"),item.get("create_time"),item.get("msg_type"),item.get("body"))
               for mid,item in sorted(records.items())]
     db.execute("create table if not exists knowledge_layouts(binding text primary key,instructions text not null)")
@@ -206,6 +269,19 @@ async def revise_document(db,client,auth,authorized,profile,key,doc,origin,title
         with db:
             db.execute("insert into knowledge_revisions values(?,?,?,?,'planned')",
                 (key,version,json.dumps(blocks,ensure_ascii=False),remaining))
+    prior=db.execute("select plan from knowledge_revisions where binding=? and version<>? and status='done' order by rowid desc limit 1",(key,version)).fetchone()
+    if prior and remaining==len(blocks):
+        await patch_summary(db,client,auth,authorized,key,doc,version,json.loads(prior[0]),blocks)
+        with db:
+            db.execute("insert or replace into knowledge_layouts values(?,?)",(layout_key or key,instructions))
+        return f"已核对知识库，本次仅同步有变化的段落。\n《{title}》{link}",len(records)
+    if existing_document and not prior and remaining==len(blocks):
+        current=root_blocks(client,auth,doc)
+        for block in current:
+            signature=block_signature(block)
+            if not (removable(block) and signature and signature[0]=="text" and
+                    all(not text and not link for text,link in signature[1])):
+                raise ValueError("现有文档有正文，但没有已核验的综述版本可供比对，已停止写入。")
     while remaining:
         start=max(0,remaining-30)
         if not await authorized():

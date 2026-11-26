@@ -275,6 +275,8 @@ async def execute(rt, run, name, args):
         if name=="feishu_publish_knowledge" and result.get("verification"):
             receipt["verification"]={key:result["verification"][key] for key in (
                 "document_resolution","parent_verified","body_verified","source_messages_verified","same_title_entries")}
+            if result["verification"].get("artifact_sha256"):
+                receipt["artifact_sha256"] = result["verification"]["artifact_sha256"]
     if receipt is not None:
         await record_delivery(rt,job_id,run,name,logical_tool,action,operation,receipt)
     return result

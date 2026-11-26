@@ -8,6 +8,21 @@ from app.feishu import knowledge_revision as revision
 
 
 @pytest.mark.asyncio
+async def test_existing_untracked_document_is_read_before_any_write():
+    db=sqlite3.connect(":memory:")
+    async def permitted():
+        return True
+    def respond(req):
+        assert req.method=="GET"
+        return httpx.Response(200,json={"code":0,"data":{"items":[revision.text_block("text","旧文档内容")]}})
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ValueError,match="没有已核验"):
+            await revision.revise_document(db,client,lambda:{},permitted,(),"key","doc",
+                "https://demo.feishu.cn","知识库","chat",{},existing_document=True,
+                employee_draft=[revision.text_block("text","新内容")])
+
+
+@pytest.mark.asyncio
 async def test_employee_reconciles_lost_write_receipt_before_retry():
     db=sqlite3.connect(":memory:")
     remote=[]
@@ -49,6 +64,8 @@ async def test_versioned_summary_tracks_edits_and_remote_confirmation(monkeypatc
     monkeypatch.setattr(revision,"model_result",model)
     def respond(req):
         if req.method=="GET":
+            if not req.url.path.endswith("/children"):
+                return httpx.Response(200,json={"code":0,"data":{"document":{"revision_id":17}}})
             return httpx.Response(200,json={"code":0,"data":{"items":[] if failure=="readback_empty" else calls[-1]}})
         body=json.loads(req.content)
         assert body["index"]==0 and req.url.path.endswith("/existing/blocks/existing/children")
@@ -83,7 +100,7 @@ async def test_versioned_summary_tracks_edits_and_remote_confirmation(monkeypatc
         assert len(calls)==1
         records["m1"]["body"]={"content":"编辑后的内容"}
         await run()
-        assert len(calls)==2 and "编辑后的内容" in inputs[-1]
+        assert len(calls)==1 and "编辑后的内容" in inputs[-1]
         from app.feishu.weekly_knowledge import source_ids
         assert all(source_ids(blocks,"chat",records=records)=={"m1"} for blocks in calls)
 
@@ -94,6 +111,8 @@ async def test_restructure_same_history_replaces_managed_summary_and_verifies(mo
     human=revision.text_block("text","老板的笔记")
     remote=[human]
     prompts=[]
+    mutations=[]
+    drop_reply=True
     async def permitted():
         return True
     async def model(profile,entries,authorize,instruction,schema):
@@ -101,12 +120,20 @@ async def test_restructure_same_history_replaces_managed_summary_and_verifies(mo
         return {"topics":[{"title":"项目","summary":str(len(prompts)),"sources":[1]}]}
     monkeypatch.setattr(revision,"model_result",model)
     def respond(req):
+        nonlocal drop_reply
         if req.method=="POST":
-            blocks=json.loads(req.content)["children"]
-            remote[:0]=blocks
+            payload=json.loads(req.content)
+            blocks=payload["children"]
+            index=payload["index"]
+            mutations.append(("insert",index,len(blocks)))
+            remote[index:index]=blocks
+            if index and drop_reply:
+                drop_reply=False
+                raise httpx.ReadTimeout("lost acknowledgement for the changed paragraph")
             data={"children":[{"block_id":str(i)} for i in range(len(blocks))]}
         elif req.method=="DELETE":
             body=json.loads(req.content)
+            mutations.append(("delete",body["start_index"],body["end_index"]-body["start_index"]))
             assert req.url.params["document_revision_id"]=="17"
             del remote[body["start_index"]:body["end_index"]]
             data={}
@@ -120,7 +147,10 @@ async def test_restructure_same_history_replaces_managed_summary_and_verifies(mo
             return await revision.revise_document(db,client,lambda:{},permitted,(),"key","doc",
                 "https://demo.feishu.cn","知识库","chat",records,instructions=instructions)
         await run()
+        with pytest.raises(httpx.ReadTimeout):
+            await run("把分类收一收")
         await run("把分类收一收")
+        assert mutations==[("insert",0,4),("delete",3,1),("insert",3,1)]
         assert len(prompts)==2 and "把分类收一收" in prompts[-1]
         assert len(remote)==5 and remote[-1]==human
         await run()

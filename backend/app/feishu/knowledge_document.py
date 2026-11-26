@@ -249,7 +249,11 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
             verification.update(resolution, title=title, url=dest["tenant_origin"]+"/docx/"+doc,
                 folder_url=dest["tenant_origin"]+"/drive/folder/"+dest["folder_token"],
                 parent_verified=True, body_verified=True, source_messages_verified=len(sources),
-                same_title_entries=folder["same_title_entries_seen"])
+                same_title_entries=folder["same_title_entries_seen"],
+                artifact_sha256=knowledge_revision.remote_digest([
+                    {k:v for k,v in block.items() if k not in ("block_id","parent_id")}
+                    for block in actual
+                ]))
     if not records:
         if weekly:
             verify_draft(weekly["document"],prior,{"document_resolution":"existing"})
@@ -294,7 +298,8 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
             return await history.reviewer(worker.cfg,source,staff)==profile
         opts={"employee_draft":draft_blocks} if draft_blocks is not None else {}
         result=await revise_document(db,client,lambda:auth(documents.SCOPES),authorized,profile,key,created,
-            dest["tenant_origin"],title,source["chat_id"],records,stage=stage,instructions=instructions,layout_key=layout_key,**opts)
+            dest["tenant_origin"],title,source["chat_id"],records,stage=stage,instructions=instructions,layout_key=layout_key,
+            existing_document=resolution.get("document_resolution")=="existing",**opts)
         if draft_blocks is not None:
             verify_draft(created,draft_blocks,resolution)
         stage("revision_confirmed",result[1])
