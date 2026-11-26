@@ -1,42 +1,26 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$DataDir = (Join-Path $env:LOCALAPPDATA "SuparagentSteward"),
+    [string]$DataDir = (Join-Path $env:LOCALAPPDATA 'SuparagentSteward'),
     [ValidateRange(1,65535)][int]$Port = 8000,
     [switch]$IncludeFeishu,
     [switch]$AtBoot
 )
-$ErrorActionPreference = "Stop"
-$launcher = Join-Path $PSScriptRoot "start-steward.ps1"
-$DataDir = [IO.Path]::GetFullPath($DataDir)
-$user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-$components = @("Web")
-if ($IncludeFeishu) { $components += "Feishu" }
-foreach ($component in $components) {
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'steward-lifecycle.ps1')
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$scope = New-StewardScope (Join-Path $PSScriptRoot 'start-steward.ps1') $DataDir $Port $identity.User.Value
+if ($AtBoot) { Write-Warning 'Dudu now starts from its desktop shortcut. The legacy AtBoot flag is ignored.' }
+foreach ($component in @('Web','Feishu')) {
     $name = "Suparagent Steward - $component"
-    if (-not $PSCmdlet.ShouldProcess($name, "Register task for $user")) { continue }
-    $legacyArguments = '-NoProfile -NonInteractive -WindowStyle Hidden -File "{0}" -DataDir "{1}" -Port {2} -Component {3}' -f $launcher,$DataDir,$Port,$component
-    $arguments = $legacyArguments.Replace('-WindowStyle Hidden -File', '-WindowStyle Hidden -ExecutionPolicy RemoteSigned -File')
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
-    $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-    if ($existing) {
-        $present = @($existing.Actions)
-        if ($AtBoot -or $present.Count -ne 1 -or $present[0].Execute -ne 'powershell.exe' -or
-            $existing.Principal.LogonType -ne 'Interactive' -or $present[0].Arguments -notin @($arguments, $legacyArguments)) {
-            throw "A different task named '$name' already exists. Inspect its action and trigger."
-        }
-        if ($present[0].Arguments -eq $legacyArguments) {
-            Set-ScheduledTask -TaskName $name -Action $action | Out-Null
-        }
-        continue
+    $existing = Get-ScheduledTask -TaskPath '\' -TaskName $name -ErrorAction SilentlyContinue
+    if (-not $existing -and $component -eq 'Feishu' -and -not $IncludeFeishu) { continue }
+    if ($existing -and -not (Test-StewardTaskIdentity $existing $scope $component)) {
+        throw "The existing '$name' belongs to a different account or installation."
     }
-    $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 15 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
-    if ($AtBoot) {
-        if (-not $credential) { $credential = Get-Credential -UserName $user -Message "Windows account for running before logon" }
-        if (-not $credential -or $credential.UserName -ne $user) { throw "Use the Windows account that created the profile." }
-        $trigger = New-ScheduledTaskTrigger -AtStartup
-        Register-ScheduledTask -TaskName $name -Action $action -Settings $settings -Trigger $trigger -User $user -Password $credential.GetNetworkCredential().Password | Out-Null
-    } else {
-        $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
-        Register-ScheduledTask -TaskName $name -Action $action -Settings $settings -Trigger $trigger -User $user | Out-Null
-    }
+    if (-not $PSCmdlet.ShouldProcess($name, 'Install an on-demand worker without automatic startup')) { continue }
+    $action = New-ScheduledTaskAction -Execute $scope.Shell -Argument (Get-StewardTaskArguments $scope $component)
+    $principal = New-ScheduledTaskPrincipal -UserId $identity.User.Value -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+    $definition = New-ScheduledTask -Action $action -Principal $principal -Settings $settings
+    $null = Register-ScheduledTask -TaskPath '\' -TaskName $name -InputObject $definition -Force
 }

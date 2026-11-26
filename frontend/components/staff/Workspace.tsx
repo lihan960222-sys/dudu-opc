@@ -2,14 +2,16 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
-import { Activity, FolderKanban, Layers3, ListTodo, MessageSquare, Monitor, MoreHorizontal, Settings2, UsersRound } from "lucide-react";
+import { useState, useSyncExternalStore } from "react";
+import { Activity, FolderKanban, Layers3, ListTodo, LogOut, MessageSquare, Monitor, MoreHorizontal, Settings2, UsersRound } from "lucide-react";
 import { canOpenWorkbench } from "@/lib/session";
+import { auth } from "@/lib/auth";
 import { useT } from "@/lib/use-i18n";
 import { workspaceHref, workspaceSection } from "@/lib/workspace-navigation";
+import { managedWindowId, requestManagedWindowExit } from "@/lib/managed-window";
 import { useSession } from "../AuthGate";
 import { ChatApp } from "../chat/ChatApp";
-import { Menu, MenuItem } from "../ui/Menu";
+import { Menu, MenuItem, MenuSeparator } from "../ui/Menu";
 import { Workbench } from "./Workbench";
 import "./workspace.css";
 
@@ -19,12 +21,16 @@ const primary = [
   { id: "projects", icon: FolderKanban },
 ] as const;
 
+const subscribeToWindow = () => () => {};
+
 export function Workspace() {
   const { session } = useSession();
   return canOpenWorkbench(session) ? <OwnerWorkspace /> : <ChatApp />;
 }
 
 function OwnerWorkspace() {
+  const { session } = useSession();
+  const windowId = useSyncExternalStore(subscribeToWindow, () => managedWindowId(window, session), () => null);
   const search = useSearchParams().toString();
   const router = useRouter();
   const t = useT();
@@ -48,6 +54,10 @@ function OwnerWorkspace() {
           <MenuItem icon={<Monitor size={16} />} onSelect={() => router.push(workspaceHref(search, "host", employee), { scroll: false })}>{t("workspace.host")}</MenuItem>
           <MenuItem icon={<ListTodo size={16} />} onSelect={() => router.push(chat + (chat.includes("?") ? "&" : "?") + "view=planner", { scroll: false })}>{t("workspace.planner")}</MenuItem>
           <MenuItem icon={<Settings2 size={16} />} onSelect={() => router.push("/settings/")}>{t("sidebar.settings")}</MenuItem>
+          {windowId && <>
+            <MenuSeparator />
+            <MenuItem icon={<LogOut size={16} />} onSelect={() => void requestManagedWindowExit(window, session, auth.session)}>{t("workspace.exitDudu")}</MenuItem>
+          </>}
         </Menu>
       </nav>
       <div className="opc-workspace-content">

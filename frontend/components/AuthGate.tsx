@@ -6,6 +6,7 @@ import { ApiError, isSignedOutError, request, setSignedOutHandler } from "@/lib/
 import { auth } from "@/lib/auth";
 import { SIGN_IN_URL } from "@/lib/paths";
 import { migrateLegacyIdentity, type SessionInfo } from "@/lib/session";
+import { captureManagedWindow } from "@/lib/managed-window";
 import { DesktopAccountLogin, type DesktopAccountStatus } from "./DesktopAccountLogin";
 import { onboarding } from "@/lib/onboarding";
 import { isSetupPage } from "@/lib/settings-nav";
@@ -43,6 +44,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
+    captureManagedWindow(window);
     setSignedOutHandler(() => {
       const next = `${window.location.pathname}${window.location.search}`;
       if (SIGN_IN_URL) window.location.replace(`${SIGN_IN_URL}?next=${encodeURIComponent(next)}`);

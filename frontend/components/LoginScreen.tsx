@@ -5,6 +5,7 @@ import { Eye, EyeOff } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { ApiError } from "@/lib/api";
 import { auth } from "@/lib/auth";
+import { captureManagedWindow } from "@/lib/managed-window";
 import { BASE_PATH } from "@/lib/paths";
 import { safeNextPath, type AuthStatus } from "@/lib/session";
 import { Banner } from "./ui/Banner";
@@ -57,6 +58,7 @@ export function LoginScreen() {
 
   useEffect(() => {
     let cancelled = false;
+    captureManagedWindow(window);
     auth.status().then((value) => {
       if (cancelled) return;
       // Already signed in, or the desktop app (which never signs in): go on.

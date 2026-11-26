@@ -1,5 +1,6 @@
 export const workspaceMessages = {
   en: {
+    "workspace.exitDudu": "Exit Dudu",
     "workspace.lead": "Team lead",
     "workspace.waitingOnYou": "Please respond to the question above.",
     "workspace.replying": "Reply in progress…",
@@ -48,6 +49,7 @@ export const workspaceMessages = {
     "workspace.policy.task": "This task uses the model assigned when it was delegated.",
   },
   zh: {
+    "workspace.exitDudu": "退出嘟嘟",
     "workspace.lead": "大管家",
     "workspace.waitingOnYou": "请先回答上面的问题。",
     "workspace.replying": "正在回复…",
