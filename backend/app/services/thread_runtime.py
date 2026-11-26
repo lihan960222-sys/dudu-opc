@@ -401,16 +401,11 @@ class ThreadApprovalGate:
         if not first_recovery_request:
             auto = "denied","recovery_already_attempted"
         if tool=="mcp__team__delegate" and run.steward_owner_turn and not run.recovery_call and isinstance(input,dict):
-            from app.team.feishu_assignment import choice_missing, required_tool
-            if choice_missing(run,input):
-                auto="denied","select_feishu_delivery_or_none"
-                for target in input["agent_ids"]:
-                    if target in run.delivery_choices:
-                        run.delivery_errors[target,"choice"]="我还没登记派工，需要先确定这次要交付什么。"
-            elif requested:=required_tool({"action":input.get("feishu_delivery")}):
+            from app.team.feishu_assignment import required_tool
+            if requested:=required_tool({"action":input.get("feishu_delivery")}):
                 for target in input.get("agent_ids",[]):
                     if type(target) is int:
-                        run.delivery_errors[target,requested]="我还没登记这项飞书交付，尚无员工回执。"
+                        run.delivery_errors[target,requested]="这次飞书交付尚未取得员工回执。"
         if auto is None or auto[0] != "denied":
             from app.services import routine_uninterrupted
             routine_auto = await routine_uninterrupted.automatic(runtime, run, tool, input)
@@ -891,7 +886,10 @@ class ThreadRuntime:
             if strict_lead and lead_id != thread.agent_id:
                 raise ProviderUnavailable("Start specialist work from its scoped steward task.")
         delivery_choices,expected_delivery=(),None
-        if strict_lead and steward_chat and not internal and person_is_owner and team_origin=="person":
+        # Only an owner message that arrived through Feishu must name the Feishu
+        # deliverable up front; a workbench chat can still supply it explicitly.
+        if (strict_lead and steward_chat and not internal and person_is_owner and team_origin=="person"
+                and direct_event_key is not None):
             from app.team.feishu_assignment import owner_choices
             try:
                 delivery_choices,expected_delivery=owner_choices(self.owner_id,thread.agent_id,direct_event_key)

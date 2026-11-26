@@ -91,14 +91,39 @@ def required_tool(assignment):
                 assignment.get("action"), assignment.get("expected_tool"))
 
 
+def document_employees(cfg):
+    """Employees the owner has authorized for Feishu documents.
+
+    A contact mapped to the employee in the saved access policy is the existing
+    proof that the employee may read the owner's Feishu sources and publish the
+    knowledge document. A role may also opt in explicitly for document-only
+    work, without a contact, with feishu_documents set to true.
+    """
+    found=set()
+    try:
+        sources=workspace_access.settings_for(cfg).get("history_sources") or {}
+    except (OSError,ValueError,KeyError,sqlite3.Error):
+        sources={}
+    for source in sources.values():
+        if (isinstance(source,dict) and type(source.get("agent_id")) is int
+                and source.get("oauth_app")):
+            found.add(source["agent_id"])
+    for role in cfg.get("roles",{}).values():
+        if role.get("feishu_documents") is True and type(role.get("agent_id")) is int:
+            found.add(role["agent_id"])
+    return found
+
+
 def owner_choices(owner, lead, event_key=None):
     """New owner orders select a delivery. Existing authenticated gateway orders already carry it."""
     cfg=configuration()
     if not cfg or cfg["owner_id"]!=owner or cfg["steward"]["agent_id"]!=lead:
         return (),None
     expected=gateway_pin(cfg,event_key) if event_key else None
+    documents=document_employees(cfg)
     choices=tuple(role["agent_id"] for role in cfg.get("roles",{}).values()
                   if role.get("app_id") and type(role.get("agent_id")) is int
+                  and role["agent_id"] in documents
                   and (not expected or role["agent_id"]!=expected["employee"]))
     return choices,expected
 

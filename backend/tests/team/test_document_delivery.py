@@ -94,38 +94,6 @@ async def test_normal_delegation_returns_only_the_current_document_delivery(team
         assert "交付" in report
 
 
-@pytest.mark.parametrize("choice", ["none", "create_document", "local_files", None])
-async def test_new_owner_dispatch_selects_delivery_before_asking_for_approval(team, monkeypatch, choice):
-    from app.core.config import settings
-    from app.team import feishu_assignment
-    from app.db.models import Approval
-    rt,engine,lead,employee,_ = team
-    monkeypatch.setattr(settings,"STEWARD_STRICT_OWNER",rt.owner_id)
-    cfg={"owner_id":rt.owner_id, "steward":{"agent_id":lead.id,"app_id":"lead"},
-         "roles":{"staff":{"agent_id":employee.id,"app_id":"employee"}}}
-    monkeypatch.setattr(feishu_assignment,"configuration",lambda:cfg)
-    monkeypatch.setattr(feishu_assignment.workspace_access,"settings_for",lambda _:{"history_sources":{}})
-    chat=await rt.create_thread(agent_id=lead.id)
-    observed = []
-
-    async def steward(ctx, sink, gate):
-        args={"agent_ids":[employee.id],"brief":"Collect the material"}
-        if choice=="local_files":
-            args["completion_check"]={"kind":"files","files":[{"scope":"task","path":"report.md"}]}
-        elif choice:
-            args["feishu_delivery"]=choice
-        handle=await gate.open(request_id="one-call",tool="mcp__team__delegate",input=args,summary="delegate",kind="tool")
-        async with rt.session() as db:
-            approval=await db.get(Approval,handle.approval_id)
-            observed.append(approval.status)
-        return TurnOutcome("succeeded",result="model says success")
-
-    engine.handlers[chat.id]=steward
-    await rt.send_turn(chat.id,"Use the configured employee.")
-    await wait_until(lambda:observed)
-    assert (observed[0]=="denied") == (choice is None)
-
-
 async def test_owner_does_not_receive_invented_success_after_unroutable_explicit_request(team, sessions):
     rt,engine,lead,employee,_ = team
     chat=await rt.create_thread(agent_id=lead.id)

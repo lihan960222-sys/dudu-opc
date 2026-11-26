@@ -649,7 +649,7 @@ class Jobs:
         if not isinstance(targets, list) or not 1 <= len(targets) <= 4 or any(type(t) is not int for t in targets) or len(set(targets)) != len(targets):
             return {'error': 'Supply one to four distinct teammate ids in agent_ids.', 'code': 'invalid_input'}
         if choice_missing(run,args):
-            return {"error":"请选择本次交付方式。聊天或本地工作填 none。需要使用飞书时，请按老板原意选择读取、创建或更新。","code":"delivery_choice"}
+            return {"error":"这次派工还没有选择飞书交付方式。请重新调用 delegate，并在 feishu_delivery 中选择：none（聊天或本地文件）、read（只读聊天记录）、update（增量整理知识库）、restructure（重整现有文档）、read_document 或 edit_document（老板指定的文档）、create_document（新建云文档）。请按老板原话选择，不要就这个问题再问老板。","code":"delivery_choice","allowed":["none","read","update","restructure","read_document","edit_document","create_document"]}
         shared = {k: v for k, v in args.items() if k != 'agent_ids'}
         receipts,accepted = [],[]
         for target in targets:

@@ -61,3 +61,14 @@ async def test_cloud_document_work_does_not_require_or_inherit_an_unrelated_cont
         assert scope["employee"]==4 and scope["contact"] is None
     assert (await feishu_assignment.resolve(Session(),"owner",1,10,20,4,delivery="create_document",original="把我和联系人的沟通整理成文档"))["contact"]=="联系人"
     assert await feishu_assignment.resolve(Session(),"owner",1,10,20,5,delivery="create_document",original="写文档") is None
+
+def test_owner_choices_only_lists_employees_authorized_for_documents(monkeypatch):
+    cfg = {"owner_id": "owner", "steward": {"agent_id": 1, "app_id": "lead"},
+           "roles": {"二狗": {"agent_id": 4, "app_id": "employee"},
+                     "Jensen": {"agent_id": 2, "app_id": "other"}}}
+    monkeypatch.setattr(feishu_assignment, "configuration", lambda: cfg)
+    monkeypatch.setattr(feishu_assignment.workspace_access, "settings_for", lambda _: {
+        "history_sources": {"李晗": {"agent_id": 4, "oauth_app": "employee"}}})
+    assert feishu_assignment.owner_choices("owner", 1) == ((4,), None)
+    cfg["roles"]["writer"] = {"agent_id": 5, "app_id": "writer", "feishu_documents": True}
+    assert feishu_assignment.owner_choices("owner", 1) == ((4, 5), None)
