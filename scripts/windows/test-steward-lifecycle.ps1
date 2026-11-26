@@ -165,4 +165,5 @@ if ($ExerciseSyntheticJob) {
             finally { $fixture.Shell.Dispose(); $fixture.Group.Dispose(); $fixture.Signal.Dispose() }
         }
     }
+    & (Join-Path $PSScriptRoot 'test-steward-legacy-stop.ps1')
 }

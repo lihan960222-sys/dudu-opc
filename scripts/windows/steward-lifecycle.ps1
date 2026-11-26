@@ -87,18 +87,39 @@ function Get-StewardTreeRows($Rows, $Root) {
     return $accepted.Values
 }
 
-function Get-StewardPinnedProcess($Row, $Scope) {
-    $pinned = [Diagnostics.Process]::GetProcessById($Row.ProcessId)
-    try {
-        $null = $pinned.Handle
-        $actual = $pinned.StartTime.ToUniversalTime().Ticks
-        # CIM timestamps have microsecond precision, FILETIME has 100ns precision.
-        if ([Math]::Abs($actual - $Row.CreationDate.ToUniversalTime().Ticks) -ge 10 -or
-            (Invoke-CimMethod -InputObject $Row -MethodName GetOwnerSid).Sid -ne $Scope.Sid) {
-            throw 'A service process changed identity during verification.'
+function Get-StewardPinnedProcess($Row, $Scope, [switch]$CanStop) {
+    [Dudu.PinnedWorker]::Open([int]$Row.ProcessId,$Row.CreationDate.ToFileTimeUtc(),$Scope.Sid,$CanStop.IsPresent)
+}
+
+function Add-StewardPinnedDescendants($Rows, $Root, $Scope, $Pinned) {
+    do {
+        $added = $false
+        foreach ($row in $Rows) {
+            $id = [int]$row.ProcessId
+            if ($Pinned.ContainsKey($id) -or $row.SessionId -ne $Root.SessionId) { continue }
+            $parent = $Pinned[[int]$row.ParentProcessId]
+            # A retained handle supplies both ends of the real parent's lifespan,
+            # even if that parent is absent from the latest process snapshot.
+            if (-not $parent -or -not $parent.CouldHaveSpawned($row.CreationDate.ToFileTimeUtc())) { continue }
+            $pin = Get-StewardPinnedProcess $row $Scope -CanStop
+            if ($pin) { $Pinned[$id] = $pin; $added = $true }
         }
-        return $pinned
-    } catch { $pinned.Dispose(); throw }
+    } while ($added)
+}
+
+function Stop-StewardPinnedTree($Root, $Scope, $Pinned, [scriptblock]$Snapshot = {
+    Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate,SessionId
+}) {
+    for ($pass=0; $pass -lt 8; $pass++) {
+        $latest = @(& $Snapshot)
+        Add-StewardPinnedDescendants $latest $Root $Scope $Pinned
+        # Open and check every observed handle before the first termination. Stop
+        # older parents first, then catch any children that appeared during this pass.
+        $live = @($Pinned.Values | Where-Object { -not $_.Exited } | Sort-Object Birth)
+        if (-not $live.Count) { return }
+        foreach ($pin in $live) { $pin.Stop() }
+    }
+    throw 'The verified process tree is still changing; check the remaining service processes.'
 }
 
 function Test-StewardPythonChild($Child,$Root,[string]$Python,[string[]]$Expected) {
@@ -123,43 +144,27 @@ function Stop-StewardLegacyGroup($Scope, [string]$Component, [string]$Lease, [sw
         if ($direct.Count -ne 1) { continue }
         $child = $direct[0]
         # The old PowerShell launcher may also own a console host or other Windows helper.
-        # Its genuine service process is the only root admitted to the termination job.
+        # Only the genuine Python service and its descendants may be stopped.
         $tree = @(Get-StewardTreeRows $rows $child)
         $pinned = @{}
         $launcher = $null
-        $group = $null
         try {
             $launcher = Get-StewardPinnedProcess $root $Scope
+            if (-not $launcher) { continue }
+            $service = Get-StewardPinnedProcess $child $Scope -CanStop
+            if (-not $service) { continue }
+            $pinned[$service.Id] = $service
+            if (-not $launcher.CouldHaveSpawned($service.Birth)) { continue }
+            Add-StewardPinnedDescendants $tree $child $Scope $pinned
             $leaseConfirmed = $false
-            foreach ($row in $tree) {
-                $id = [int]$row.ProcessId
-                $proc = Get-StewardPinnedProcess $row $Scope
-                $pinned[$id] = $proc
-                if ($owners.ContainsKey($id) -and $owners[$id] -eq $proc.StartTime.ToFileTimeUtc()) { $leaseConfirmed = $true }
+            foreach ($pin in $pinned.Values) {
+                if ($owners.ContainsKey($pin.Id) -and $owners[$pin.Id] -eq $pin.Birth) { $leaseConfirmed=$true; break }
             }
             if (-not $leaseConfirmed) { continue }
             if ($InspectOnly) { return $true }
-            # Attach the service before the final snapshot so newly spawned workers inherit this job.
-            # Without kill-on-close, a failed verification leaves every process running.
-            $group = [Dudu.WorkerGroup]::new($false)
-            $group.Attach($pinned[[int]$child.ProcessId])
-            foreach ($proc in $pinned.Values) { $group.Attach($proc) }
-            for ($pass = 0; $pass -lt 4; $pass++) {
-                $latest = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate,SessionId)
-                $unbound = @(Get-StewardTreeRows $latest $child | Where-Object { -not $group.Contains([int]$_.ProcessId) })
-                if ($unbound.Count -eq 0) {
-                    $group.Stop()
-                    return
-                }
-                foreach ($row in $unbound) {
-                    $proc = Get-StewardPinnedProcess $row $Scope
-                    $pinned[[int]$row.ProcessId] = $proc
-                    $group.Attach($proc)
-                }
-            }
-            throw 'The process tree kept changing during verification.'
+            Stop-StewardPinnedTree $child $Scope $pinned
+            return
         } finally {
-            if ($group) { $group.Dispose() }
             foreach ($proc in $pinned.Values) { $proc.Dispose() }
             if ($launcher) { $launcher.Dispose() }
         }
