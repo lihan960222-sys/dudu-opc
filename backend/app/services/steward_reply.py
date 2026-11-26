@@ -3,6 +3,24 @@ import re
 
 LIMIT = 1000
 SUFFIX = "详见完整回复。"
+VERBATIM = re.compile(
+    r"^运行记录：[ \t]*\r?\n[\s\S]*"
+    r"|^(?:(?:报错|错误)(?:原文|信息)?|原话|工具回执|命令输出)[：:][ \t]*\r?\n[^\r\n]+(?:\r?\n(?![ \t]*\r?$)[^\r\n]+)*"
+    r"|^ {0,3}(?P<fence>`{3,}|~{3,})[^\r\n]*(?:\r?\n|\Z)[\s\S]*?(?:^ {0,3}(?P=fence)[`~]*[ \t]*\r?$|\Z)"
+    r"|^ {0,3}>[^\r\n]*(?:\r?\n(?![ \t]*\r?$| {0,3}(?:>|`{3,}|~{3,}))[^\r\n]+)*"
+    r"|^(?: {4}|\t)[^\r\n]*|(?P<ticks>`+)(?!`)[\s\S]*?(?P=ticks)(?!`)"
+    r"""|“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|《[^》]*》|"(?:\\.|[^"\\])*"|(?<![A-Za-z0-9_])'(?:\\.|[^'\\\r\n])*'"""
+    r"|\[(?:\\.|[^\]\\\r\n])*\]\((?:\\.|[^)\\\r\n])*\)",
+    re.MULTILINE,
+)
+DIRECT_REQUEST = re.compile(
+    r"(?<![^\r\n。！？!?，,])(?P<lead>[ \t]*(?:老板[，,][ \t]*)?)"
+    r"(?:(?P<urgent>你(?:必须|得|应该|赶快|赶紧|快点))(?=(?:先)?(?:确认|选择|授权|决定|提供|指定|填写|回复|打开|点击))"
+    r"|(?P<you>你)(?=希望|想|愿意|方便|可以|能否|是否)"
+    r"|(?:(?:请|麻烦)?[你您](?:这边|自己)?|麻烦)?(?:先|直接)?(?:给我?(?:一?个)|给我)"
+    r"(?P<field>(?:任务|工单|项目|派工)?(?:编号|号)|单号|文件名|文档名|标题|日期)(?:就(?:行|可以)了?)?(?P<stop>[，,。.!！?？]|(?=\r?$)))",
+    re.MULTILINE,
+)
 INSTRUCTIONS = (
     "向老板说话时称「老板」或「您」。老板有交代，就照您说的办。老板指出问题，先听取、核对，再回答。"
     "语气谦恭，不顶嘴，不催促，不把能自己查清的事推给老板。确实办错了就直接承担，例如「老板，是我没核对清楚」。"
@@ -28,15 +46,30 @@ def turn_status(status, detail=""):
     return message + "\n\n运行记录：\n" + detail if detail else message
 
 
-def polish(text):
-    # Replace only a direct request at the start of a plain prose paragraph.
-    # Avoid editing quoted material, code samples and multiline Markdown blocks.
-    if (any(mark in text for mark in ('`', '~~~', '“', '「', '"', '\n\n运行记录：\n'))
-            or re.search(r"(?m)^(?:>| {4}|\t)", text)):
+def _polish(text, *, compact=False):
+    if "你" not in text and "给" not in text:
         return text
-    text = re.sub(r"(?m)^(老板[，,][ \t]*)?你(?:必须|得|应该|赶快|赶紧|快点)(?=(?:先)?(?:确认|选择|授权|决定|提供|指定|填写|回复|打开|点击))",
-                  r"\g<1>请您", text)
-    return re.sub(r"(?m)^(老板[，,][ \t]*)?你(?=希望|想|愿意|方便|可以|能否|是否)", r"\g<1>您", text)
+    spans = VERBATIM.finditer(text)
+    span = next(spans, None)
+
+    def replace(match):
+        nonlocal span
+        while span and span.end() <= match.start():
+            span = next(spans, None)
+        if span and span.start() < match.end():
+            return match[0]
+        if match["field"]:
+            if compact:
+                return match["lead"] + "请问" + match["field"] + ("？" if match["stop"] else "")
+            return match["lead"] + "您方便告诉我" + match["field"] + "吗？"
+        return match["lead"] + ("请您" if match["urgent"] else "您")
+
+    return DIRECT_REQUEST.sub(replace, text)
+
+
+def polish(text):
+    edited = _polish(text)
+    return _polish(text, compact=True) if len(text) <= LIMIT < len(edited) else edited
 
 
 def preview(text, *, attached=False):

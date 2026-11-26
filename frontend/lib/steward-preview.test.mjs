@@ -70,3 +70,26 @@ test("the preview ends with a conclusion, never a dangling list number", () => {
     assert.equal(stewardPreview(text), "尚未写入。我会继续跟进。\n详见完整回复。");
   }
 });
+
+test("a question addressed to the owner changes alongside inline and multiline verbatim evidence", () => {
+  const evidence = '这一步返回“不能派工。你赶紧确认权限。”，字段是 `task_id`。';
+  const blocks = '\n\n> 你给个编号。\n\n~~~~text\n给个编号。\n\n你赶紧确认权限。\n~~~~\n\n';
+  const original = evidence + '给个任务编号，我再核对。' + blocks + '老板，你赶紧确认权限。';
+  assert.deepEqual(presentStewardReply(original), {
+    text: evidence + '您方便告诉我任务编号吗？我再核对。' + blocks + '老板，请您确认权限。', markdown: null,
+  });
+  const diagnostics = '\n\n运行记录：\n给个编号。\n你必须确认范围。';
+  assert.equal(stewardPreview('给个编号。' + diagnostics), '您方便告诉我编号吗？' + diagnostics);
+  const rawError = '报错原文：\n你赶紧确认权限。\n给个编号。';
+  assert.equal(stewardPreview(rawError + '\n\n你直接给个文件名。'), rawError + '\n\n您方便告诉我文件名吗？');
+  const cited = "员工说'第一句。你赶紧确认权限。'，文档为[原文](local.txt)。";
+  assert.equal(stewardPreview(cited + '给个编号。'), cited + '您方便告诉我编号吗？');
+  for (const size of [999, 1000, 1001]) {
+    const tail = '。给个编号。';
+    const source = '𠮷'.repeat(size - Array.from(tail).length) + tail;
+    const saved = presentStewardReply(source);
+    assert.ok(Array.from(saved.text).length <= 1000);
+    assert.equal(saved.markdown, size > 1000 ? source : null);
+    if (size <= 1000) assert.equal(saved.text, source.slice(0, -'给个编号。'.length) + '请问编号？');
+  }
+});

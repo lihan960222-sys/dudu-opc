@@ -71,6 +71,34 @@ def test_direct_requests_drop_pressure_and_keep_the_owners_quotes():
     assert preview(quoted) == quoted
 
 
+def test_mixed_markdown_keeps_evidence_and_softens_only_the_direct_question():
+    from app.services.steward_reply import preview
+    evidence = '这一步返回“不能派工。你赶紧确认权限。”，字段是 `task_id`。'
+    blocks = '\n\n> 你给个编号。\n\n~~~~text\n给个编号。\n\n你赶紧确认权限。\n~~~~\n\n'
+    original = evidence + '给个任务编号，我再核对。' + blocks + '老板，你赶紧确认权限。'
+    expected = evidence + '您方便告诉我任务编号吗？我再核对。' + blocks + '老板，请您确认权限。'
+    assert preview(original) == expected
+    details = '\n\n运行记录：\n给个编号。\n你必须确认范围。'
+    assert preview('给个编号。' + details) == '您方便告诉我编号吗？' + details
+    raw_error = '报错原文：\n你赶紧确认权限。\n给个编号。'
+    assert preview(raw_error + '\n\n你直接给个文件名。') == raw_error + '\n\n您方便告诉我文件名吗？'
+    cited = "员工说'第一句。你赶紧确认权限。'，文档为[原文](local.txt)。"
+    assert preview(cited + '给个编号。') == cited + '您方便告诉我编号吗？'
+
+
+@pytest.mark.parametrize("size", [999, 1000, 1001])
+def test_length_increasing_polite_question_keeps_exact_boundary(size):
+    from app.services.steward_reply import preview
+    tail = '。给个编号。'
+    original = '𠮷' * (size - len(tail)) + tail
+    rendered = preview(original)
+    assert len(rendered) <= 1000
+    if size <= 1000:
+        assert rendered == original[:-len('给个编号。')] + '请问编号？'
+    else:
+        assert rendered.endswith('详见完整回复。')
+
+
 @pytest.mark.parametrize("length", [999, 1000, 1001])
 @pytest.mark.parametrize("reply_to", [None, "om_original"])
 def test_owner_text_boundary_counts_chinese_and_non_bmp_characters(tmp_path, monkeypatch, length, reply_to):
