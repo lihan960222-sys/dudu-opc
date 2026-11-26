@@ -42,6 +42,10 @@ def automatic(tool, mode, team, arguments):
         if team.origin == "routine" and name in team.feishu_tools and not team.is_lead:
             return "allowed", "bound_weekly_knowledge"
         return "denied", "weekly_tool_not_granted"
+    if name == 'run_project_command':
+        if (mode!='ask' or not team.feature_consult or not team.strict_hierarchy or team.is_lead or team.origin!='person'):
+            return 'denied','outside_project_command'
+        return None  # Each complete command needs a one-use review, including repeated tests.
     if name == "employee_capabilities":
         return "allowed","own_capabilities"
     if name == "enable_local_skill":

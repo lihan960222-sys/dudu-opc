@@ -132,7 +132,9 @@ def feature_team_tools(ctx):
     feishu = getattr(team, "feishu_tools", ())
     if getattr(ctx, "scheduled_knowledge", False):
         return tuple(feishu)
-    employee = ("employee_capabilities","enable_local_skill",*feishu)
+    from app.services import employee_terminal
+    reviewed = ("run_project_command",) if employee_terminal.available(ctx) else ()
+    employee = ("employee_capabilities","enable_local_skill",*feishu,*reviewed)
     if team and not team.delegation_enabled:
         return employee
     return ("list_agents", "propose_direct_report", "delegate", "answer_job_question", "ask_agent", *employee)
@@ -545,6 +547,13 @@ class CodexAdapter:
         finally:
             self._active_turns.pop(ctx.turn_id, None)
 
+    async def run_project_command(self, ctx, args, check):
+        from app.services import employee_terminal
+        run = self._active_turns.get(ctx.turn_id)
+        if run is None or run.ctx is not ctx or run.project is not ctx.project_runtime:
+            raise ValueError("项目命令会话已变更。")
+        return await employee_terminal.execute(run, args, check)
+
     async def steer_turn(self, turn_id: int, text: str) -> str:
         run = self._active_turns.get(turn_id)
         if run is None:
@@ -894,6 +903,12 @@ class _CodexTurn:
                 return self._failed("Could not confirm scoped task tools.", "codex_error")
             if not self.project or not self.tools:
                 common["environments"] = []
+            if self.project and "run_project_command" in feature_team_tools(self.ctx):
+                common["config"]["features"].update(shell_tool=False, unified_exec=False)
+                note = ("Run terminal commands through team.run_project_command using an argv array and project-relative cwd. "
+                        "Each operation waits for its own review and returns the actual exit code, stdout and stderr. "
+                        "For Windows cmd built-ins use cmd.exe /d /c. Use this tool to read and edit project files as needed.")
+                instructions = f"{instructions}\n\n{note}" if instructions else note
         launch = self.ctx.memory_launch
         if self.computer is not None:
             try:
@@ -929,6 +944,9 @@ class _CodexTurn:
                 "command": team_launch.command, "args": list(team_launch.args), "env": dict(team_launch.env),
                 "default_tools_approval_mode": "prompt",
             }
+            if self.project and "run_project_command" in feature_team_tools(self.ctx):
+                from app.team.mcp_server import MAILBOX_TIMEOUT_SECONDS
+                common["config"]["mcp_servers"]["team"]["tool_timeout_sec"] = MAILBOX_TIMEOUT_SECONDS
         if self.ctx.composio_launch is not None:
             app_launch = self.ctx.composio_launch
             levels = self.ctx.composio_apps or {}
@@ -1634,15 +1652,27 @@ class _CodexTurn:
                     self.rpc.respond(rid, payload(False))
                     return
                 name, tool_input = found
-                from app.team.mcp_server import TOOLS
+                from app.team.mcp_server import PROJECT_COMMAND, TOOLS
                 feishu_tools = getattr(getattr(self.ctx, 'team', None), 'feishu_tools', ())
-                if ((name not in {entry['name'] for entry in TOOLS} and name not in feishu_tools) or
+                if ((name not in {entry['name'] for entry in TOOLS} and name not in feishu_tools and name != PROJECT_COMMAND['name']) or
                         (self.feature and (name not in feature_team_tools(self.ctx) or
                          (name == 'ask_agent' and tool_input.get('mode') != 'consult')))):
                     self.rpc.respond(rid, payload(False))
                     return
                 tool, approval_kind = "mcp__team__" + name, "other"
                 summary = summarize_tool(tool, tool_input)
+                if name == PROJECT_COMMAND['name']:
+                    from app.services import employee_terminal
+                    import subprocess
+                    try:
+                        if not employee_terminal.available(self.ctx) or not project:
+                            raise ValueError("Not an employee command")
+                        argv, _cwd, relative = employee_terminal.checked_command(project, tool_input)
+                    except (OSError, ValueError):
+                        self.rpc.respond(rid, payload(False))
+                        return
+                    approval_kind = 'command'
+                    summary = f"{relative}  {subprocess.list2cmdline(argv)}"[:200]
             elif browser_call:
                 found = self._computer_call(server, text, meta)
                 if found is None:

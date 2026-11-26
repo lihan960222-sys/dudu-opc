@@ -57,7 +57,7 @@ class Jobs:
         self._closed = False
 
     async def enqueue(self, run, args, *, reply='wait'):
-        command_fields = {'project', 'task_title', 'task_id', 'priority', 'version', 'dependencies', 'deliverables', 'assignment_intent'}
+        command_fields = {'project', 'task_title', 'task_id', 'priority', 'version', 'dependencies', 'deliverables', 'assignment_intent', 'read_only'}
         if set(args) - ({'agent_id', 'brief', 'mode', 'done_when', 'rework', 'feishu_delivery','completion_check'} | command_fields):
             raise service.TeamError('invalid_input', 'Unknown job fields.')
         brief, mode, target = args.get('brief'), args.get('mode', 'work'), args.get('agent_id')
@@ -67,6 +67,8 @@ class Jobs:
             raise service.TeamError('invalid_input', 'Success criteria must be at most 2000 characters.')
         if args.get("assignment_intent") not in (None, "continue", "independent"):
             raise service.TeamError("invalid_input", "Choose continued or independent project work.")
+        if "read_only" in args and type(args["read_only"]) is not bool:
+            raise service.TeamError("invalid_input", "read_only must be true or false.")
         pin = context = None
         restricted_handoff = False
         stopped = ()
@@ -263,11 +265,15 @@ class Jobs:
                     check=prior_check
             own_mode = child.approval_mode
             from app.services.routine_service import effective_approval_mode  # routine_service imports the runtime, which imports this module
-            if nested:
+            if (mode == 'consult' or args.get("read_only") or (earlier and earlier.approval_mode == "plan")
+                    or (pin and (pin.get("read_only") or pin.get("action")=="read_document"))):
+                approval_mode = 'plan'
+            elif nested:
                 from app.team.steward_review import delegated_mode
                 approval_mode = await delegated_mode(db, parent, caller, child, run.ctx.approval_mode or 'ask')
-            elif mode == 'consult' or (pin and pin.get("read_only")):
-                approval_mode = 'plan'
+            elif scoped_command and context and run.ctx.team.origin == "person":
+                from app.team.steward_review import direct_project_mode
+                approval_mode = await direct_project_mode(db,self.rt.owner_id,child,context.turn_id,run.ctx.approval_mode or 'ask')
             else:
                 approval_mode = effective_approval_mode(own_mode, run.ctx.approval_mode or 'ask')
             job = AgentJob(owner_id=self.rt.owner_id, root_id=root.id if root else None,

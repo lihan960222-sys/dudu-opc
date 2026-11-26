@@ -27,9 +27,12 @@ async def consume_allowed_approval(db, turn_id, owner_token, tool, arguments):
         await db.rollback()
         return False
     threshold = service.now() - timedelta(minutes=15)
-    approvals = (await db.execute(select(Approval).where(
+    query = select(Approval).where(
         Approval.turn_id == turn_id, Approval.tool == tool, Approval.status == 'allowed',
-        Approval.consumed_at.is_(None), Approval.decided_at >= threshold).order_by(Approval.created_at))).scalars()
+        Approval.consumed_at.is_(None), Approval.decided_at >= threshold)
+    if tool == 'mcp__team__run_project_command':
+        query = query.where(Approval.delivered_at.is_not(None))
+    approvals = (await db.execute(query.order_by(Approval.created_at))).scalars()
     expected = canonical(arguments)
     for approval in approvals:
         if canonical(approval.input) != expected:
@@ -58,6 +61,9 @@ class TeamBridge:
             extra.append('--employee-only')
         if getattr(self.run.ctx.team, 'scheduled_knowledge', False):
             extra.append('--feishu-only')
+        from app.services import employee_terminal
+        if employee_terminal.available(self.run.ctx):
+            extra.append('--project-command')
         for tool in getattr(self.run.ctx.team, 'feishu_tools', ()):
             extra.extend(['--employee-tool', tool])
         if getattr(sys, 'frozen', False):
@@ -127,6 +133,24 @@ class TeamBridge:
 
     async def execute(self, name, args):
         rt, run = self.runtime, self.run
+        if name == 'run_project_command':
+            from app.db.models import AgentJobEvent
+            from app.services import employee_terminal
+            from app.team.steward_review import current_native_job
+            if not employee_terminal.available(run.ctx, live=True):
+                raise service.TeamError('outside_scope','这项派工未授权项目命令。')
+            async with rt.session() as db:
+                await begin_write(db)
+                job = await current_native_job(db, run, write=True, lock=True)
+                if not job:
+                    raise service.TeamError('outside_scope','工单归属或项目权限已变更。')
+                check = await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id==job.id,
+                    AgentJobEvent.kind=='completion_check').limit(1))
+                await db.commit()
+            try:
+                return await rt.adapters['codex'].run_project_command(run.ctx, args, check)
+            except ValueError as exc:
+                raise service.TeamError('project_command_failed',str(exc)) from exc
         if name in ("employee_capabilities","enable_local_skill"):
             from app import composio_tools
             from app.services import agent_skills
