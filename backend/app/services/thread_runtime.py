@@ -21,6 +21,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+import sqlite3
 from uuid import uuid4
 from pathlib import Path
 
@@ -216,6 +217,10 @@ class ActiveRun:
     recovery_call: dict | None = None
     recovery_requested: bool = False
     recovery_followup: dict | None = None
+    delivery_root: int | None = None
+    delivery_choices: tuple[int,...] = ()
+    delivery_errors: dict[tuple[int,str],str] = field(default_factory=dict)
+    steward_owner_turn: bool = False
     capturable: bool = False
     # The agent's notes are on: the finished turn leaves a line in its daily log.
     log_memory: bool = False
@@ -257,6 +262,10 @@ class TurnRecorder:
         if self._lost:
             return False
         run = self._run
+        if type=="assistant.message" and (run.delivery_root or run.delivery_errors):
+            run.touch()
+            run.accepted = True
+            return True
         async with self._runtime.session() as db:
             event = await store.append_turn_event(db, run.turn_id, run.owner_token, type, data)
         if event is None:
@@ -284,9 +293,10 @@ class TurnRecorder:
         if not self._lost:
             self._run.touch()
             self._run.accepted = True
-            self._runtime.hub.delta(
-                self._run.thread_id, self._run.turn_id, text, after_seq=self._last_seq
-            )
+            if not (self._run.delivery_root or self._run.delivery_errors):
+                self._runtime.hub.delta(
+                    self._run.thread_id, self._run.turn_id, text, after_seq=self._last_seq
+                )
 
 
 class ThreadApprovalGate:
@@ -390,6 +400,17 @@ class ThreadApprovalGate:
         auto = tool_policy.automatic(tool, run.ctx.approval_mode or approval_modes.DEFAULT_MODE, run, input)
         if not first_recovery_request:
             auto = "denied","recovery_already_attempted"
+        if tool=="mcp__team__delegate" and run.steward_owner_turn and not run.recovery_call and isinstance(input,dict):
+            from app.team.feishu_assignment import choice_missing, required_tool
+            if choice_missing(run,input):
+                auto="denied","select_feishu_delivery_or_none"
+                for target in input["agent_ids"]:
+                    if target in run.delivery_choices:
+                        run.delivery_errors[target,"choice"]="我还没登记派工，需要先确定这次要交付什么。"
+            elif requested:=required_tool({"action":input.get("feishu_delivery")}):
+                for target in input.get("agent_ids",[]):
+                    if type(target) is int:
+                        run.delivery_errors[target,requested]="我还没登记这项飞书交付，尚无员工回执。"
         if auto is None or auto[0] != "denied":
             from app.services import routine_uninterrupted
             routine_auto = await routine_uninterrupted.automatic(runtime, run, tool, input)
@@ -758,6 +779,7 @@ class ThreadRuntime:
         feature_resume_job: int | None = None,
         recovery_job: int | None = None,
         recovery_followup: tuple[int, list[int]] | None = None,
+        delivery_root: int | None = None,
         direct_event_key: str | None = None,
         assignment_source: dict | None = None,
         skills: list[str] | None = None,
@@ -855,6 +877,14 @@ class ThreadRuntime:
             steward_chat = is_owner_chat(thread, lead_id)
             if strict_lead and lead_id != thread.agent_id:
                 raise ProviderUnavailable("Start specialist work from its scoped steward task.")
+        delivery_choices,expected_delivery=(),None
+        if strict_lead and steward_chat and not internal and person_is_owner and team_origin=="person":
+            from app.team.feishu_assignment import owner_choices
+            try:
+                delivery_choices,expected_delivery=owner_choices(self.owner_id,thread.agent_id,direct_event_key)
+            except (OSError,ValueError,KeyError,sqlite3.Error) as exc:
+                if direct_event_key:
+                    raise ProviderUnavailable("飞书派工记录暂时无法核对。") from exc
         adapter = self.adapters.get(thread.provider)
         if adapter is None:
             raise UnknownProvider(thread.provider)
@@ -1027,10 +1057,10 @@ class ThreadRuntime:
                     prompt_text,
                     owner_instance=self.instance_id,
                     feature_event_key=feature_event_key, feature_resume_job=feature_resume_job,
-                    recovery_job=recovery_job, recovery_followup=recovery_followup,
+                    recovery_job=recovery_job, recovery_followup=recovery_followup, delivery_root=delivery_root,
                     direct_event_key=direct_event_key, direct_attachment_ids=attachment_ids, direct_skills=skills,
                     assignment_source=assignment_source, attachments=submitted_attachments or None,
-                    origin="harness" if recovery_job is not None or followup is not None else team_origin, internal=internal,
+                    origin="harness" if recovery_job is not None or followup is not None or delivery_root else team_origin, internal=internal,
                     use_employee_role=(not internal and approval_mode is None and configuration_allowed and person_is_owner),
                     person_id=person_id,
                     person_label=person_label,
@@ -1213,6 +1243,8 @@ class ThreadRuntime:
             owner_token=turn.owner_token,
             ctx=ctx,
             agent_id=agent.id if agent is not None else None,
+            delivery_root=delivery_root if internal and steward_chat else None,
+            steward_owner_turn=steward_chat and person_is_owner and team_origin=="person" and not recovery and not followup,
             approval_timeout=approval_timeout,
             engine_id=thread.provider,
             fallback=None if draft_only or feature or managed or recovery else _fallback_of(agent, thread.provider),
@@ -1232,6 +1264,20 @@ class ThreadRuntime:
                 and speaker.learns_from(person_id, person_is_owner)
             ),
         )
+        if delivery_choices or expected_delivery:
+            from app.team.feishu_assignment import required_tool
+            run.delivery_choices=delivery_choices
+            if run.delivery_choices:
+                ids=", ".join(str(i) for i in run.delivery_choices)
+                note=(f"When delegating work to employee IDs {ids}, include feishu_delivery on the first call. "
+                      "Choose none for a chat or local-only result. A local files, inspection or commands "
+                      "completion check already identifies a local deliverable. For Feishu choose the required "
+                      "operation from the owner's meaning. Ask the owner only if the intended target is ambiguous.")
+                ctx.prompt=note+"\n\n"+ctx.prompt
+                ctx.instructions=_with_brief(ctx.instructions,note)
+                ctx.codex_prompt.instructions=_with_brief(ctx.codex_prompt.instructions,note)
+            if expected_delivery and (required:=required_tool(expected_delivery)):
+                run.delivery_errors[expected_delivery["employee"],required]="我还没登记这次飞书交付，尚无员工回执。"
         if feature and not consult and agent.team_id and app_settings.get("TEAM_ENABLED"):
             from app.team.service import team_for
             async with self.session() as db:
@@ -1994,6 +2040,8 @@ class ThreadRuntime:
             return
         succeeded = outcome.status == "succeeded"
         extra_events: list[tuple[str, dict]] = []
+        if run.delivery_root or run.delivery_errors:
+            outcome.partial_text=None
         if not succeeded and outcome.partial_text:
             extra_events.append(
                 ("assistant.message", {"text": outcome.partial_text, "incomplete": True})
@@ -2014,6 +2062,21 @@ class ThreadRuntime:
         if outcome.usage:
             event_data["usage"] = outcome.usage
         async with self.session() as db:
+            if succeeded and (run.delivery_root or run.delivery_errors):
+                from app.db.models import AgentJob
+                from app.db.transactions import begin_write
+                from app.team.document_delivery import owner_report
+                await begin_write(db)
+                root=await db.get(AgentJob,run.delivery_root,with_for_update=True) if run.delivery_root else None
+                report = await owner_report(db,root,outcome.result,extra_errors=run.delivery_errors) if (
+                    root and root.owner_id==self.owner_id and root.assignee_agent_id==run.agent_id
+                    and root.assignee_thread_id==run.thread_id and root.current_turn_id==run.turn_id) else None
+                lines=[report.text] if report else list(dict.fromkeys(run.delivery_errors.values()))
+                outcome.result="\n\n".join(lines) if lines else "老板，我还没核实本次交付。"
+                if run.delivery_errors and not report:
+                    outcome.result="老板，"+outcome.result
+                event_data["result"]=outcome.result
+                extra_events.append(("assistant.message", {"text":outcome.result}))
             recorded = await store.finish_turn(
                 db,
                 run.turn_id,

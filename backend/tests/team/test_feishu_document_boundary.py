@@ -5,6 +5,18 @@ import pytest
 from app.team import feishu_assignment
 
 
+def test_rework_keeps_the_existing_delivery_and_cannot_downgrade_it_to_a_local_report():
+    from app.team.service import TeamError
+    import pytest
+    previous={"action":"employee","employee":4,"contact":"联系人","event":"old"}
+    current={"action":"employee","employee":4,"contact":"联系人","event":"new"}
+    assert feishu_assignment.rework_contract(previous,current,"feishu_publish_knowledge",None)==previous
+    with pytest.raises(TeamError):
+        feishu_assignment.rework_contract(previous,None,"feishu_publish_knowledge","none")
+    with pytest.raises(TeamError):
+        feishu_assignment.rework_contract(previous,{**current,"employee":5},"feishu_publish_knowledge","restructure")
+
+
 @pytest.mark.asyncio
 async def test_ordinary_person_delegation_gets_only_its_own_employee_capability(monkeypatch):
     cfg = {"owner_id":"owner","steward":{"agent_id":1,"app_id":"boss"},
