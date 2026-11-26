@@ -484,6 +484,8 @@ export type Agent = {
   id: number;
   manager_agent_id?: number | null;
   can_staff_team?: boolean;
+  delegate_project_writes?: boolean;
+  model_vendor?: string | null;
   name: string;
   // A short role line and a longer description; neither is sent to Claude.
   title?: string | null;
@@ -554,6 +556,8 @@ export type OpenBotDatabasePreview = {
 };
 
 export type AgentInput = {
+  model_vendor?: string | null;
+  delegate_project_writes?: boolean;
   make_lead?: boolean;
   name: string;
   title?: string | null;
@@ -601,6 +605,7 @@ export type EngineConfigField = {
   help?: string | null;
 };
 export type Engine = {
+  project_capability_gaps?: string[];
   id: string;
   label: string;
   kind: "cli" | "acp" | "api";
@@ -1654,11 +1659,12 @@ export const api = {
   // conversation's engine cannot read images.
   // `skills`: names of the agent's enabled skills the person picked for this message
   // (at most 3); 422 skill_unavailable when one is missing or off.
-  sendTurn: (threadId: number, promptText: string, attachmentIds: string[] = [], skills: string[] = []) =>
+  sendTurn: (threadId: number, promptText: string, attachmentIds: string[] = [], skills: string[] = [], replyToTurnId?: number) =>
     request<ThreadTurn>(`/threads/${threadId}/turns`, {
       method: "POST",
       body: JSON.stringify({
         prompt_text: promptText,
+        ...(replyToTurnId ? { reply_to_turn_id: replyToTurnId } : {}),
         ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
         ...(skills.length ? { skills } : {}),
       }),

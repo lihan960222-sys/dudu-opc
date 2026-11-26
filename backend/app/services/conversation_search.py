@@ -271,8 +271,10 @@ async def search_any(
     if feature_id is None:
         statement = statement.where(Thread.kind.not_in(('feature', 'feature_consult', 'steward_ledger')))
     else:
-        from app.db.models.feature import FeatureSession
-        statement = statement.where(Thread.id.in_(select(FeatureSession.thread_id).where(FeatureSession.task_id == feature_id)))
+        from app.db.models.feature import FeatureScope, FeatureSession
+        statement = statement.where(Thread.id.in_(select(FeatureSession.thread_id).join(
+            FeatureScope, FeatureScope.task_id == FeatureSession.task_id).where(FeatureSession.task_id == feature_id,
+                FeatureSession.assignment_epoch == FeatureScope.assignment_epoch)))
     if exclude_thread_id is not None:
         statement = statement.where(Thread.id != exclude_thread_id)
     out: list[tuple[SearchHit, float]] = []

@@ -10,6 +10,6 @@ export const FEISHU_RETURN_EMPLOYEE = "suparagent.feishu.return-employee";
 export function feishuEntry(params: URLSearchParams, hash: string, returningEmployee: string | null) {
   const callback = params.has("feishu_oauth");
   const requested = params.get("capability") === "feishu" || hash === "#feishu-access" || callback;
-  const employee = callback ? returningEmployee : params.get("employee");
+  const employee = params.get("employee") ?? (callback ? returningEmployee : null);
   return { requested, employee: requested && employee && /^[1-9]\d*$/.test(employee) ? employee : "" };
 }

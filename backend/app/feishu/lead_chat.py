@@ -78,6 +78,43 @@ async def project_context(db,owner,project):
     return '现有项目任务（任务编号、经办角色编号）：'+json.dumps([[a,b] for a,b in rows])
 
 
+async def assignment_status(worker, row, message):
+    from app.db.session import AsyncSessionLocal
+    from app.db.models import DirectTurnReceipt, FeatureMessage, WorkColumn
+    from app.services.assignment_context import _tasks_for_turn
+    from .direct_requests import source_reference
+    owner = worker.cfg.get("owner_id")
+    project = worker.cfg.get("project")
+    if not owner or not project:
+        return None
+    reference = source_reference(worker.db, row["app"], message)
+    async with AsyncSessionLocal() as db:
+        query = select(WorkItem.id, WorkItem.title, Agent.name, WorkColumn.key).join(
+            FeatureScope, FeatureScope.task_id==WorkItem.id).join(Agent,Agent.id==WorkItem.agent_id).join(
+                WorkColumn, WorkColumn.id==WorkItem.column_id).where(WorkItem.owner_id==owner,
+                    FeatureScope.project==project, Agent.owner_id==owner)
+        if "reference_event_key" in reference:
+            key = reference["reference_event_key"]
+            prior = await db.get(DirectTurnReceipt,(owner,key))
+            if prior and (turn := await db.get(Turn,prior.turn_id)):
+                ids = await _tasks_for_turn(db, owner, turn)
+            else:
+                old = await db.get(FeatureMessage,(owner,key))
+                ids = [old.result["task_id"]] if old and old.result.get("task_id") else []
+            query = query.where(WorkItem.id.in_(ids))
+        elif "reference_task_id" in reference:
+            query = query.where(WorkItem.id==reference["reference_task_id"])
+        elif message.get("parent_id") or message.get("root_id"):
+            return None
+        else:
+            query = query.where(WorkItem.archived.is_(False), WorkItem.completed_at.is_(None))
+        cards = (await db.execute(query.order_by(WorkItem.id.desc()).limit(12))).all()
+    if not cards:
+        return None
+    status = {"ready":"等待执行","doing":"正在执行","waiting":"等待补充或核对","review":"等待验收","done":"已完成"}
+    return "\n".join(f"#{card.id} {card.title} · {card.name} · {status.get(card.key, card.key)}" for card in cards)
+
+
 async def register_report(worker,row,turn):
     """Record only live Feishu arrivals whose native lead actually delegated."""
     from app.db import session
@@ -128,6 +165,13 @@ async def publish_reports(worker):
         jobs={j.id:j for j in await db.scalars(select(AgentJob).where(AgentJob.id.in_([r['job'] for r in rows]),
             AgentJob.kind=='root',AgentJob.owner_id==cfg['owner_id'],AgentJob.requester_agent_id==actor,
             AgentJob.assignee_agent_id==actor))}
+        from collections import defaultdict
+        dispatches = defaultdict(list)
+        children = await db.execute(select(AgentJob.parent_id, AgentJob.id).where(
+            AgentJob.owner_id==cfg['owner_id'], AgentJob.parent_id.in_(jobs), AgentJob.task_id.is_not(None),
+            AgentJob.kind=="job", AgentJob.mode=="work"))
+        for root_id, child_id in children:
+            dispatches[root_id].append(child_id)
         pending_hires = {}
         proposals = await db.execute(select(AgentJob.parent_id, TeamSetupRequest.request_id, TeamSetupRequest.thread_id)
             .join(TeamSetupRequest, TeamSetupRequest.plan['_origin_job'].as_integer() == AgentJob.id)
@@ -144,7 +188,7 @@ async def publish_reports(worker):
         job=jobs.get(row['job'])
         with worker.db:
             worker.db.execute('update direct_team_reports set checked=unixepoch() where job=?',(row['job'],))
-            if not job or job.requester_thread_id!=row['thread'] or job.requester_turn_id!=row['turn']:
+            if not job or job.outcome=='reassigned' or job.requester_thread_id!=row['thread'] or job.requester_turn_id!=row['turn']:
                 worker.db.execute('update direct_team_reports set finished=1 where job=?',(row['job'],))
                 continue
             for request_id, thread_id in pending_hires.get(job.id, []):
@@ -165,3 +209,9 @@ async def publish_reports(worker):
                     report='团队任务已结束。可在管家会话中查看派工记录。'
                 worker.db.execute('update direct_team_reports set finished=1 where job=?',(job.id,))
                 worker.direct_final(row,'done',report)
+                if dispatches[job.id]:
+                    from .routing import bind_outgoing
+                    outgoing = worker.db.execute("select outgoing from direct_finals where app=? and event=?",
+                                                 (row["app"],row["event"])).fetchone()
+                    if outgoing:
+                        bind_outgoing(worker.db,outgoing[0],dispatches[job.id])

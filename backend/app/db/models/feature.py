@@ -1,5 +1,5 @@
 """Routing metadata attached to the planner's durable WorkItem identity."""
-from sqlalchemy import BigInteger, ForeignKey, String, Text
+from sqlalchemy import BigInteger, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 from app.db.types import JSONValue
@@ -8,6 +8,7 @@ from app.db.types import JSONValue
 class FeatureScope(Base):
     __tablename__ = "feature_scope"
     task_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("work_item.id"), primary_key=True)
+    assignment_epoch: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     project: Mapped[str] = mapped_column(String)
     version: Mapped[str] = mapped_column(String)
     acceptance: Mapped[str] = mapped_column(Text)
@@ -32,6 +33,7 @@ class FeatureSession(Base):
     __tablename__ = "feature_session"
     thread_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("thread.id"), primary_key=True)
     task_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("work_item.id"), index=True)
+    assignment_epoch: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     previous_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("thread.id"))
 
 class DirectTurnReceipt(Base):

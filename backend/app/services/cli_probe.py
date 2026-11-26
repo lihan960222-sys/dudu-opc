@@ -11,12 +11,12 @@ account's email or organisation.
 import asyncio
 import os
 import signal
+import subprocess
 import sys
 from dataclasses import dataclass
 
-from app.core import engine_processes
+from app.core import engine_processes, host_exec
 from app.services.local_claude_runner import child_env
-from app.core import host_exec
 
 MAX_PROBE_OUTPUT_BYTES = 64_000
 
@@ -40,12 +40,14 @@ def kill_group(proc: asyncio.subprocess.Process) -> None:
     started. Never raises."""
     try:
         if sys.platform == "win32":
-            import subprocess
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
-            proc.kill()
+            if proc.returncode is not None:
+                return
+            taskkill = os.path.join(os.environ["SYSTEMROOT"], "System32", "taskkill.exe")
+            subprocess.run([taskkill, "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=5,
+                           **host_exec.background_process_options())
         else:
             os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    except (OSError, subprocess.TimeoutExpired):
         pass
     try:
         proc.kill()
@@ -53,9 +55,12 @@ def kill_group(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
-async def run(args: list[str], *, timeout: float, cwd: str | None = None, env: dict | None = None) -> ProbeRun:
+async def run(args: list[str], *, timeout: float, cwd: str | None = None, env: dict | None = None,
+              employee_project: bool = False, acceptance: bool = False) -> ProbeRun:
     try:
         host_exec.ensure_allowed("an engine check")
+        if (employee_project or acceptance) and (reason := host_exec.employee_host_blocker(acceptance=acceptance)):
+            return ProbeRun(None, "", "", failed_to_start=reason)
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.DEVNULL,
@@ -64,13 +69,26 @@ async def run(args: list[str], *, timeout: float, cwd: str | None = None, env: d
             cwd=cwd or os.path.expanduser("~"),
             env=env if env is not None else child_env(),
             start_new_session=sys.platform != "win32",
+            **host_exec.background_process_options(),
         )
     except (OSError, ValueError) as exc:
         return ProbeRun(None, "", "", failed_to_start=exc.__class__.__name__)
-    await asyncio.to_thread(engine_processes.record, proc.pid, args[0])
+    close_job = None
     try:
+        if employee_project:
+            try:
+                close_job = host_exec.employee_process_lifetime(proc.pid)
+            except OSError as exc:
+                kill_group(proc)
+                await proc.wait()
+                return ProbeRun(None, "", "", failed_to_start=exc.__class__.__name__)
+        await asyncio.to_thread(engine_processes.record, proc.pid, args[0])
         return await _finish_probe(proc, timeout)
     finally:
+        if close_job is not None:
+            close_job()
+        elif proc.returncode is None:
+            kill_group(proc)
         engine_processes.forget(proc.pid)
 
 

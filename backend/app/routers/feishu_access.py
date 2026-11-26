@@ -37,6 +37,10 @@ class Analysis(Revision):
     enabled: bool = Field(strict=True)
 
 
+class EmployeeVendors(Revision):
+    vendors: list[str] = Field(max_length=4)
+
+
 def profile():
     try:
         return access.config_from_env()
@@ -94,6 +98,20 @@ def set_folder(body: Folder):
 @router.put("/analysis")
 def set_analysis(body: Analysis):
     return save(profile(),body.revision,allow_codex_summary=body.enabled)
+
+
+@router.put("/analysis/{employee_id}")
+async def set_employee_analysis(employee_id: int, body: EmployeeVendors, rt: ThreadRuntime=Depends(get_runtime)):
+    cfg=profile()
+    async with rt.session() as db:
+        team=await team_for(db,rt.owner_id)
+        if not team or employee_id==team.lead_agent_id or rt.owner_id!=cfg["owner_id"]:
+            raise HTTPException(422,"请选择一名在职员工。")
+        try:
+            await member(db,rt.owner_id,employee_id,team_id=team.id)
+        except TeamError:
+            raise HTTPException(422,"请选择一名在职员工。") from None
+    return save(cfg,body.revision,employee_vendors=(employee_id,body.vendors))
 
 
 @router.post("/contacts")

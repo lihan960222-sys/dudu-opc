@@ -95,6 +95,16 @@ def in_folder(client,headers,folder,doc):
         params["page_token"]=cursor
 
 
+def verify_destination(client, headers, folder, doc, title):
+    if not in_folder(client,headers,folder,doc):
+        raise ValueError("文档已移出指定文件夹或无法看到，请核对位置。")
+    meta = knowledge_document.inspect_document(client,headers,doc)
+    if meta is None:
+        raise ValueError("原文档已删除，请核对交付目标。")
+    if meta.get("title") != title:
+        raise ValueError("飞书文档名称已变更，请核对原件。")
+
+
 async def read(client,identity,url,offset):
     if type(offset)!=int or offset<0:
         raise ValueError("读取位置无效。")

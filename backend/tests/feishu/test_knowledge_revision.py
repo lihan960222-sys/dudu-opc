@@ -8,6 +8,33 @@ from app.feishu import knowledge_revision as revision
 
 
 @pytest.mark.asyncio
+async def test_employee_reconciles_lost_write_receipt_before_retry():
+    db=sqlite3.connect(":memory:")
+    remote=[]
+    writes=[]
+    async def permitted():
+        return True
+    def respond(req):
+        if req.method=="GET":
+            data={"items":remote} if req.url.path.endswith("/children") else {"document":{"revision_id":1}}
+            return httpx.Response(200,json={"code":0,"data":data})
+        writes.append(req)
+        remote[0:0]=[{**block,"block_id":str(n)} for n,block in enumerate(json.loads(req.content)["children"])]
+        raise httpx.ReadTimeout("lost write acknowledgement")
+    records={"m":{"body":{"content":"test"}}}
+    blocks=revision.employee_blocks([{"title":"进展","summary":"已核对","sources":["m"]}],records,"oc_demo")
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        async def run():
+            return await revision.revise_document(db,client,lambda:{},permitted,(4,"员工","codex","gpt-example",""),
+                "binding","doc","https://example.feishu.cn","测试资料","oc_demo",records,employee_draft=blocks)
+        with pytest.raises(httpx.ReadTimeout):
+            await run()
+        assert (await run())[1]==1
+        assert len(writes)==1
+    db.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure",[None,"missing_source","write_unconfirmed","readback_empty"])
 async def test_versioned_summary_tracks_edits_and_remote_confirmation(monkeypatch,failure):
     db=sqlite3.connect(":memory:")

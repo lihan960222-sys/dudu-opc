@@ -20,4 +20,6 @@ test("private tools open only from their explicit link, old anchor or OAuth retu
   assert.deepEqual(entry("capability=feishu&employee=3"), { requested: true, employee: "3" });
   assert.deepEqual(entry("section=host&feishu_oauth=connected", "", "3"), { requested: true, employee: "3" });
   assert.deepEqual(entry("section=host&feishu_oauth=error", "", "new"), { requested: true, employee: "" });
+  assert.deepEqual(entry("feishu_oauth=connected&employee=4", "", "3"), { requested: true, employee: "4" });
+  assert.deepEqual(entry("feishu_oauth=connected&employee=4"), { requested: true, employee: "4" });
 });

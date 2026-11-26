@@ -48,6 +48,7 @@ class Agent(Base):
     )
     # Null means the provider's default model.
     model: Mapped[str | None] = mapped_column(String, nullable=True)
+    model_vendor: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Null means the selected model's default reasoning effort.
     effort: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Another engine (and its model, null for its default) a turn moves to when
@@ -63,6 +64,7 @@ class Agent(Base):
     manager_agent_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     team_workspaces_readable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=expression.false())
     can_staff_team: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=expression.false())
+    delegate_project_writes: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=expression.false())
     role_path: Mapped[str | None] = mapped_column(String, nullable=True)
     approval_mode: Mapped[str] = mapped_column(
         String, nullable=False, default="ask", server_default="ask"

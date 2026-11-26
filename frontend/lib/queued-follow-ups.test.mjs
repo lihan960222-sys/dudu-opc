@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   loadQueuedFollowUps,
+  newQueuedFollowUp,
   saveQueuedFollowUps,
   subscribeQueuedFollowUps,
 } from "./queued-follow-ups.ts";
@@ -14,6 +15,12 @@ class MemoryStorage {
 }
 
 globalThis.localStorage = new MemoryStorage();
+
+test("a quoted reply keeps its original turn across a page reload", () => {
+  const quoted = newQueuedFollowUp("继续", 14);
+  localStorage.setItem("suparagent:queued-follow-ups:982", JSON.stringify([quoted]));
+  assert.equal(loadQueuedFollowUps(982)[0].replyToTurnId, 14);
+});
 
 test("queued follow-ups expose stable snapshots and notify subscribers", () => {
   const threadId = 901;

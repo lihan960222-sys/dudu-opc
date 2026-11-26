@@ -22,6 +22,25 @@ def code(call, *args, **kwargs):
     return caught.value.code
 
 
+def test_employee_reads_project_skill_revision_and_stops_after_revocation(home):
+    root = home / "project"
+    directory = root / ".agents" / "skills" / "release-check"
+    directory.mkdir(parents=True)
+    path = directory / "SKILL.md"
+    path.write_text("---\nname: release-check\ndescription: Project check\n---\nVerify PROJECT-MARKER-57", encoding="utf-8")
+    [entry] = skills.project_skill_catalog(root)
+    assert entry["name"] == "release-check" and entry["source"] == "project"
+    skill = skills.selected_employee_skill(1, "release-check", "project", root)
+    assert "PROJECT-MARKER-57" in skill.body and skill.revision == entry["revision"]
+    path.unlink()
+    assert code(skills.selected_employee_skill, 1, "release-check", "project", root) == "skill_unavailable"
+
+
+def test_disabled_saved_skill_cannot_be_reinstalled_implicitly(home):
+    skills.write_skill(1, "private-check", "Check", "owner-specific", enabled=False)
+    assert code(skills.selected_employee_skill, 1, "private-check", "employee", home) == "skill_unavailable"
+
+
 def test_a_skill_is_written_read_listed_and_deleted(home):
     saved = skills.write_skill(1, "weekly-report", "Summarise the week", "1. Read the notes.\n2. Write it up.")
     assert (saved.name, saved.enabled, saved.source) == ("weekly-report", True, "user")

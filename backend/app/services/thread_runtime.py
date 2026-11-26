@@ -48,6 +48,8 @@ from app.services.engine_registry import (
     capabilities_of,
     default_adapters,
     label_of,
+    project_capability_gaps,
+    resolve_model_profile,
 )
 from app.computers.policy import SCREEN_INPUT
 from app.services import tool_policy
@@ -396,7 +398,10 @@ class ThreadApprovalGate:
             runtime.hub.notify(run.thread_id)
             return ApprovalHandle(approval_id=approval.id, request_id=request_id, tool=tool)
         # A change to a connected app (mcp__composio__) is only ever allowed on its own card, never by a saved rule.
-        rule = None if tool.startswith(("mcp__team__", "mcp__composio__", "mcp__community__")) or tool in SCREEN_INPUT else await self._saved_rule(tool, input)
+        rule = None
+        if (not getattr(run.ctx, "project_runtime", None) and tool not in SCREEN_INPUT
+                and not tool.startswith(("mcp__team__", "mcp__composio__", "mcp__community__"))):
+            rule = await self._saved_rule(tool, input)
         held = None
         if rule is not None:
             # A command on the safety floor, or one that could not be read, is
@@ -481,6 +486,13 @@ class ThreadApprovalGate:
             # Re-check, atomically, that this run still owns its turn right
             # before the Allow is sent. The caller sends it only on ALLOW.
             async with runtime.session() as db:
+                if getattr(run.ctx, "project_runtime", None):
+                    from app.db.transactions import begin_write
+                    from app.team.steward_review import current_native_job
+                    await begin_write(db)
+                    if not await current_native_job(db, run, lock=True):
+                        await store.deny_undelivered_allow(db, handle.approval_id, run.owner_token, source="assignment_changed")
+                        return Decision(DENY)
                 delivered = await store.mark_allow_delivered(db, handle.approval_id, run.owner_token)
             if not delivered:
                 run.recorder.lose()
@@ -729,6 +741,7 @@ class ThreadRuntime:
         feature_event_key: str | None = None,
         feature_resume_job: int | None = None,
         direct_event_key: str | None = None,
+        assignment_source: dict | None = None,
         skills: list[str] | None = None,
         team_origin: str = "person",
         routine_run_id: int | None = None,
@@ -771,7 +784,7 @@ class ThreadRuntime:
             from app.services import feature_tasks
             async with self.session() as db:
                 previous = await feature_tasks.direct_submission(db,thread,direct_event_key,
-                    feature_tasks.direct_input_hash(prompt_text,attachment_ids,skills))
+                    feature_tasks.direct_input_hash(prompt_text,attachment_ids,skills,assignment_source))
                 if previous:
                     return previous
         if feature_resume_job is not None:
@@ -779,7 +792,7 @@ class ThreadRuntime:
                 raise ProviderUnavailable("Only the scheduler can deliver child reports to an assigned task.")
         elif thread.kind == "feature" or feature_event_key is not None:
             from app.services import feature_tasks
-            if thread.kind != "feature" or not feature_event_key or skills:
+            if thread.kind != "feature" or not feature_event_key or (skills and not internal):
                 raise feature_tasks.DispatchConflict("A scoped turn requires its original steward dispatch.")
             async with self.session() as db:
                 previous = await feature_tasks.submission(db, thread, feature_event_key, prompt_text, attachment_ids or [])
@@ -805,6 +818,16 @@ class ThreadRuntime:
         if thread.session_state == "broken":
             raise SessionBroken(thread_id)
         attached = attachments.resolve_for_turn(thread_id, attachment_ids or [])
+        submitted_attachments = [a.public() for a, _ in attached]
+        if internal and feature_event_key and thread.kind == "feature":
+            from app.db.models import AgentJob, FeatureMessage
+            from app.services.assignment_context import employee_input
+            async with self.session() as db:
+                receipt = await db.get(FeatureMessage, (self.owner_id,feature_event_key))
+                job = await db.get(AgentJob, receipt.result["job_id"])
+                _, forwarded = await employee_input(db, job)
+            for ref in forwarded:
+                attached.extend(attachments.resolve_for_turn(ref["thread_id"], [ref["id"]]))
         # Skills the person chose for this message; SkillError (422) when one
         # is unknown or off. They add background to this message only.
         chosen_skills = agent_skills.resolve(thread.agent_id, skills or [])
@@ -826,8 +849,36 @@ class ThreadRuntime:
             async with self.session() as db:
                 agent = await agent_store.get_agent(db, thread.agent_id)
 
-        if thread.kind == 'feature' and agent is not None and agent.manager_agent_id is not None:
-            approval_mode = 'plan'
+        feature = thread.kind == "feature" or consult
+        project_runtime = None
+        weekly = None
+        if thread.kind == "feature" and agent is not None:
+            from app.db.models import AgentJob, FeatureMessage
+            from app.services import feature_tasks
+            from app.services.routine_service import effective_approval_mode
+            from app.team.steward_review import effective_job_mode
+            async with self.session() as db:
+                receipt = await db.get(FeatureMessage, (self.owner_id, feature_event_key)) if feature_event_key else None
+                job_id = feature_resume_job or (receipt.result.get("job_id") if receipt else None)
+                job = await db.get(AgentJob, job_id) if job_id else None
+                if not job or job.assignee_agent_id != agent.id or job.assignee_thread_id != thread.id:
+                    raise ProviderUnavailable("找不到这次派工对应的员工会话。")
+                ceiling = await effective_job_mode(db, job)
+                approval_mode = effective_approval_mode(approval_mode or ceiling, ceiling)
+                if job.origin_kind == "routine":
+                    from app.feishu.weekly_knowledge import proof_for_job
+                    from app.team.feishu_assignment import configuration
+                    cfg = configuration()
+                    weekly = await proof_for_job(db, cfg, job) if internal and cfg and team_origin == "routine" else None
+                    if not weekly:
+                        raise ProviderUnavailable("这次定时派工没有绑定当前员工的知识库授权。")
+                    approval_mode = "plan"
+                try:
+                    project_runtime = await feature_tasks.project_runtime_for(db, self.owner_id, agent, thread, approval_mode)
+                except (OSError, ValueError) as exc:
+                    raise ProviderUnavailable(str(exc)) from None
+                if weekly and (not project_runtime or project_runtime.writable or thread.provider != "codex"):
+                    raise ProviderUnavailable("每周知识库需要能禁用命令与其他工具的员工专用会话。")
         if thread.kind=="feature" and agent is not None and self.owner_id==settings.STEWARD_STRICT_OWNER:
             from app.services.routine_service import effective_approval_mode
             employee_default = agent_store.employee_mode(self.owner_id,agent.approval_mode)
@@ -840,35 +891,45 @@ class ThreadRuntime:
                 role = load(Path(agent.role_path), agent.model)
                 selected=managed.model if managed else role.model
                 if selected:
-                    await validate_model(self,thread.provider,selected)
+                    await validate_model(self, thread.provider, selected,
+                                         None if managed else agent.model_vendor,
+                                         private_project=project_runtime is not None)
             except (OSError, ValueError, EngineModelInvalid) as exc:
                 raise ProviderUnavailable(f"{agent.name} ({agent.role_path}/AGENTS.md): {exc}") from None
 
         selected_model = managed.model if managed else role.model if role else thread.model or (
             agent.model if agent is not None and agent.provider == thread.provider else None)
-        from app.services.codex_adapter import DEEPSEEK_MODELS, deepseek_status
-        deepseek_route = (
-            strict_lead and agent is not None and thread.provider == "codex"
-            and thread.kind == "chat" and selected_model in DEEPSEEK_MODELS
-        )
+        effort = (thread.provider_state or {}).get("effort")
+        if feature and agent is not None:
+            effort = agent.effort if selected_model == agent.model else None
+        vendor = agent.model_vendor if (agent and not managed and thread.provider == agent.provider
+                                        and (role or selected_model == agent.model)) else None
+        try:
+            profile = resolve_model_profile(thread.provider, vendor, selected_model, effort)
+        except InvalidModel as exc:
+            raise ProviderUnavailable(str(exc)) from None
+        from app.services.codex_adapter import deepseek_status
+        deepseek_route = thread.provider == "codex" and profile.model_vendor == "deepseek"
+        if deepseek_route and not (project_runtime or (strict_lead and thread.kind == "chat")):
+            raise ProviderUnavailable("员工使用 DeepSeek 需要启用独立项目会话，并在该员工档案中配置密钥。")
+        if project_runtime and profile.model_vendor is None:
+            raise ProviderUnavailable("请在员工档案中选择模型供应商后再继续任务。")
         if thread.session_state == "active" and bool((thread.provider_state or {}).get("steward_deepseek")) != deepseek_route:
             raise ProviderUnavailable("切换模型供应商需要新会话，原会话仍保留在原供应商。")
         if deepseek_route and selected_model == "deepseek-v4-pro" and any(a.kind == "image" for a,_ in attached):
             raise ImagesUnsupported("DeepSeek V4 Pro")
-        with app_settings.use(snapshot):
-            status = deepseek_status() if deepseek_route else await self._provider_status(adapter, config)
-        if not status.ready:
-            raise ProviderUnavailable(status.error or f"{thread.provider} is not ready")
-
-        feature = thread.kind == "feature" or consult
         feature_context = ""
         if feature:
-            import sys
-            from app.services.codex_adapter import CodexAdapter
             from app.services import feature_tasks
-            if (sys.platform != "win32" or type(adapter) is not CodexAdapter or thread.provider != "codex"
-                    or not role or skills or routine_run_id is not None or role.model != thread.model):
-                raise ProviderUnavailable("This task needs a current scoped Windows Codex session.")
+            gaps = project_capability_gaps(adapter)
+            if gaps:
+                raise ProviderUnavailable("项目执行引擎缺少能力：" + ", ".join(gaps))
+            if not role or routine_run_id is not None or role.model != thread.model:
+                raise ProviderUnavailable("员工的项目或模型已变更，请从原工单重新接续。")
+            if not project_runtime:
+                import sys
+                if sys.platform != "win32" or thread.provider != "codex":
+                    raise ProviderUnavailable("This task needs a current scoped Windows Codex session.")
             try:
                 async with self.session() as db:
                     if consult:
@@ -877,6 +938,18 @@ class ThreadRuntime:
                         feature_context = await feature_tasks.context_for(db, self.owner_id, agent, thread)
             except (ValueError, OSError) as exc:
                 raise ProviderUnavailable(str(exc)) from None
+        with app_settings.use(snapshot):
+            if project_runtime and thread.provider == "codex":
+                from app.services.codex_adapter import employee_codex_status
+                status = await employee_codex_status(project_runtime, profile.model_vendor)
+                if status.ready and deepseek_route:
+                    from app.services import steward_deepseek
+                    if selected_model not in steward_deepseek.employee_models(self.owner_id, agent.id):
+                        raise ProviderUnavailable("该员工的 DeepSeek 账号未列出所选模型，请核对密钥和模型。")
+            else:
+                status = deepseek_status() if deepseek_route else await self._provider_status(adapter, config)
+        if not status.ready:
+            raise ProviderUnavailable(status.error or f"{thread.provider} is not ready")
 
         draft_only = False
         if routine_run_id is not None:
@@ -910,7 +983,7 @@ class ThreadRuntime:
                     owner_instance=self.instance_id,
                     feature_event_key=feature_event_key, feature_resume_job=feature_resume_job,
                     direct_event_key=direct_event_key, direct_attachment_ids=attachment_ids, direct_skills=skills,
-                    attachments=[a.public() for a, _ in attached] or None,
+                    assignment_source=assignment_source, attachments=submitted_attachments or None,
                     origin=team_origin, internal=internal,
                     person_id=person_id,
                     person_label=person_label,
@@ -920,7 +993,9 @@ class ThreadRuntime:
         if role is not None:
             async with self.session() as db:
                 await store.append_turn_event(db, turn.id, turn.owner_token, "role.config",
-                                              {"model": managed.model if managed else role.model, "sha256": role.digest})
+                                              {"model": selected_model, "sha256": role.digest,
+                                               "engine_id": profile.engine_id, "model_vendor": profile.model_vendor,
+                                               "effort": profile.effort})
         if chosen_skills:
             async with self.session() as db:
                 await store.append_turn_event(
@@ -1021,7 +1096,10 @@ class ThreadRuntime:
             # engine (the agent changed engine since) uses that engine's default.
             model=selected_model,
             steward_deepseek=deepseek_route,
-            effort=(thread.provider_state or {}).get("effort") if isinstance(thread.provider_state, dict) else None,
+            model_vendor=profile.model_vendor,
+            project_runtime=project_runtime,
+            scheduled_knowledge=bool(weekly),
+            effort=profile.effort,
             provider_session_id=thread.provider_session_id,
             provider_state=thread.provider_state,
             resume=thread.session_state == "active",
@@ -1039,6 +1117,29 @@ class ThreadRuntime:
             engine_config=config,
             claude_account=agent.claude_account if agent is not None else None,
         )
+        if project_runtime:
+            async def bind_native_session(state):
+                from types import SimpleNamespace
+                from app.db.transactions import begin_write
+                from app.team.steward_review import current_native_job
+                async with self.session() as db:
+                    await begin_write(db)
+                    employee = await db.get(agent_store.Agent, agent.id, with_for_update=True)
+                    if (not employee or employee.archived_at or
+                            not await current_native_job(db, run, write=project_runtime.writable, lock=True)):
+                        return False
+                    # Model selection belongs to this turn; file grants and delegation remain live.
+                    worker = SimpleNamespace(id=employee.id, owner_id=employee.owner_id, team_id=employee.team_id,
+                        role_path=employee.role_path, team_workspaces_readable=employee.team_workspaces_readable,
+                        approval_mode=employee.approval_mode, provider=profile.engine_id,
+                        model_vendor=profile.model_vendor, effort=profile.effort)
+                    current = await feature_tasks.project_runtime_for(db, self.owner_id, worker, thread, ctx.approval_mode)
+                    if (not current or current.root != project_runtime.root or
+                            (project_runtime.writable and not current.writable) or
+                            not set(project_runtime.readable_roots).issubset(current.readable_roots)):
+                        return False
+                    return await feature_tasks.bind_native_session(db, self.owner_id, thread.id, turn.id, turn.owner_token, state)
+            ctx.bind_native_session = bind_native_session
         if strict_lead and thread.kind == "chat":
             from app.services.steward_reply import INSTRUCTIONS
             ctx.instructions = _with_brief(ctx.instructions, INSTRUCTIONS)
@@ -1093,10 +1194,11 @@ class ThreadRuntime:
             if team and team.id == agent.team_id and team.lead_agent_id != agent.id:
                 ctx.team = TurnTeam(team.id, agent.id, False, False, origin=team_origin,
                     configuration_allowed=False, strict_hierarchy=True, feature_consult=True,
-                    delegation_enabled=agent.delegation_enabled, feishu_tools=feishu.tools if feishu else ())
+                    delegation_enabled=agent.delegation_enabled and not weekly, feishu_tools=feishu.tools if feishu else (),
+                    scheduled_knowledge=bool(weekly and feishu and feishu.assignment.get("weekly")))
                 ctx.codex_prompt.instructions = _with_brief(ctx.codex_prompt.instructions,
                     "Use employee_capabilities to discover your currently granted tools and local text skills. "
-                    "When a bundled skill helps this assignment, select it with enable_local_skill and use its returned instructions.")
+                    "Use enable_local_skill to read the exact selected skill and follow its returned instructions.")
                 if feishu:
                     from app.team.feishu_assignment import required_tool
                     delivery = required_tool(feishu.assignment)
@@ -1119,19 +1221,20 @@ class ThreadRuntime:
                         ctx.codex_prompt.background["owner_feishu_request"] = str(original)
                     if "feishu_publish_knowledge" in feishu.tools:
                         ctx.codex_prompt.instructions = _with_brief(ctx.codex_prompt.instructions,
-                            "If this assignment asks to update the configured knowledge document, call "
-                            "feishu_publish_knowledge({}) directly, including when asked to find the original, "
-                            "compare what changed, or update it in place. The tool resolves the bound document, "
-                            "compares source fingerprints and returns its original URL even when current. "
-                            "Use that receipt in the report. An assignment to read only does not authorize publishing.")
+                            "For a knowledge document, inspect the destination and read the authorized source pages, "
+                            "following next_offset and next_text_offset. Read linked materials when relevant. "
+                            "Decide how to group the material and write your own draft, citing observed message IDs. "
+                            "Submit topics to feishu_publish_knowledge only when the requested outcome includes writing. "
+                            "Compare the returned remote verification to the owner's goal before reporting.")
                 if agent.delegation_enabled:
                     ctx.codex_prompt.instructions = _with_brief(ctx.codex_prompt.instructions,
                         "During a direct steward assignment, propose_direct_report requests a read-only subordinate for steward review. "
                         "For a bounded question, list_agents lists specialists assigned to this project. "
                         "Use ask_agent with mode=consult, a brief containing only the question and selected "
                         "evidence, and done_when stating the expected answer. Treat the reply as reference data. "
-                        "For an approved direct report listed with direct_report=true, delegate a bounded read-only "
-                        "subtask in the same project and provide done_when. Report the consolidated result to your assigning supervisor.")
+                        "For a direct report, delegate a bounded subtask in the same project with done_when. "
+                        "Delegated work is read-only unless permitted by the owner's supervisor and employee settings. "
+                        "Report the consolidated result to your assigning supervisor.")
         if not draft_only and not feature and agent is not None and agent.team_id is not None and app_settings.get("TEAM_ENABLED") and capabilities_of(adapter).mcp:
             from app.db.models import Team
             async with self.session() as db:
@@ -1144,6 +1247,11 @@ class ThreadRuntime:
                 from app.team import prompt as team_prompt
                 async with self.session() as db:
                     policy, listing = await team_prompt.parts(db, team=team, agent=agent, owner_id=self.owner_id)
+                    if ctx.team.is_lead and thread.kind == "chat" and not internal and person_is_owner:
+                        from app.services.assignment_context import steward_context
+                        routing = await steward_context(db, self.owner_id, turn)
+                        if routing:
+                            listing += "\nOwner's project task references: " + routing
                 if ctx.team.strict_hierarchy and ctx.team.is_lead:
                     policy += (" For employee work use delegate with mode=work, an explicit stable project, "
                         "task_title, done_when, priority and deliverables. Use task_id to continue an existing "
@@ -1502,7 +1610,8 @@ class ThreadRuntime:
                     run.ctx.composio_launch, run.ctx.composio_apps = composio_bridge.launch, composio_apps
                     run.ctx.composio_exact_tools = list(run.routine_grants) if run.routine_grants is not None else None
                     composio_bridge.start()
-                community_snapshot = None if run.ctx.feature_workspace else await CommunityMcpBridge.for_turn(self, run, adapter)
+                community_snapshot = (None if run.ctx.feature_workspace and not run.ctx.project_runtime else
+                                      await CommunityMcpBridge.for_turn(self, run, adapter))
                 if community_snapshot:
                     community_bridge = CommunityMcpBridge(self, run, community_snapshot)
                     run.ctx.community_launch = community_bridge.launch
@@ -1521,6 +1630,12 @@ class ThreadRuntime:
                 run.touch()  # the engine's silence is counted from here
                 outcome = await self._run_adapter(run, adapter)
                 outcome = await self._after_limit(run, adapter, outcome)
+                if run.ctx.project_runtime and not run.recorder.lost:
+                    await run.recorder.emit("model.receipt", {
+                        "engine_id": run.engine_id, "model_vendor": run.ctx.model_vendor,
+                        "requested_model": run.ctx.model, "effort": run.ctx.effort,
+                        "confirmed_model": outcome.model, "source": "engine" if outcome.model else "no_engine_echo",
+                    })
             except _EngineWithoutComputers:
                 outcome = TurnOutcome(
                     "failed",
@@ -1794,6 +1909,12 @@ class ThreadRuntime:
             await asyncio.sleep(settings.THREAD_HEARTBEAT_SECONDS)
             try:
                 async with self.session() as db:
+                    if run.ctx.feature_workspace:
+                        from app.services.feature_tasks import turn_assignment_current
+                        if not await turn_assignment_current(db, run.thread_id, run.turn_id):
+                            run.stop_requested = True
+                            run.ctx.abort()
+                            return
                     owned = await store.heartbeat(db, run.turn_id, run.owner_token)
             except Exception:  # noqa: BLE001
                 logger.exception("heartbeat failed", turn_id=run.turn_id)
@@ -1853,6 +1974,7 @@ class ThreadRuntime:
     async def answer_approval(
         self, approval_id: str, decision: str, *, remember: bool = False, expected_turn_id: int | None = None,
         person_id: int | None = None, person_label: str | None = None,
+        expected_assignment_epoch: int | None = None, expected_employee_id: int | None = None,
     ) -> bool:
         """The person's answer (`allow` or `deny`). True if it was recorded; False
         means it changed nothing (already answered, cancelled, or its turn is no
@@ -1863,7 +1985,9 @@ class ThreadRuntime:
         if decision not in (ALLOW, DENY):
             raise ValueError("decision must be 'allow' or 'deny'")
         status = "allowed" if decision == ALLOW else "denied"
-        lease = {}
+        lease, scoped_reply = {}, expected_assignment_epoch is not None or expected_employee_id is not None
+        if scoped_reply and (not expected_turn_id or not expected_assignment_epoch or not expected_employee_id):
+            return False
         if expected_turn_id is not None:
             run = self._runs.get(expected_turn_id)
             if not run or run.stop_requested or run.ctx.aborted or not run.ctx.feature_workspace or run.ctx.approval_mode == "plan":
@@ -1871,6 +1995,31 @@ class ThreadRuntime:
             lease = {"expected_turn_id": expected_turn_id, "owner_token":run.owner_token,
                      "fresh_after": datetime.now(UTC) - timedelta(seconds=settings.THREAD_LEASE_SECONDS)}
         async with self.session() as db:
+            from app.db.transactions import begin_write
+            await begin_write(db)
+            approval = await store.get_approval(db, approval_id)
+            run = self._runs.get(approval.turn_id) if approval else None
+            project = getattr(getattr(run, "ctx", None), "project_runtime", None)
+            if approval and not project:
+                target_thread = await store.get_thread(db, approval.thread_id)
+                if target_thread and (target_thread.provider_state or {}).get("employee_project"):
+                    return False
+            if scoped_reply and (not project or expected_turn_id != run.turn_id or
+                                 (expected_assignment_epoch, expected_employee_id) != (project.assignment_epoch, project.employee_id)):
+                return False
+            if project:
+                from app.feishu.approvals import describe
+                from app.team.steward_review import current_native_job
+                if (expected_turn_id is not None and not scoped_reply or run.stop_requested or not run.gate
+                        or run.gate._deadlines.get(approval_id, 0) <= asyncio.get_running_loop().time()
+                        or not await current_native_job(db, run, write=decision == ALLOW, lock=True)):
+                    return False
+                if scoped_reply and not describe({"tool":approval.tool, "input":approval.input}, native=True):
+                    return False
+                remember = False
+                lease = {"expected_turn_id":run.turn_id, "expected_tool":approval.tool, "owner_token":run.owner_token,
+                         "fresh_after":datetime.now(UTC) - timedelta(seconds=settings.THREAD_LEASE_SECONDS),
+                         "by":{"by":"person", "assignment_epoch":project.assignment_epoch, "employee_id":project.employee_id}}
             won = await store.decide_approval(
                 db, approval_id, status, person_id=person_id, person_label=person_label, **lease)
             approval = await store.get_approval(db, approval_id)

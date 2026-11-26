@@ -60,6 +60,7 @@ class EngineResponse(BaseModel):
     # Any model id is accepted, not only those in `models`.
     custom_models: bool
     capabilities: EngineCapabilities
+    project_capability_gaps: list[str] = Field(default_factory=list)
     # The engine needs a saved configuration (PUT /engines/{id}/config).
     configurable: bool = False
     # The engine has a quick text call, so it can be the helper model (docs/MEMORY.md).

@@ -198,6 +198,10 @@ def receive(db, identity, event):
         if change.rowcount:
             db.execute('insert into delivery_timing(app,event,received) values(?,?,?)',
                        (header['app_id'],header['event_id'],time.time()))
+            if message["chat_type"]=="p2p" and not identity.get("enquiry_role"):
+                db.execute("insert into owner_dm_sources values(?,?,?,?,?,?)",
+                           (header["app_id"],header["event_id"],message["message_id"],identity["open_id"],
+                            identity["tenant_key"],message.get("chat_id") or None))
             if message['chat_type']=='p2p' and not identity.get('enquiry_role') and message.get('message_type')=='text':
                 from . import document_access, documents, history, voice
                 try:

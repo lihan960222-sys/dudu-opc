@@ -11,6 +11,65 @@ from app.services import agent_store,feature_tasks,role_workspace,thread_store
 from tests.services.thread_harness import sessions,owner
 
 
+def test_reply_to_earlier_outgoing_carries_scoped_event_and_exact_owner_text(tmp_path):
+    import json
+    from contextlib import closing
+    from types import SimpleNamespace
+    from app.feishu import direct_requests, submissions
+    from app.feishu.routing import journal
+    from app.feishu.worker import Worker
+    with closing(journal(tmp_path/"journal")) as db:
+        cfg = {"steward": {"app_id": "app"}, "roles": {}}
+        worker = Worker(cfg, SimpleNamespace(db=db))
+        try:
+            for e, target in (("older","chat"),("newer","chat"),("outside","other-chat")):
+                msg = {"message_id":e,"chat_type":"p2p","chat_id":target,"message_type":"text",
+                       "content":json.dumps({"text":"original"})}
+                db.execute("insert into inbox(app,event,message,payload) values('app',?,?,?)",(e,e,json.dumps(msg)))
+                db.execute("insert into direct_turns values('app',?,1,1)",(e,))
+                db.execute("insert into outbox(id,role,body,state,remote) values(?,'steward','{}','sent',?)",
+                           ("out-"+e,"remote-"+e))
+                db.execute("insert into direct_finals values('app',?,?)",(e,"out-"+e))
+            msg = {"message_id":"correction","parent_id":"remote-older","chat_type":"p2p","chat_id":"chat",
+                   "message_type":"text","content":json.dumps({"text":"交给二狗。原有结果请先核对。"})}
+            db.execute("insert into inbox(app,event,message,payload) values('app','follow','correction',?)",(json.dumps(msg),))
+            row = db.execute("select * from inbox where event='follow'").fetchone()
+            direct_requests.prepare(worker,row,1,{"prompt_text":"管家路由提示","attachment_ids":[]})
+            body = json.loads(db.execute("select body from direct_requests where event='follow'").fetchone()[0])
+            assert body["owner_text"] == "交给二狗。原有结果请先核对。"
+            assert body["reference_event_key"] == submissions.event_key({"app":"app","event":"older"})
+            assert not direct_requests.source_reference(db,"app",{**msg,"parent_id":"remote-outside"})
+        finally:
+            worker.api.close()
+
+
+def test_chatless_reference_requires_both_authenticated_owner_messages(tmp_path):
+    import json
+    from contextlib import closing
+    from types import SimpleNamespace
+    from app.feishu import direct_requests, ingress
+    from app.feishu.routing import journal
+    from app.feishu.worker import Worker
+    with closing(journal(tmp_path/"dm")) as db:
+        Worker({"steward":{"app_id":"app"}},SimpleNamespace(db=db)).api.close()
+        def receive(message, parent=None, owner_id="owner", tenant="tenant"):
+            identity = {"app_id":"app","tenant_key":tenant,"open_id":owner_id}
+            msg = {"message_id":message,"chat_type":"p2p","message_type":"text","content":json.dumps({"text":"a"}),"parent_id":parent}
+            assert ingress.receive(db,identity,{"header":{"app_id":"app","tenant_key":tenant,"event_id":message},
+                "event":{"sender":{"sender_type":"user","sender_id":{"open_id":owner_id}},"message":msg}})
+            return msg
+        receive("source")
+        db.execute("update inbox set task=7 where event='source'")
+        same = receive("same","source")
+        assert direct_requests.source_reference(db,"app",same)["reference_task_id"] == 7
+        assert not direct_requests.source_reference(db,"app",receive("other-owner","source","another"))
+        assert not direct_requests.source_reference(db,"app",receive("other-tenant","source",tenant="elsewhere"))
+        assert not direct_requests.source_reference(db,"app",{**same,"message_id":"never-authenticated"})
+        db.execute("insert into inbox(app,event,message,payload,task) values('app','legacy','legacy',?,7)",
+                   (json.dumps({**same,"message_id":"legacy"}),))
+        assert not direct_requests.source_reference(db,"app",{**same,"parent_id":"legacy"})
+
+
 @pytest.mark.asyncio
 async def test_switch_once_and_keep_old_conversation_and_tasks(tmp_path,sessions,owner,monkeypatch):
     monkeypatch.setattr(session,'AsyncSessionLocal',sessions)

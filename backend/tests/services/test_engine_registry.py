@@ -20,6 +20,26 @@ from app.services.engine_registry import (
 from app.services.provider_adapter import Capabilities, EngineProbe, ModelOption, ProviderStatus
 
 
+def test_worker_profile_resolves_explicit_and_legacy_vendor():
+    profile = engine_registry.resolve_model_profile("codex", "deepseek", "deepseek-flash", "high")
+    assert (profile.engine_id, profile.model_vendor, profile.model_id, profile.effort) == (
+        "codex", "deepseek", "deepseek-flash", "high")
+    assert engine_registry.resolve_model_profile("codex", None, "gpt-5.4").model_vendor == "openai"
+    assert engine_registry.resolve_model_profile("openai_compat", None, "custom").model_vendor is None
+    for vendor, model, effort in [("openai", "deepseek-flash", None), ("deepseek", "gpt-5.4", None),
+                                 ("deepseek", "deepseek-flash", "ultra")]:
+        with pytest.raises(InvalidModel):
+            engine_registry.resolve_model_profile("codex", vendor, model, effort)
+
+
+def test_project_capabilities_require_a_confined_engine_and_tool_callbacks():
+    from types import SimpleNamespace
+    full = SimpleNamespace(capabilities=Capabilities(tools=True, resume=True, approvals=True, mcp=True,
+                                                     project_workspace=True))
+    assert engine_registry.project_capability_gaps(full) == []
+    assert "project_workspace" in engine_registry.project_capability_gaps(ClaudeAdapter())
+    assert {"tools", "approvals", "mcp", "project_workspace"} <= set(engine_registry.project_capability_gaps(Minimal()))
+
 class Runtime:
     def __init__(self, adapters):
         self.adapters = adapters

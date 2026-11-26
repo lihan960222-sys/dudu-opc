@@ -14,6 +14,93 @@ from tests.services.thread_harness import sessions, owner, cleanup, wait_until  
 from tests.team.test_collaboration import Engine
 
 
+async def test_reassign_fences_late_receipt(sessions, owner, tmp_path):
+    from app.db.models import Approval, FeatureScope, WorkItem
+    from app.services import feature_tasks
+    # This case creates durable feature records that outlive the chat teardown
+    # used by the general collaboration harness.
+    owner += "-feature"
+    async with sessions() as db:
+        import hashlib
+        lead = await agent_store.create_agent(db, owner_id=owner, name="Lead", make_lead=True)
+        old = await agent_store.create_agent(db, owner_id=owner, name="First", provider="codex")
+        new = await agent_store.create_agent(db, owner_id=owner, name="Second", provider="codex")
+        for employee in (old,new):
+            await service.change_member(db, owner, employee.id)
+        old.role_path, new.role_path = str(tmp_path/"first"), str(tmp_path/"second")
+        new.team_workspaces_readable = True
+        await db.commit()
+        intake = await feature_tasks.route(db, owner_id=owner, agent_id=old.id, project="P",
+            title="Review import", text="Repair import and run tests", event_key="original")
+        task_id = intake["task_id"]
+        first, _ = await feature_tasks.session_for(db, owner, task_id, model="m", workspace_path=str(tmp_path))
+        job_id = await feature_tasks.dispatch(db, owner_id=owner, steward_id=lead.id, task_id=task_id,
+            event_key="original", thread_id=first.id)
+        turn = await thread_store.start_turn(db, first.id, "repair", feature_event_key="original")
+        (tmp_path/"first"/"任务"/str(task_id)).mkdir(parents=True)
+        output = tmp_path/"first"/"result.md"
+        output.write_bytes(b"original")
+        digest = hashlib.sha256(b"original").hexdigest()
+        await thread_store._add_event(db,first.id,"tool.completed",{"file_receipts":[{"operation":"fileChange",
+            "scope":"role","root":str(tmp_path/"first"),"path":"result.md","sha256":digest}]},turn.id)
+        await db.commit()
+        ask = await thread_store.create_approval(db, thread_id=first.id, turn_id=turn.id,
+            request_id="write", tool="feature_files.write_text", input={"path":"result","text":"old"})
+        first_id, turn_id, token, ask_id, next_id = first.id, turn.id, turn.owner_token, ask.id, new.id
+        subcard = await feature_tasks.route(db, owner_id=owner, agent_id=new.id, project="P",
+            title="Verify old result", text="Read back the old pass", event_key="subtask")
+        subthread, _ = await feature_tasks.session_for(db,owner,subcard["task_id"],model="m",workspace_path=str(tmp_path))
+        subjob_id = await feature_tasks.dispatch(db,owner_id=owner,steward_id=lead.id,task_id=subcard["task_id"],
+                                                event_key="subtask",thread_id=subthread.id)
+        subjob = await db.get(AgentJob,subjob_id)
+        subjob.parent_id, subjob.depth = job_id, 2
+        await db.commit()
+        subturn = await thread_store.start_turn(db,subthread.id,"verify",feature_event_key="subtask")
+        subthread_id, subturn_id, subtoken = subthread.id, subturn.id, subturn.owner_token
+        before = await feature_tasks.reassign(db, task_id, 1, new.id, "correction", owner_id=owner)
+        assert before["task_id"] == task_id and before["assignment_epoch"] == 2
+        await db.commit()
+        assert await feature_tasks.reassign(db, task_id, 1, new.id, "correction", owner_id=owner) == before
+        with pytest.raises(ValueError):
+            await feature_tasks.reassign(db, task_id, 1, old.id, "different-correction", owner_id=owner)
+    async with sessions() as db:
+        assert not await thread_store.decide_approval(db, ask_id, "allowed")
+        with pytest.raises(thread_store.TurnNotRunning):
+            await thread_store.create_approval(db,thread_id=subthread_id,turn_id=subturn_id,request_id="late",
+                                               tool="feature_files.write_text",input={"path":"late","text":"old"})
+        await thread_store.finish_turn(db,subturn_id,subtoken,status="cancelled")
+        await thread_store.finish_turn(db, turn_id, token, status="succeeded", result="private old content")
+        from types import SimpleNamespace
+        from app.db.models import AgentJobEvent
+        from app.team.jobs import Jobs
+        await Jobs(SimpleNamespace(session=sessions,owner_id=owner)).on_turn_end(turn_id)
+        late = select(func.count()).select_from(AgentJobEvent).where(AgentJobEvent.job_id==job_id,
+                                                                    AgentJobEvent.kind=="late_receipt")
+        assert await db.scalar(late) == 1
+        assert not await feature_tasks.report(db,owner,"original",first_id,turn_id)
+        await db.commit()
+        assert await db.scalar(late) == 1
+    async with sessions() as db:
+        card = await db.get(WorkItem, task_id)
+        old_job = await db.get(AgentJob, job_id)
+        assert card.agent_id == next_id and (await db.get(FeatureScope, task_id)).assignment_epoch == 2
+        assert old_job.assignment_epoch == 1 and old_job.status == "cancelled"
+        assert (await db.get(Approval, ask_id)).status == "cancelled"
+        assert not await db.scalar(select(AgentJobInbox.id).where(AgentJobInbox.job_id==old_job.id))
+        successor, _ = await feature_tasks.session_for(db, owner, task_id, model="m", workspace_path=str(tmp_path))
+        assert successor.id != first_id and successor.agent_id == next_id
+        from types import SimpleNamespace
+        from app.services.assignment_context import handoff_progress
+        assigned = SimpleNamespace(owner_id=owner, task_id=task_id, assignment_epoch=2, assignee_agent_id=next_id)
+        progress = await handoff_progress(db,assigned)
+        assert progress["file_receipts"] == 1
+        assert progress["accessible_files"][0]["status"] == "verified"
+        output.write_bytes(b"manual change")
+        assert (await handoff_progress(db,assigned))["accessible_files"][0]["status"] == "changed"
+        assert output.read_bytes() == b"manual change"
+
+
+
 class FakeEngine(Engine):
     nested = None  # set by a test: records what a blocking job's own delegate call returns
 
@@ -455,25 +542,29 @@ async def test_owner_clarifies_external_delivery_only_in_steward_chat(team, sess
 
 @pytest.mark.parametrize("case",["complete","no_scope","blocked_after_write","engine_failed_after_write","readback_failed","deleted"])
 async def test_steward_receives_verified_document_or_actual_scope_error(team,sessions,case):
-    from app.team.jobs import event
+    from types import SimpleNamespace
+    from app.team.feishu_tools_bridge import record, record_delivery
     rt,engine,boss,worker,_=team
     thread=await rt.create_thread(agent_id=boss.id)
     tool="feishu_delete_document" if case=="deleted" else "feishu_publish_knowledge"
     repair="缺少 docx:document:readonly，请重新授权文档读写。"
     async def employee_runs(ctx):
-        # Test driver records the same events as the real employee bridge.
-        async with sessions() as db:
-            job=await db.scalar(select(AgentJob).where(AgentJob.assignee_thread_id==ctx.thread_id,
-                                                       AgentJob.kind=="job"))
-            event(db,job,"feishu_assignment",{"action":"delete_document" if case=="deleted" else "restructure"})
-            if case!="no_scope":
-                receipt={"deleted":True} if case=="deleted" else {"url":"https://example.test/docx/a"}
-                event(db,job,"feishu_delivered",{"tool":tool,"result":receipt})
-                if case=="readback_failed":
-                    event(db,job,"feishu_tool_failed",{"tool":"feishu_read_document","detail":repair})
-            else:
-                event(db,job,"feishu_tool_failed",{"tool":tool,"detail":repair})
-            await db.commit()
+        # The stubbed provider reports through the same transactional journal as the real bridge.
+        async def assigned():
+            async with sessions() as db:
+                return await db.scalar(select(AgentJob.id).where(AgentJob.assignee_thread_id==ctx.thread_id,
+                    AgentJob.assignee_turn_id==ctx.turn_id, AgentJob.kind=="job"))
+        job_id = await wait_until(assigned)
+        run = SimpleNamespace(agent_id=worker.id,turn_id=ctx.turn_id)
+        action = "delete_document" if case=="deleted" else "restructure"
+        await record(rt,job_id,run,tool,"feishu_assignment",action=action)
+        if case!="no_scope":
+            receipt={"deleted":True} if case=="deleted" else {"url":"https://example.test/docx/a"}
+            await record_delivery(rt,job_id,run,tool,tool,action,f"job-{job_id}",receipt)
+            if case=="readback_failed":
+                await record(rt,job_id,run,"feishu_read_document","feishu_tool_failed",detail=repair)
+        else:
+            await record(rt,job_id,run,tool,"feishu_tool_failed",detail=repair)
         if case=="engine_failed_after_write":
             return TurnOutcome("failed",error="engine failed",error_code="provider_error")
         return TurnOutcome("succeeded",result="BLOCKED: 尚未核对来源。" if case=="blocked_after_write" else "员工交付说明。")

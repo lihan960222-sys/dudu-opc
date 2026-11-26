@@ -1,4 +1,6 @@
-"""The Windows home steward's DeepSeek key. Used by both the gateway and Codex adapter."""
+"""Windows service credentials for the steward and separately provisioned employees."""
+import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -39,6 +41,11 @@ def verify_and_save(key: str) -> None:
     if path is None:
         raise ValueError("请先在 Windows 家庭主机设置独立的飞书配置目录。")
     key = key.strip() if isinstance(key, str) else ""
+    _verify_models(key)
+    _save_protected(path, key.encode("utf-8"))
+
+
+def _verify_models(key: str) -> list[str]:
     if not (1 <= len(key) <= 512 and key.isascii() and key.isprintable() and " " not in key):
         raise ValueError("请输入有效的 DeepSeek API Key。")
     try:
@@ -52,11 +59,47 @@ def verify_and_save(key: str) -> None:
                 isinstance(model, dict) and model.get("id") in MODELS for model in available
             ):
                 raise ValueError
+            return sorted({item["id"] for item in available if isinstance(item, dict) and item.get("id") in MODELS})
     except PermissionError:
         raise ValueError("DeepSeek 拒绝了这把密钥，请核对后重试。") from None
     except (httpx.HTTPError, ValueError, KeyError, TypeError):
         raise ValueError("未能向 DeepSeek 核实模型列表，请检查主机网络和密钥权限。") from None
+
+
+def _save_protected(path: Path, payload: bytes) -> None:
     try:
-        write_atomic(path, dpapi(key.encode("utf-8"), unlock=False))
+        write_atomic(path, dpapi(payload, unlock=False))
     except (ValueError, OSError):
         raise ValueError("Windows 未能保存加密的密钥，请检查家庭主机配置目录。") from None
+
+
+def _employee_file(owner_id: str, employee_id: int) -> Path:
+    from app.core.config import settings
+    owner = hashlib.sha256(owner_id.encode("utf-8")).hexdigest()
+    return settings.SQLITE_FILE.parent / "employee-credentials" / owner / f"{int(employee_id)}.dpapi"
+
+
+def _employee_record(owner_id: str, employee_id: int) -> dict:
+    path = _employee_file(owner_id, employee_id)
+    try:
+        record = json.loads(dpapi(path.read_bytes(), unlock=True))
+        if isinstance(record, dict) and record.get("owner") == owner_id and record.get("employee") == employee_id:
+            return record
+    except (ValueError, TypeError, OSError):
+        pass
+    return {}
+
+
+def employee_api_key(owner_id: str, employee_id: int) -> str:
+    return _employee_record(owner_id, employee_id).get("key", "")
+
+
+def employee_models(owner_id: str, employee_id: int) -> list[str]:
+    return _employee_record(owner_id, employee_id).get("models", [])
+
+
+def save_employee_key(owner_id: str, employee_id: int, key: str) -> None:
+    key = key.strip()
+    models = _verify_models(key)
+    record = {"owner": owner_id, "employee": employee_id, "key": key, "models": models}
+    _save_protected(_employee_file(owner_id, employee_id), json.dumps(record).encode("utf-8"))

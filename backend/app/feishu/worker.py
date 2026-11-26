@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import re
+import sqlite3
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -66,14 +67,9 @@ class Worker:
                             (state,task,row['app'],row['event']))
 
     def reference(self, message):
-        for field in ('parent_id','root_id'):
-            key = message.get(field)
-            if key:
-                hit = self.db.execute("""select task from inbox where message=? and task is not null
-                    union select task from outbox where remote=? and task is not null""",(key,key)).fetchone()
-                if hit:
-                    return hit[0]
-        return None
+        app = self.cfg['steward']['app_id']
+        ref = direct_requests.source_reference(self.db,app,message)
+        return ref.get("reference_task_id")
 
     async def process(self,row):
         from app.db.session import AsyncSessionLocal
@@ -162,6 +158,12 @@ class Worker:
                 return
         if await history.answer(self,row,msg,text):
             return
+        if tracking and self.cfg.get("steward_thread"):
+            from .lead_chat import assignment_status
+            status = await assignment_status(self, row, msg)
+            if status:
+                self.direct_final(row, "done", status)
+                return
         from . import knowledge_intent
         if not command(text)[0] and await knowledge_intent.handle(self,row,msg,text):
             return
@@ -195,6 +197,13 @@ class Worker:
                 prompt = '\n'.join(p['text'] for p in items if 'text' in p) or '补充附件'
         named = next((name for name in sorted(self.cfg['roles'],key=len,reverse=True)
                       if re.match(r'^(?:请)?(?:让|叫|交给|派给)\s*'+re.escape(name),text.strip())),None)
+        # Corrections on either old or native messages go through the same
+        # authenticated owner turn, including its original event reference.
+        if self.cfg.get("steward_thread") and direct_requests.source_reference(self.db,row["app"],msg):
+            handover = re.search(r"(?:^|[。！,，\s])(?:交给|转给|转交给|改派给|换成|请让|让|叫|派给)", text)
+            if handover or not ref or not intent:
+                await self.route_direct(row, msg, text)
+                return
         if named and not intent:
             binding = self.db.execute('select role from bindings where task=?',(ref,)).fetchone() if ref else None
             if not binding or binding['role'] != named:
@@ -347,8 +356,15 @@ class Worker:
             approvals.notify(self,execution,row['task'])
             return
         async with AsyncSessionLocal() as session:
-            await feature_tasks.report(session, self.cfg['owner_id'], key, execution['thread'], execution['turn'])
+            current = await feature_tasks.report(session, self.cfg['owner_id'], key, execution['thread'], execution['turn'])
+            from app.db.models import FeatureMessage
+            binding = await session.get(FeatureMessage,(self.cfg['owner_id'],key))
+            dispatch_id = binding.result["job_id"] if binding else None
             await session.commit()
+        if current is False:
+            with self.db:
+                self.db.execute("update inbox set state='superseded' where app=? and event=?", (row['app'],row['event']))
+            return
         task = row['task']
         role = self.db.execute('select role from bindings where task=?',(task,)).fetchone()[0]
         summary, public, named = parse_report(turn.get('result') or turn['status'])
@@ -372,16 +388,46 @@ class Worker:
                 except (OSError,ValueError):
                     issues.append('有一项产物未通过路径、大小或文件状态核对。')
         with self.db:
-            enqueue(self.db,task,role,{'text':f"任务 #{task} 本轮状态：{turn['status']}。已登记 {len(artifacts)} 个公开产物。{public}"})
+            from .routing import bind_outgoing
+            packets = [enqueue(self.db,task,role,{'text':f"任务 #{task} 本轮状态：{turn['status']}。已登记 {len(artifacts)} 个公开产物。{public}"})]
             final = enqueue(self.db,task,'steward',{'text':f"任务 #{task}：{summary}{''.join(issues)}"})
+            packets.append(final)
             self.bind_final(row,final)
             timing.finished(self.db,row,turn)
             for artifact in artifacts:
                 for audience in (role,'steward'):
-                    enqueue(self.db,task,audience,artifact)
+                    packets.append(enqueue(self.db,task,audience,artifact))
+            if dispatch_id:
+                for packet in packets:
+                    bind_outgoing(self.db,packet,[dispatch_id])
             self.db.execute("update inbox set state='done' where app=? and event=?",(row['app'],row['event']))
 
-    def flush(self, *, cleanup=True, history_id=None):
+    async def flush_assignment_reports(self):
+        from app.db.models import AgentJob
+        from app.db.session import AsyncSessionLocal
+        from app.db.transactions import begin_write
+        from app.services.feature_tasks import assignment_current
+        rows = self.db.execute("""select distinct a.outgoing from assignment_outbox a join outbox o on o.id=a.outgoing
+            left join retry r on r.id=o.id where o.state='pending' and coalesce(r.after,0)<=unixepoch()""").fetchall()
+        for (outgoing,) in rows:
+            async with AsyncSessionLocal() as db:
+                # Hold the assignment lock through the send. The channel records
+                # 'verify' before calling Feishu and can recover an unknown outcome.
+                await begin_write(db)
+                valid = True
+                for (job_id,) in self.db.execute("select job from assignment_outbox where outgoing=? order by job",(outgoing,)):
+                    job = await db.get(AgentJob, job_id, with_for_update=True)
+                    if not job or job.owner_id != self.cfg.get("owner_id") or not await assignment_current(db,job,lock=True):
+                        valid = False
+                        break
+                if valid:
+                    self.flush(cleanup=False, assignment_id=outgoing)
+                else:
+                    with self.db:
+                        self.db.execute("update outbox set state='superseded' where id=? and state='pending'",(outgoing,))
+                await db.commit()
+
+    def flush(self, *, cleanup=True, history_id=None, assignment_id=None):
         with self.db:
             self.db.execute("""update outbox set state='superseded' where state='pending' and id in
                 (select n.outgoing from direct_notices n join direct_finals f using(app,event))""")
@@ -390,7 +436,8 @@ class Worker:
             (o.role='steward' or o.is_root=1 or exists(select 1 from enquiry_replies q where q.outgoing=o.id) or exists
             (select 1 from outbox root where root.is_root=1 and root.role=o.role and root.task=o.task and root.state='sent'))
             and ((? is null and not exists(select 1 from history_reply_policy h where h.outgoing=o.id)) or o.id=?)
-            order by o.rowid""",(history_id,history_id)).fetchall():
+            and ((? is null and not exists(select 1 from assignment_outbox a where a.outgoing=o.id)) or o.id=?)
+            order by o.rowid""",(history_id,history_id,assignment_id,assignment_id)).fetchall():
             with self.db:
                 self.db.execute("update outbox set state='verify' where id=?",(row['id'],))
             try:
@@ -567,6 +614,13 @@ class Worker:
             pass  # Pending receipts are retried on the next poll.
         resume_jobs(self)
         await deliver_ready(self)
+        from . import weekly_knowledge
+        try:
+            await weekly_knowledge.tick(self)
+        except (SQLAlchemyError, OSError, sqlite3.Error, ValueError) as exc:
+            import logging
+            logging.getLogger(__name__).warning("Weekly knowledge check unavailable (%s)", type(exc).__name__)
+        await self.flush_assignment_reports()
         self.flush()
         suggestions.poll(self)
         await team_progress.poll(self)

@@ -53,6 +53,7 @@ class AgentJob(Base):
     origin_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     origin_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
     task_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    assignment_epoch: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     project: Mapped[str | None] = mapped_column(String, nullable=True)
     requester_agent_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     requester_thread_id: Mapped[int] = mapped_column(BigInteger, nullable=False)

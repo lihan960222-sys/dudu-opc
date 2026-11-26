@@ -39,7 +39,8 @@ import uuid
 sys.stdin.reconfigure(encoding="utf-8")
 base = pathlib.Path(os.environ["FAKE_CODEX_DIR"])
 plan = json.loads((base / "plan.json").read_text())
-threads_dir = base / "threads"
+threads_dir = (pathlib.Path(os.environ["CODEX_HOME"]) / "fixture-threads"
+               if plan.get("private_history") else base / "threads")
 threads_dir.mkdir(exist_ok=True)
 
 
@@ -234,7 +235,15 @@ def thread_result(thread_id, params):
     sandbox = {"read-only": "readOnly", "workspace-write": "workspaceWrite", "danger-full-access": "dangerFullAccess"}.get(params.get("sandbox"), "readOnly")
     if plan.get("policy_mismatch"):
         policy, sandbox = "never", "dangerFullAccess"
-    return {"thread": {"id": thread_id,"status":{"type":plan.get("native_status","idle")}}, "modelProvider": params.get("modelProvider", "openai"), "model": params.get("model") or "gpt-fake", "approvalPolicy": policy, "sandbox": {"type": sandbox}}
+    result = {"thread": {"id": thread_id,"status":{"type":plan.get("native_status","idle")}}, "modelProvider": params.get("modelProvider", "openai"), "model": params.get("model") or "gpt-fake", "approvalPolicy": policy, "sandbox": {"type": sandbox}}
+    if plan.get("private_history"):
+        result["activePermissionProfile"] = {"id": params.get("permissions")}
+        result.update(cwd=params["cwd"], runtimeWorkspaceRoots=params.get("runtimeWorkspaceRoots", []),
+                      instructionSources=[str(pathlib.Path(params["cwd"]) / "AGENTS.md")])
+        result["thread"].update(path=str(threads_dir / thread_id), cwd=params["cwd"], ephemeral=False)
+        if "environments" in params:
+            result["thread"]["environments"] = params["environments"]
+    return result
 
 
 for line in sys.stdin:
@@ -254,6 +263,8 @@ for line in sys.stdin:
         send({"id": rid, "result": {"userAgent": "fake"}})
     elif method == "initialized":
         pass
+    elif method == "account/read":
+        send({"id": rid, "result": {"account": {"type": "chatgpt", "email": "fixture@example.invalid"}}})
     elif method == "model/list":
         send({"id": rid, "result": {"data": [
             {"id": "gpt-fake", "displayName": "GPT Fake", "hidden": False, "isDefault": True, "defaultReasoningEffort": "medium", "supportedReasoningEfforts": ["low", "medium", "high"]},
@@ -262,16 +273,36 @@ for line in sys.stdin:
         ]}})
     elif method == "config/read":
         send({"id": rid, "result": {"config": {"mcp_servers": plan.get("user_mcp", {})}, "origins": {}}})
+    elif method == "skills/list":
+        send({"id": rid, "result": {"data": [{"cwd": params["cwds"][0], "skills": [], "errors": []}]}})
+    elif method == "mcpServerStatus/list":
+        configured = thread_configs[params["threadId"]].get("mcp_servers", {})
+        rows = [{"name": name, "tools": {tool: {"name": tool} for tool in server["enabled_tools"]}}
+                for name, server in configured.items() if server.get("enabled") is True]
+        send({"id": rid, "result": {"data": rows, "nextCursor": None}})
     elif method == "thread/start":
         thread_id = str(uuid.uuid4())
         thread_configs[thread_id] = params.get("config") or {}
-        (threads_dir / thread_id).write_text("x")
+        record = {"cwd":params.get("cwd", os.getcwd()), "modelProvider":params.get("modelProvider","openai")}
+        (threads_dir / thread_id).write_text(json.dumps(record) if plan.get("private_history") else "x")
         send({"id": rid, "result": thread_result(thread_id, params)})
+    elif method == "thread/read" and plan.get("private_history"):
+        thread_id = params["threadId"]
+        path = threads_dir / thread_id
+        if path.is_file():
+            record = json.loads(path.read_text())
+            send({"id":rid, "result":{"thread":{"id":thread_id, "ephemeral":False, "path":str(path),
+                "cwd":plan.get("stored_cwd",record["cwd"]),"modelProvider":record["modelProvider"]}}})
+        else:
+            send({"id":rid,"error":{"code":-32600,"message":f"no rollout found for thread id {thread_id}"}})
     elif method == "thread/resume":
         thread_id = params.get("threadId")
         thread_configs[thread_id] = params.get("config") or {}
+        thread_configs[thread_id] = params.get("config") or {}
         if plan.get("active_writer"):
             send({"id":rid,"error":{"code":-32600,"message":f"thread {thread_id} already has an active writer"}})
+        elif plan.get("resume_error"):
+            send({"id":rid,"error":{"code":-32600,"message":plan["resume_error"]}})
         elif not (threads_dir / str(thread_id)).exists():
             send({"id": rid, "error": {"code": -32600, "message": f"no rollout found for thread id {thread_id}"}})
         else:

@@ -8,6 +8,16 @@ export type EngineChoice = {
 
 export const PREFERRED_ENGINE_STORAGE_KEY = "suparagent_preferred_engine";
 
+export function employeeModelProfile(provider: string, vendor: string | null, model: string | null, effort: string | null) {
+  const singleVendor: Record<string, string> = {claude: "anthropic", gemini: "google", antigravity: "google"};
+  let inferred = singleVendor[provider] ?? null;
+  if (provider === "codex") {
+    if (model === "deepseek-flash" || model === "deepseek-v4-pro") inferred = "deepseek";
+    else if (!model || /^(gpt-|codex(?:-|$)|o[1-9](?:-|$))/.test(model)) inferred = "openai";
+  }
+  return {provider, model_vendor: vendor || inferred, model, effort};
+}
+
 /**
  * Resolves the engine, model, and reasoning effort to start on when creating a new chat or loading the app.
  * Resolution order:

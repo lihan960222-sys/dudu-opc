@@ -224,6 +224,18 @@ def status(cfg):
     return {"connected":active,"scopes":sorted(scopes),"actions":{k:v.issubset(scopes) for k,v in ACTIONS.items()}}
 
 
+def consent_progress(cfg, granted):
+    with _db(cfg) as (db,key):
+        row=db.execute("select scopes,used,until from flow where profile=?",(key,)).fetchone()
+    if not row:
+        return None
+    requested=set(row["scopes"].split())-set(granted)-{"offline_access"}
+    if not requested:
+        return None
+    state="expired" if row["until"]<=time.time() else "processing" if row["used"] else "awaiting_return"
+    return {"state":state,"missing_scopes":sorted(requested)}
+
+
 def disconnect(cfg):
     with _db(cfg, lock=True) as (db, key):
         db.execute("delete from grant_data where profile=?", (key,))

@@ -28,6 +28,8 @@ _EDITABLE = (
     "description",
     "instructions",
     "provider",
+    "model_vendor",
+    "delegate_project_writes",
     "model",
     "effort",
     "workspace_path",
@@ -106,6 +108,8 @@ async def create_agent(
     description: str | None = None,
     instructions: str = "",
     provider: str = "claude",
+    model_vendor: str | None = None,
+    delegate_project_writes: bool = False,
     model: str | None = None,
     effort: str | None = None,
     workspace_path: str | None = None,
@@ -136,6 +140,8 @@ async def create_agent(
         description=description,
         instructions=instructions,
         provider=provider,
+        model_vendor=model_vendor,
+        delegate_project_writes=delegate_project_writes,
         model=model,
         effort=effort,
         workspace_path=workspace_path,
@@ -195,6 +201,18 @@ async def update_agent(
         lead_id = await db.scalar(select(Team.lead_agent_id).where(Team.owner_id==agent.owner_id))
         if lead_id != agent.id or make_lead is False:
             changes["approval_mode"]=capped
+    from app.services.routine_service import effective_approval_mode
+    mode = changes.get("approval_mode", agent.approval_mode)
+    folder_changed = "workspace_path" in changes and changes["workspace_path"] != agent.workspace_path
+    removing_role = archived is True or make_lead is False
+    if (folder_changed or removing_role or
+            (mode != agent.approval_mode and effective_approval_mode(mode, agent.approval_mode) == mode) or
+            (agent.team_workspaces_readable and changes.get("team_workspaces_readable") is False) or
+            (agent.delegate_project_writes and changes.get("delegate_project_writes") is False)):
+        from app.team.steward_review import protect_active_scope
+        await protect_active_scope(db, agent, shared_folders=folder_changed or removing_role)
+    from app.services.role_workspace import sync_model_file
+    sync_model_file(db, agent, changes)
     for field, value in changes.items():
         setattr(agent, field, value)
     if "instructions" in changes:
@@ -271,6 +289,7 @@ async def duplicate_agent(db: AsyncSession, agent_id: int, *, safe: bool = False
         description=source.description,
         instructions=source.instructions,
         provider=source.provider,
+        model_vendor=source.model_vendor,
         model=source.model,
         effort=source.effort,
         workspace_path=None if safe else source.workspace_path,
@@ -342,6 +361,8 @@ async def delete_agent(db: AsyncSession, agent_id: int) -> None:
     if agent is None:
         await db.rollback()
         raise AgentNotFound(agent_id)
+    from app.team.steward_review import protect_active_scope
+    await protect_active_scope(db, agent, shared_folders=True)
     await _leave_team(db, agent)
     await _pause_agent_routines(db, agent, "deleted")
     await db.execute(

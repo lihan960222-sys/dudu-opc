@@ -22,6 +22,20 @@ def test_only_deepseek_named_environment_is_a_fallback(monkeypatch):
     assert service.api_key() == "synthetic-deepseek"
 
 
+def test_employee_credentials_are_scoped_and_reflect_account_models(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "SQLITE_PATH", str(tmp_path / "service.db"))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "steward-only")
+    cipher = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(service, "dpapi", lambda data, *, unlock: cipher.decrypt(data) if unlock else cipher.encrypt(data))
+    monkeypatch.setattr(service, "_verify_models", lambda key: ["deepseek-flash"])
+    assert service.employee_api_key("owner", 5) == ""
+    service.save_employee_key("owner", 5, "synthetic-employee-key")
+    assert service.employee_api_key("owner", 5) == "synthetic-employee-key"
+    assert service.employee_models("owner", 5) == ["deepseek-flash"]
+    assert service.employee_api_key("other", 5) == service.employee_api_key("owner", 6) == ""
+    assert all(b"synthetic-employee-key" not in path.read_bytes() for path in tmp_path.rglob("*.dpapi"))
+
+
 def test_verify_fixed_origin_encrypt_replace_and_preserve_on_failure(tmp_path, monkeypatch):
     path = tmp_path / "steward-deepseek.dpapi"
     monkeypatch.setattr(service, "_credential_path", lambda: path)

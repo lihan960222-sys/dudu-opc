@@ -32,3 +32,20 @@ def test_employee_delivery_uses_the_owner_goal_without_keyword_matching():
     assert explicit["expected_tool"]=="feishu_publish_knowledge"
     assert feishu_assignment.delivery_contract(pin,"read",request)["expected_tool"]=="feishu_read_history"
     assert feishu_assignment.delivery_contract(pin,None,request)==pin
+
+
+async def test_cloud_document_work_does_not_require_or_inherit_an_unrelated_contact(monkeypatch):
+    cfg={"owner_id":"owner","steward":{"agent_id":1,"app_id":"lead"},
+         "roles":{"editor":{"agent_id":4,"app_id":"employee"}}}
+    monkeypatch.setattr(feishu_assignment,"configuration",lambda:cfg)
+    sources={}
+    monkeypatch.setattr(feishu_assignment.workspace_access,"settings_for",lambda _:{"history_sources":sources})
+    class Session:
+        async def scalar(self,_): return None
+    for assigned in (False,True):
+        if assigned:
+            sources["联系人"]={"agent_id":4,"oauth_app":"employee"}
+        scope=await feishu_assignment.resolve(Session(),"owner",1,10,20,4,delivery="create_document",original="把这份报告存成云文档")
+        assert scope["employee"]==4 and scope["contact"] is None
+    assert (await feishu_assignment.resolve(Session(),"owner",1,10,20,4,delivery="create_document",original="把我和联系人的沟通整理成文档"))["contact"]=="联系人"
+    assert await feishu_assignment.resolve(Session(),"owner",1,10,20,5,delivery="create_document",original="写文档") is None

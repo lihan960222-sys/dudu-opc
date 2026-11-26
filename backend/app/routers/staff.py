@@ -20,6 +20,7 @@ from app.db.models.team import TeamSetupRequest
 from app.db.transactions import begin_write
 from app.routers.agents import _agent_or_404, _restricted, get_runtime, _check_engine
 from app.routers.feishu_access import router as feishu_access_router
+from app.routers.weekly_knowledge import router as weekly_knowledge_router
 from app.routers.feishu_owner_oauth import owner_browser
 from app.services import agent_store, image_gen, role_workspace, steward_deepseek
 from app.services.local_access_policy import require_local_access
@@ -37,6 +38,7 @@ def local_owner(request: Request):
 
 router = APIRouter(prefix="/staff", dependencies=[Depends(require_local_access), Depends(local_owner)])
 router.include_router(feishu_access_router)
+router.include_router(weekly_knowledge_router)
 
 
 class StaffingGrant(BaseModel):
@@ -70,6 +72,15 @@ def deepseek_status():
 
 @router.put("/deepseek-key", dependencies=[Depends(owner_browser)])
 async def save_deepseek_key(request: Request):
+    key = await _submitted_key(request)
+    try:
+        await run_in_threadpool(steward_deepseek.verify_and_save, key)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return JSONResponse({"configured": True}, headers={"Cache-Control": "no-store"})
+
+
+async def _submitted_key(request: Request) -> str:
     # A validation error for a credential must never include the submitted value.
     raw = bytearray()
     async for chunk in request.stream():
@@ -82,8 +93,22 @@ async def save_deepseek_key(request: Request):
         payload = None
     if not isinstance(payload, dict) or set(payload) != {"api_key"} or not isinstance(payload["api_key"], str):
         raise HTTPException(422, "请输入 DeepSeek API Key。")
+    return payload["api_key"]
+
+
+@router.get("/{agent_id}/deepseek-key", dependencies=[Depends(owner_browser)])
+async def employee_key_status(agent_id: int, rt: ThreadRuntime = Depends(get_runtime)):
+    await _agent_or_404(rt, agent_id)
+    models = await run_in_threadpool(steward_deepseek.employee_models, rt.owner_id, agent_id)
+    return JSONResponse({"configured": bool(models), "models": models}, headers={"Cache-Control": "no-store"})
+
+
+@router.put("/{agent_id}/deepseek-key", dependencies=[Depends(owner_browser)])
+async def save_employee_key(agent_id: int, request: Request, rt: ThreadRuntime = Depends(get_runtime)):
+    await _agent_or_404(rt, agent_id)
+    key = await _submitted_key(request)
     try:
-        await run_in_threadpool(steward_deepseek.verify_and_save, payload["api_key"])
+        await run_in_threadpool(steward_deepseek.save_employee_key, rt.owner_id, agent_id, key)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
     return JSONResponse({"configured": True}, headers={"Cache-Control": "no-store"})
@@ -122,6 +147,9 @@ class EditRules(BaseModel):
     digest: str = Field(pattern="^[a-f0-9]{64}$")
     model: str = Field(pattern=r"^[\w./:@+\[\]-]+$", max_length=200)
     instructions: str = Field(max_length=65536)
+    provider: str | None = Field(default=None, max_length=64)
+    model_vendor: str | None = Field(default=None, max_length=64)
+    effort: str | None = Field(default=None, max_length=64)
 
 
 def read_rules(root, fallback_model=None):
@@ -141,14 +169,20 @@ def write_rules(root, edit, fallback_model=None):
         raise HTTPException(409, "文件已被修改")
     text = raw.decode("utf-8-sig")
     end = re.search(r"(?m)^---\r?$", text[3:])
-    if re.match(r"^---\r?\n", text) and end:
+    has_header = re.match(r"^---\r?\n", text) and end
+    if has_header:
         head = text[:3 + end.end()].rstrip("\r")
     else:
         head = f"---\ndefault_model: {edit.model}\n---"
     head = re.sub(r"(?m)^([ \t]*default_model:[ \t]+)\S+", lambda m: m[1] + edit.model, head)
     newline = "\r\n" if "\r\n" in text else "\n"
-    body = edit.instructions.replace("\r\n", "\n").replace("\n", newline)
-    result = (head + newline + body).encode("utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") else "utf-8")
+    if edit.instructions == current["instructions"]:
+        after = text[3 + end.end():] if has_header else newline + text
+        if has_header and newline == "\r\n" and after.startswith("\n"):
+            after = "\r" + after
+    else:
+        after = newline + edit.instructions.replace("\r\n", "\n").replace("\n", newline)
+    result = (head + after).encode("utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") else "utf-8")
     if len(result) > 65536:
         raise ValueError("文件不能超过 64 KiB")
     with tempfile.NamedTemporaryFile(dir=root, delete=False) as tmp:
@@ -190,12 +224,28 @@ async def update_rules(agent_id: int, edit: EditRules, rt: ThreadRuntime = Depen
             raise HTTPException(404, "找不到员工")
         if agent.role_path != edit.path:
             raise HTTPException(409, "工作目录已更改")
-        _check_engine(rt, agent.provider, edit.model)
+        from app.routers.agents import _profile_vendor
+        provider = edit.provider or agent.provider
+        effort = edit.effort if "effort" in edit.model_fields_set else agent.effort if agent.model == edit.model else None
+        explicit = edit.model_vendor
+        if "model_vendor" not in edit.model_fields_set and (provider, edit.model) == (agent.provider, agent.model):
+            explicit = agent.model_vendor
+        vendor = _profile_vendor(provider, explicit, edit.model, effort)
+        _check_engine(rt, provider, edit.model)
+        if provider != agent.provider:
+            if await rt.computers.for_agent(agent.id) and not rt.engines.capabilities(provider).computers:
+                raise HTTPException(409, "该员工绑定的计算机不支持所选引擎。")
+            team = await team_service.team_for(db, rt.owner_id)
+            if team and team.lead_agent_id == agent.id and not rt.engines.capabilities(provider).mcp:
+                raise HTTPException(409, "管家需要支持团队工具的引擎。")
+            if agent.connector_scopes and not rt.engines.capabilities(provider).connected_apps:
+                raise HTTPException(409, "该引擎不支持员工已授权的应用。")
         try:
             result = write_rules(Path(agent.role_path), edit, agent.model)
         except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc)) from None
         agent.model = edit.model
+        agent.provider, agent.model_vendor, agent.effort = provider, vendor, effort
         agent.instructions = result["instructions"]
         await db.commit()
         return result

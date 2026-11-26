@@ -70,6 +70,8 @@ async def set_lead(db, owner, agent_id, name='My team', *, commit=True):
             from app.services.agent_store import employee_mode
             previous = await db.get(Agent,team.lead_agent_id,with_for_update=True)
             if previous and previous.owner_id==owner:
+                from app.team.steward_review import protect_active_scope
+                await protect_active_scope(db, previous, shared_folders=True)
                 previous.can_staff_team=False
                 previous.approval_mode=employee_mode(owner,previous.approval_mode)
         agent.can_staff_team=False
@@ -89,6 +91,9 @@ async def change_member(db, owner, agent_id, *, remove=False, delegation_enabled
     if team is None:
         raise TeamError('no_team', 'Choose a team lead first.')
     agent = await member(db, owner, agent_id)
+    if remove or (agent.delegation_enabled and delegation_enabled is False):
+        from app.team.steward_review import protect_active_scope
+        await protect_active_scope(db, agent, shared_folders=remove)
     if remove:
         if agent.team_id != team.id:
             raise TeamError('unreachable_agent', 'This agent is outside this team.')

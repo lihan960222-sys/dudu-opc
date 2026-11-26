@@ -16,7 +16,7 @@ def test_catalog_requires_job_actions_and_employee_oauth(monkeypatch,tmp_path):
     monkeypatch.setattr(bridge.workspace_access,"settings_for",lambda cfg:{
         "history_sources":{"李晗":{"agent_id":4,"oauth_app":"worker"}},"allow_codex_summary":True})
     monkeypatch.setattr(bridge.knowledge_document,"target",lambda *args:({}, "知识库"))
-    assert "feishu_publish_knowledge" not in bridge.configured(cfg,4,pin)[1]
+    assert "feishu_publish_knowledge" in bridge.configured(cfg,4,pin)[1]
     pin["expected_tool"] = "feishu_read_history"
     assert "feishu_publish_knowledge" not in bridge.configured(cfg,4,pin)[1]
     pin["expected_tool"] = "feishu_publish_knowledge"
@@ -25,7 +25,7 @@ def test_catalog_requires_job_actions_and_employee_oauth(monkeypatch,tmp_path):
     request = {"jsonrpc":"2.0","method":"tools/list","id":1}
     server = mcp_server.Server(tmp_path, project_consult=True, feishu_tools=tools,employee_only=True)
     names = [t["name"] for t in server.handle(request)["result"]["tools"]]
-    assert names == ["employee_capabilities","enable_local_skill","feishu_list_sources","feishu_read_history","feishu_read_document","feishu_publish_knowledge"]
+    assert names == ["employee_capabilities","enable_local_skill","feishu_list_sources","feishu_read_history","feishu_read_document","feishu_read_message","feishu_publish_knowledge"]
     for name in names:
         assert policy.automatic("mcp__team__"+name,"ask",team,{})[0]=="allowed"
     assert policy.automatic("mcp__team__feishu_create_document","ask",team,{})[0]=="denied"
@@ -62,11 +62,16 @@ async def test_authorized_employee_call_reaches_handler_and_records_receipt(monk
     sqlite3.connect(tmp_path / "journal" / "channel.sqlite3").close()
     cfg = {"_access_config_path":str(tmp_path/"feishu.json"),"state_dir":"journal"}
     tool = "feishu_publish_knowledge"
-    scope = bridge.Grant(SimpleNamespace(id=42), {"action":"update","contact":"李晗"},cfg,(tool,))
-    run = SimpleNamespace(agent_id=4,ctx=SimpleNamespace(team=SimpleNamespace(team_id=1,feishu_tools=(tool,))))
+    job=SimpleNamespace(id=42,task_id=None,status="running",owner_id="owner",assignee_agent_id=4,
+                        assignee_turn_id=8,assignment_epoch=1)
+    scope = bridge.Grant(job, {"action":"update","contact":"李晗"},cfg,(tool,))
+    run = SimpleNamespace(agent_id=4,turn_id=8,ctx=SimpleNamespace(team=SimpleNamespace(team_id=1,feishu_tools=(tool,))))
     @asynccontextmanager
     async def session():
-        yield AsyncMock()
+        from sqlalchemy.ext.asyncio import AsyncSession
+        db=AsyncMock(spec=AsyncSession)
+        db.get.return_value=job
+        yield db
     rt = SimpleNamespace(owner_id="owner",session=session)
     monkeypatch.setattr(bridge.service,"team_for",AsyncMock(return_value=SimpleNamespace(id=1)))
     monkeypatch.setattr(bridge,"grant",AsyncMock(return_value=scope))
@@ -109,4 +114,4 @@ def test_employee_with_write_only_connection_gets_owner_repair_action(monkeypatc
         "history_sources":{"李晗":{"agent_id":4,"oauth_app":"app"}}})
     proof,tools=bridge.configured(cfg,4,{"action":"update","contact":"李晗"})
     assert "docx:document:readonly" in proof["delivery_blocker"] and "二狗" in proof["delivery_blocker"]
-    assert tools==("feishu_list_sources","feishu_read_history","feishu_read_document")
+    assert set(tools)=={"feishu_list_sources","feishu_read_history","feishu_read_message","feishu_read_document"}

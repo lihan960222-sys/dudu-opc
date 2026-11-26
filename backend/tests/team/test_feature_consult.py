@@ -12,7 +12,8 @@ from app.team.policy import TurnTeam, automatic
 
 
 @pytest.mark.asyncio
-async def test_employee_project_consultation(sessions, owner, tmp_path):
+@pytest.mark.parametrize("transferred", [False, True])
+async def test_employee_project_consultation(sessions, owner, tmp_path, transferred):
     async with sessions() as db:
         people = []
         for name in ("lead","engineer","analyst","outsider"):
@@ -29,13 +30,22 @@ async def test_employee_project_consultation(sessions, owner, tmp_path):
             result = await feature_tasks.route(db,owner_id=owner,agent_id=member.id,project=project,
                 title="Review",text="review",event_key=member.name)
         task = result["task_id"]
+        source_key = engineer.name
+        if transferred:
+            previous = await feature_tasks.route(db,owner_id=owner,agent_id=outsider.id,project="p",
+                title="Moved review",text="review after handoff",event_key="former")
+            task = previous["task_id"]
+            await feature_tasks.reassign(db,task,1,engineer.id,"owner-correction",owner_id=owner)
+            source_key = "new-employee"
+            await feature_tasks.route(db,owner_id=owner,agent_id=engineer.id,project="p",title="Moved review",
+                                      text="continue",event_key=source_key,reference_id=task)
         extra = await feature_tasks.route(db,owner_id=owner,agent_id=analyst.id,project="p",
             title="Second review",text="independent work",event_key="analyst-second",intent="independent")
         assert extra["action"] == "created"
         thread,_ = await feature_tasks.session_for(db,owner,task,model="m",workspace_path=str(tmp_path))
         parent = await feature_tasks.dispatch(db,owner_id=owner,steward_id=lead.id,task_id=task,
-            event_key=engineer.name,thread_id=thread.id)
-        turn = await thread_store.start_turn(db,thread.id,"review",feature_event_key=engineer.name)
+            event_key=source_key,thread_id=thread.id)
+        turn = await thread_store.start_turn(db,thread.id,"review",feature_event_key=source_key)
     team_ctx = TurnTeam(team.id,engineer.id,False,False,strict_hierarchy=True,feature_consult=True)
     rt = NS(session=sessions,owner_id=owner,hub=NS(notify=lambda _:None))
     jobs = Jobs(rt)
@@ -55,6 +65,9 @@ async def test_employee_project_consultation(sessions, owner, tmp_path):
             await jobs.enqueue(run,args,reply="resume")
         first = await jobs.enqueue(run,args)
         assert (first.parent_id,first.task_id,first.project,first.approval_mode)==(parent,task,"p","plan")
+        assert first.assignment_epoch == (2 if transferred else 1)
+        async with sessions() as db:
+            assert await feature_tasks.assignment_current(db, first)
         assert (await jobs.enqueue(run,args)).id == first.id
         assert first.assignee_agent_id == analyst.id
         from fastapi import HTTPException

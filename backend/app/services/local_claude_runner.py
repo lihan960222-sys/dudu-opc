@@ -338,6 +338,7 @@ def _kill_tree(proc: subprocess.Popen) -> None:
                 ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                 capture_output=True,
                 timeout=15,
+                **host_exec.background_process_options(),
             )
         else:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -378,10 +379,8 @@ def run_blocking(
     pausable time limit: the text is written and stdin closed, as without one."""
     if keep_stdin_open is None:
         keep_stdin_open = control is not None
-    popen_kwargs: dict = {}
-    if sys.platform == "win32":
-        popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    else:
+    popen_kwargs = host_exec.background_process_options()
+    if sys.platform != "win32":
         popen_kwargs["start_new_session"] = True
 
     host_exec.ensure_allowed("an engine process")

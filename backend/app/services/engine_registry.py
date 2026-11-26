@@ -40,6 +40,46 @@ class InvalidModel(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class ModelProfile:
+    engine_id: str
+    model_vendor: str | None
+    model_id: str | None
+    effort: str | None
+
+
+def resolve_model_profile(engine_id: str, model_vendor: str | None, model_id: str | None,
+                          effort: str | None = None) -> ModelProfile:
+    """Resolve a saved selection without substituting another engine or vendor."""
+    from app.services.steward_deepseek import MODELS
+
+    single_vendor = {"claude": "anthropic", "gemini": "google", "antigravity": "google"}.get(engine_id)
+    vendor = model_vendor or single_vendor
+    if engine_id == "codex":
+        if model_id in MODELS:
+            inferred = "deepseek"
+        elif not model_id or re.match(r"^(?:gpt-|codex(?:-|$)|o[1-9](?:-|$))", model_id):
+            inferred = "openai"
+        else:
+            inferred = None
+        vendor = model_vendor or inferred
+        if (vendor not in {None, "deepseek", "openai"} or (inferred and inferred != vendor)
+                or (vendor == "deepseek" and model_id not in MODELS)):
+            raise InvalidModel("所选模型与 Codex 的供应商不匹配。")
+        if vendor == "deepseek" and effort is not None and effort not in {"low", "high", "max"}:
+            raise InvalidModel("该 DeepSeek 模型支持的推理强度为 low、high 和 max。")
+    elif single_vendor and vendor != single_vendor:
+        raise InvalidModel(f"{engine_id} cannot run the selected vendor {vendor!r}.")
+    if vendor and not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", vendor):
+        raise InvalidModel("请输入有效的模型供应商标识。")
+    return ModelProfile(engine_id, vendor, model_id, effort)
+
+
+def project_capability_gaps(adapter) -> list[str]:
+    caps = capabilities_of(adapter)
+    return [key for key in ("project_workspace", "tools", "approvals", "mcp", "resume") if not getattr(caps, key)]
+
+
 class UnavailableAdapter:
     """Stands in for an adapter that could not be built, so the rest of the
     engines still load and this one shows why it is missing."""
@@ -306,6 +346,7 @@ class EngineRegistry:
             "default_model": default,
             "custom_models": accepts_custom_models(adapter),
             "capabilities": capabilities_of(adapter).as_dict(),
+            "project_capability_gaps": project_capability_gaps(adapter),
             "configurable": bool(getattr(adapter, "needs_config", False)),
             # Can write a quick text call (usable as the helper model, docs/MEMORY.md).
             "can_write_text": getattr(adapter, "generate_text", None) is not None,

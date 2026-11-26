@@ -20,7 +20,7 @@ from app.team.service import TeamError, audit, clean_line, member, now, team_for
 
 MAX_OPERATIONS = 8
 TEXT_FIELDS = {'name': 80, 'title': 120, 'description': 200}
-EDITABLE = ('name', 'title', 'description', 'instructions', 'provider', 'model')
+EDITABLE = ('name', 'title', 'description', 'instructions', 'provider', 'model', 'model_vendor', 'effort')
 CREATE_KEYS = set(EDITABLE) | {'op', 'share_workspace', 'workspace_path', 'first_task'}
 UPDATE_KEYS = {'op', 'agent_id', 'fields', 'expected_revision'}
 HASHED = EDITABLE + ('team_id', 'archived_at', 'approval_mode', 'workspace_path', 'delegation_enabled',
@@ -40,7 +40,10 @@ def revision(agent):
 
 def full_hash(agent):
     """Hash of everything that matters to undo: any later edit makes undo stale."""
-    fields = {f: getattr(agent, f) for f in HASHED}
+    fields = {f: getattr(agent, f) for f in HASHED
+              if f not in ('model_vendor', 'effort') or getattr(agent, f) is not None}
+    if agent.delegate_project_writes:
+        fields['delegate_project_writes'] = True
     if agent.manager_agent_id is not None or agent.can_staff_team:
         fields.update(manager_agent_id=agent.manager_agent_id, can_staff_team=agent.can_staff_team)
     return digest(fields)
@@ -63,6 +66,7 @@ async def catalog(db, owner, caller_id, *, engines):
     return {
         'team': fence.line(team.name), 'lead_agent_id': team.lead_agent_id,
         'agents': [{'id': a.id, 'name': fence.line(a.name), 'title': fence.line(a.title or ''), 'provider': a.provider, 'model': a.model,
+                    'model_vendor': a.model_vendor, 'effort': a.effort,
                     'is_lead': a.id == team.lead_agent_id, 'revision': revision(a),
                     'description': fence.line(a.description or ''), 'instructions': agent_memory.redact_secrets(a.instructions or '')[0],
                     'workspace_path': a.workspace_path} for a in rows],
@@ -93,11 +97,19 @@ def text_value(field, value):
         if not isinstance(value, str) or not value or len(value) > 40:
             raise TeamError('invalid_input', 'Engine must be an engine id.')
         return value
-    if field == 'model':
+    if field in ('model', 'model_vendor', 'effort'):
         if value is not None and (not isinstance(value, str) or not value or len(value) > 120):
             raise TeamError('invalid_input', 'Model must be a model id.')
         return value
     raise TeamError('invalid_input', 'Unrecognised setting.')
+
+
+def checked_profile(provider, model, vendor, effort):
+    from app.services.engine_registry import InvalidModel, resolve_model_profile
+    try:
+        return resolve_model_profile(provider, vendor, model, effort)
+    except InvalidModel as exc:
+        raise TeamError('unknown_model', str(exc)) from None
 
 
 async def validate(db, owner, team, caller, plan, *, turn_id, check_engine, reviewed_workspace=False, employee_codex_default=None):
@@ -131,6 +143,14 @@ async def validate(db, owner, team, caller, plan, *, turn_id, check_engine, revi
                     model = None
                 fields['model'] = employee_codex_default if fields['provider'] == 'codex' and employee_codex_default else model
             check_engine(fields['provider'], fields['model'])
+            inherited = fields['provider'] == caller.provider and fields['model'] == caller.model
+            profile = checked_profile(fields['provider'], fields['model'],
+                                      fields.get('model_vendor', caller.model_vendor if inherited else None),
+                                      fields.get('effort', caller.effort if inherited else None))
+            if profile.model_vendor:
+                fields['model_vendor'] = profile.model_vendor
+            if profile.effort:
+                fields['effort'] = profile.effort
             if 'share_workspace' in raw and type(raw['share_workspace']) is not bool:
                 raise TeamError('invalid_input', 'share_workspace must be a boolean.')
             first_task = raw.get('first_task')
@@ -177,16 +197,20 @@ async def validate(db, owner, team, caller, plan, *, turn_id, check_engine, revi
             touched.add(raw['agent_id'])
             target = await member(db, owner, raw['agent_id'], team_id=team.id)
             fields = {f: text_value(f, v) for f, v in raw['fields'].items()}
-            if target.id == caller.id and ({'provider', 'model'} & set(fields)):
+            if target.id == caller.id and ({'provider', 'model', 'model_vendor', 'effort'} & set(fields)):
                 raise TeamError('invalid_input', "The lead's own engine is changed by the person.")
             expected = raw.get('expected_revision')
             if expected is not None and expected != revision(target):
                 raise TeamError('changed_since', 'That agent changed since you read it. Call list_team_setup again.')
             provider = fields.get('provider', target.provider)
             model = fields['model'] if 'model' in fields else (None if 'provider' in fields and provider != target.provider else target.model)
-            if {'provider', 'model'} & set(fields):
+            if {'provider', 'model', 'model_vendor', 'effort'} & set(fields):
                 fields['model'] = model
                 check_engine(provider, model)
+                same = provider == target.provider and model == target.model
+                profile = checked_profile(provider, model, fields.get('model_vendor', target.model_vendor if same else None),
+                                          fields.get('effort', target.effort if same else None))
+                fields.update(model_vendor=profile.model_vendor, effort=profile.effort)
             if 'name' in fields and fields['name'] != target.name and fields['name'] in names.values():
                 raise TeamError('name_taken', 'A live agent already uses that name.')
             names[target.id] = fields.get('name', target.name)
@@ -366,6 +390,8 @@ async def _apply_operations(db, owner, caller, team, turn_id, thread_id, operati
         else:
             agent = await db.get(Agent, op['agent_id'], with_for_update=True)
             before = snapshot(agent)
+            from app.services.role_workspace import sync_model_file
+            sync_model_file(db, agent, op['fields'])
             for key, value in op['fields'].items():
                 setattr(agent, key, value)
             audit(db, team, 'agent_updated', agent_id=agent.id, thread_id=thread_id, data={'turn_id': turn_id, 'fields': sorted(op['fields'])})
@@ -568,6 +594,8 @@ async def propose(db, owner, caller_id, turn_id, thread_id, plan, *, check_engin
         else:
             agent = await db.get(Agent, op['agent_id'], with_for_update=True)
             before = snapshot(agent)
+            from app.services.role_workspace import sync_model_file
+            sync_model_file(db, agent, op['fields'])
             for key, value in op['fields'].items():
                 setattr(agent, key, value)
             audit(db, team, 'agent_updated', agent_id=agent.id, thread_id=thread_id, data={'turn_id': turn_id, 'fields': sorted(op['fields'])})
@@ -640,6 +668,8 @@ async def undo(db, owner, request_id):
         await db.delete(agent)
         audit(db, team, 'agent_create_undone', agent_id=agent.id, data={'removed': 'deleted', 'request_id': request_id})
     for agent, before in updated:
+        from app.services.role_workspace import sync_model_file
+        sync_model_file(db, agent, before)
         for key, value in before.items():
             setattr(agent, key, value)
         audit(db, team, 'agent_update_undone', agent_id=agent.id, data={'request_id': request_id})

@@ -12,10 +12,9 @@ import asyncio
 import json
 import sys
 
-from app.core import engine_processes
+from app.core import engine_processes, host_exec
 from app.services.cli_probe import kill_group
 from app.services.local_claude_runner import child_env
-from app.core import host_exec
 
 STDERR_TAIL_BYTES = 4000
 # One line can carry a whole command's output.
@@ -55,10 +54,14 @@ class StdioRpc:
         self._closed = asyncio.get_running_loop().create_future()
         self._reader = asyncio.create_task(self._read())
         self._stderr = asyncio.create_task(self._read_stderr())
+        self._close_employee_job = None
 
     @classmethod
-    async def spawn(cls, args: list[str], *, cwd: str, max_bytes: int, env: dict | None = None, diagnostic=None, sandbox: bool = False, sandbox_writable=(), sandbox_readonly=()) -> "StdioRpc":
+    async def spawn(cls, args: list[str], *, cwd: str, max_bytes: int, env: dict | None = None, diagnostic=None,
+                    sandbox: bool = False, sandbox_writable=(), sandbox_readonly=(), employee_project=False) -> "StdioRpc":
         host_exec.ensure_allowed("an engine process")
+        if employee_project and (reason := host_exec.employee_host_blocker()):
+            raise PermissionError(reason)
         env = env if env is not None else child_env()
         if sandbox:
             from app.core import turn_sandbox
@@ -73,13 +76,25 @@ class StdioRpc:
             env=env,
             start_new_session=sys.platform != "win32",
             limit=LINE_LIMIT_BYTES,
+            **host_exec.background_process_options(),
         )
-        # Recorded until it ends, so a hard kill of the backend leaves nothing
-        # the next start cannot find (app/core/engine_processes.py).
-        await asyncio.to_thread(engine_processes.record, proc.pid, args[0])
-        rpc = cls(proc, max_bytes=max_bytes, diagnostic=diagnostic)
-        rpc._forget = asyncio.create_task(_forget_when_done(proc))
-        return rpc
+        close_job = None
+        try:
+            if employee_project:
+                close_job = host_exec.employee_process_lifetime(proc.pid)
+            await asyncio.to_thread(engine_processes.record, proc.pid, args[0])
+            rpc = cls(proc, max_bytes=max_bytes, diagnostic=diagnostic)
+            rpc._close_employee_job = close_job
+            rpc._forget = asyncio.create_task(_forget_when_done(proc))
+            return rpc
+        except BaseException:
+            if close_job is not None:
+                close_job()
+            else:
+                kill_group(proc)
+            await proc.wait()
+            engine_processes.forget(proc.pid)
+            raise
 
     @property
     def closed(self) -> bool:
@@ -139,14 +154,14 @@ class StdioRpc:
                     line = await self.proc.stdout.readline()
                 except (ValueError, asyncio.LimitOverrunError):
                     self.over_limit = True
-                    kill_group(self.proc)
+                    self.kill()
                     break
                 if not line:
                     break
                 total += len(line)
                 if total > self.max_bytes:
                     self.over_limit = True
-                    kill_group(self.proc)
+                    self.kill()
                     break
                 try:
                     message = json.loads(line)
@@ -189,7 +204,11 @@ class StdioRpc:
             return
 
     def kill(self) -> None:
-        kill_group(self.proc)
+        if self._close_employee_job:
+            self._close_employee_job()
+            self._close_employee_job = None
+        else:
+            kill_group(self.proc)
 
     async def close(self, *, grace_seconds: float = 0) -> None:
         """Kill the process and wait (briefly) for the readers to finish."""
@@ -204,6 +223,8 @@ class StdioRpc:
                     await asyncio.wait_for(self.proc.wait(), grace_seconds)
                 except asyncio.TimeoutError:
                     pass
+            self.kill()
+        elif self._close_employee_job:
             self.kill()
         try:
             await asyncio.wait_for(self.proc.wait(), 5)

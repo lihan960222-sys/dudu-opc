@@ -15,7 +15,6 @@ import stat
 import sys
 import tempfile
 import uuid
-import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -42,6 +41,27 @@ SERVER = "suparagent_community"
 MAX_REQUEST_BYTES = 64_000
 MAX_TOOL_DESCRIPTION = 4_000
 REQUEST_FILE = re.compile(r"^req-([0-9a-f]{32})\.json$")
+
+
+async def _eligible_turn(db, runtime, run, agent, thread, turn, *, lock=False):
+    uninterrupted = getattr(run, "uninterrupted_access", False)
+    if (not agent or agent.owner_id != runtime.owner_id or agent.archived_at or not thread or thread.archived_at
+            or thread.owner_id != runtime.owner_id or thread.agent_id != agent.id or thread.room_id is not None
+            or thread.job_id is not None or not turn or turn.thread_id != thread.id or turn.status != "running"
+            or turn.owner_token != run.owner_token or run.ctx.aborted or run.ctx.draft_only or run.ctx.media_review_only):
+        return False
+    project = getattr(run.ctx, "project_runtime", None)
+    if project:
+        from app.team.steward_review import current_native_job
+        return (thread.kind == "feature" and turn.origin == "person" and run.routine_run_id is None
+                and run.ctx.team is not None and project.employee_id == agent.id and project.owner_id == runtime.owner_id
+                and bool(await current_native_job(db, run, write=lock, lock=lock)))
+    if thread.kind != "chat":
+        return False
+    if uninterrupted:
+        return turn.origin == "routine"
+    return (turn.origin == "person" and run.routine_run_id is None and run.ctx.computer is None
+            and run.ctx.browser is None and run.ctx.team is None)
 
 
 @asynccontextmanager
@@ -203,14 +223,14 @@ class CommunityMcpBridge:
         """Snapshot exact agent grants for a person chat or authorized routine."""
         from app.core.config import settings
 
-        if settings.HOST_EXECUTION_DISABLED or getattr(adapter, "key", None) not in {"claude", "codex"}:
+        private = getattr(run.ctx, "project_runtime", None) is not None
+        if settings.HOST_EXECUTION_DISABLED:
             return []
         capabilities = getattr(adapter, "capabilities", None)
         uninterrupted = getattr(run, "uninterrupted_access", False)
         if (run.agent_id is None or capabilities is None or not capabilities.mcp or not capabilities.approvals
-                or (not uninterrupted and (run.routine_run_id is not None or run.ctx.computer is not None
-                                           or run.ctx.browser is not None or run.ctx.team is not None))
-                or run.ctx.draft_only or run.ctx.media_review_only):
+                or (private and not getattr(capabilities, "project_workspace", False))
+                or (not private and getattr(adapter, "key", None) not in {"claude", "codex"})):
             return []
         try:
             async with runtime.session() as db:
@@ -220,12 +240,7 @@ class CommunityMcpBridge:
                 from app.services import routine_uninterrupted
                 routine_state = await routine_uninterrupted.state(runtime, run, db) if uninterrupted else None
                 ceiling = routine_state[2] if routine_state else {}
-                if (agent is None or agent.owner_id != runtime.owner_id or agent.archived_at is not None
-                        or thread is None or thread.owner_id != runtime.owner_id or thread.agent_id != agent.id
-                        or thread.kind != "chat" or thread.job_id is not None or thread.room_id is not None
-                        or turn is None or turn.thread_id != thread.id
-                        or (turn.origin != "routine" if uninterrupted else turn.origin != "person")
-                        or (uninterrupted and routine_state is None)):
+                if not await _eligible_turn(db, runtime, run, agent, thread, turn) or (uninterrupted and routine_state is None):
                     return []
                 rows = (await db.execute(
                     select(CommunityMcpConnection, CommunityMcpToolGrant)
@@ -310,8 +325,7 @@ class CommunityMcpBridge:
                                       "input_schema": definition["inputSchema"], "description": definition["description"]},
                         })
                 if not uninterrupted:
-                    # Owner-added servers are for people in chat only: never routines, rooms, jobs or computers.
-                    custom = await cls._custom_snapshot(db, runtime.owner_id, agent.id, turn.person_id)
+                    custom = await cls._custom_snapshot(db, runtime.owner_id, agent.id, turn.person_id, shared_only=private)
                     if custom and not _plan_within_bounds(snapshot + custom):
                         logger.warning("custom MCP grants exceed the per-agent index limit; omitting them for this turn",
                                        thread_id=run.thread_id)
@@ -339,7 +353,7 @@ class CommunityMcpBridge:
             return False
 
     @staticmethod
-    async def _custom_snapshot(db, owner_id: str, agent_id: int, person_id: int | None = None) -> list[dict]:
+    async def _custom_snapshot(db, owner_id: str, agent_id: int, person_id: int | None = None, *, shared_only=False) -> list[dict]:
         """Granted tools of enabled connections this person may use: shared ones, or their own private ones."""
         rows = (await db.execute(
             select(CustomMcpConnection, CustomMcpToolGrant)
@@ -347,7 +361,8 @@ class CommunityMcpBridge:
             .where(
                 CustomMcpConnection.owner_id == owner_id,
                 CustomMcpConnection.enabled.is_(True),
-                or_(CustomMcpConnection.shared.is_(True), CustomMcpConnection.owner_person_id == person_id),
+                CustomMcpConnection.shared.is_(True) if shared_only else
+                    or_(CustomMcpConnection.shared.is_(True), CustomMcpConnection.owner_person_id == person_id),
                 CustomMcpToolGrant.agent_id == agent_id,
             )
             .order_by(CustomMcpConnection.id, CustomMcpToolGrant.tool_name)
@@ -653,16 +668,8 @@ class CommunityMcpBridge:
                 and entry.get("schema_digest") == item["schema_digest"]
                 for entry in routine_state[2].get("muapi", [])
             )
-            if (agent is None or agent.owner_id != self.runtime.owner_id or agent.archived_at is not None
-                    or thread is None or thread.owner_id != self.runtime.owner_id or thread.agent_id != agent.id
-                    or thread.kind != "chat" or thread.job_id is not None or thread.room_id is not None
-                    or turn is None or turn.status != "running" or turn.owner_token != self.run.owner_token
-                    or turn.thread_id != thread.id
-                    or (turn.origin != "routine" if uninterrupted else turn.origin != "person")
+            if (not await _eligible_turn(db, self.runtime, self.run, agent, thread, turn, lock=lock)
                     or (uninterrupted and not routine_valid)
-                    or (not uninterrupted and (self.run.routine_run_id is not None or self.run.ctx.computer is not None
-                                               or self.run.ctx.browser is not None or self.run.ctx.team is not None))
-                    or self.run.ctx.draft_only or self.run.ctx.media_review_only
                     or credential is None or grant is None or grant.schema_digest != item["schema_digest"]
                     or grant.input_schema != item["input_schema"]):
                 return None
@@ -705,19 +712,13 @@ class CommunityMcpBridge:
             and entry.get("schema_digest") == item["schema_digest"]
             for entry in routine_state[2].get("community", [])
         )
-        if (agent is None or agent.owner_id != self.runtime.owner_id or agent.archived_at is not None
-                or thread is None or thread.owner_id != self.runtime.owner_id or thread.agent_id != agent.id
-                or thread.kind != "chat" or thread.job_id is not None or thread.room_id is not None
-                or turn is None or turn.status != "running" or turn.owner_token != self.run.owner_token
-                or turn.thread_id != thread.id or (turn.origin != "routine" if uninterrupted else turn.origin != "person")
+        if (not await _eligible_turn(db, self.runtime, self.run, agent, thread, turn, lock=lock)
                 or (uninterrupted and not routine_valid)
-                or (not uninterrupted and (self.run.routine_run_id is not None or self.run.ctx.computer is not None
-                                           or self.run.ctx.browser is not None or self.run.ctx.team is not None))
-                or self.run.ctx.draft_only or self.run.ctx.media_review_only
                 or connection is None or connection.owner_id != self.runtime.owner_id
                 or connection.revision != item["connection_revision"]
                 or (not custom and connection.manifest_digest != item["manifest_digest"])
                 or (custom and (not connection.enabled or connection.tested_revision != connection.revision
+                                or (getattr(self.run.ctx, "project_runtime", None) and not connection.shared)
                                 or not (connection.shared or connection.owner_person_id == turn.person_id)))
                 or grant is None or grant.schema_digest != item["schema_digest"]
                 or grant.input_schema != item["input_schema"]):
@@ -887,6 +888,11 @@ class CommunityMcpBridge:
                 await self._settle_spend(ledger_id, result, failure=failure)
             else:
                 await self._settle_spend(ledger_id, result)
+                if (getattr(self.run, "recorder", None) and isinstance(result, dict)
+                        and not result.get("error") and not result.get("isError")):
+                    await self.run.recorder.emit("mcp.verified", {
+                        "connection":item["connection_id"], "revision":item["connection_revision"],
+                        "tool":item["remote_name"], "schema_digest":item["schema_digest"]})
             if audit_id is not None:
                 async with self.runtime.session() as db:
                     await begin_write(db)

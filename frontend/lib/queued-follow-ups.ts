@@ -1,4 +1,4 @@
-export type QueuedFollowUp = { id: string; text: string };
+export type QueuedFollowUp = { id: string; text: string; replyToTurnId?: number };
 
 const PREFIX = "suparagent:queued-follow-ups:";
 export const MAX_QUEUED_FOLLOW_UPS = 20;
@@ -28,7 +28,9 @@ function parseItems(raw: string | null): QueuedFollowUp[] {
       )
       .slice(0, MAX_QUEUED_FOLLOW_UPS)
       .filter((item) => item.text.length <= MAX_FOLLOW_UP_TEXT_CHARS)
-      .map((item) => ({ id: item.id, text: item.text }));
+      .map(({ id, text, replyToTurnId }) => ({ id, text,
+        ...(typeof replyToTurnId === "number" && Number.isSafeInteger(replyToTurnId) && replyToTurnId > 0 ? { replyToTurnId } : {}),
+      }));
   } catch {
     return EMPTY_QUEUED_FOLLOW_UPS;
   }
@@ -87,9 +89,9 @@ export function saveQueuedFollowUps(threadId: number, items: QueuedFollowUp[]): 
   notify(threadId);
 }
 
-export function newQueuedFollowUp(text: string): QueuedFollowUp {
+export function newQueuedFollowUp(text: string, replyToTurnId?: number): QueuedFollowUp {
   const id = typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return { id, text };
+  return { id, text, ...(replyToTurnId ? { replyToTurnId } : {}) };
 }

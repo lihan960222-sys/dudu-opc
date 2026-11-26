@@ -20,6 +20,63 @@ def test_receipts_are_typed_and_paths_cannot_escape():
 
 
 @pytest.mark.asyncio
+async def test_native_tests_need_the_exact_command_latest_status_and_real_cwd(tmp_path):
+    root = tmp_path / "employee"
+    root.mkdir()
+    spec = verify.contract({"kind": "commands", "commands": [{"command": "python -m pytest -q","cwd": "."}]})
+    item = {"id": "call", "type": "commandExecution", "command": "python -m pytest -q",
+            "cwd": str(root), "exitCode": 0, "status": "completed"}
+    passed = verify.command_receipt(item, root)
+    failed = verify.command_receipt({**item, "exitCode": 1}, root)
+    assert passed and failed and verify.command_receipt({**item, "cwd": str(tmp_path)}, root) is None
+    db = AsyncMock()
+    thread = NS(workspace_path=str(root),agent_id=8)
+    agent = NS(id=8,owner_id="owner",role_path=str(root))
+    async def get(model, key):
+        return thread if model == Thread else agent
+    db.get.side_effect = get
+    turn, job = NS(id=9,result="已验证"), NS(assignee_thread_id=1,assignee_agent_id=8,owner_id="owner",task_id=2)
+    for records, state in [
+        ([], "missing"),
+        ([{"command_receipt": verify.command_receipt({**item, "command":"echo passed"},root)}],"missing"),
+        ([{"command_receipt": failed},{"command_receipt": passed}],"blocked"),
+        ([{"command_receipt": passed},{"command_receipt": failed}],"commands_verified"),
+    ]:
+        db.scalars.return_value = records
+        assert (await verify.assess(db,job,turn,spec))["state"]==state
+
+
+def test_native_file_change_reads_the_real_project_artifact(tmp_path):
+    f = tmp_path / "binary.dat"
+    f.write_bytes(bytes([0,255,0]))
+    item = {"type":"fileChange","status":"completed","id":"patch",
+            "changes":[{"path":str(f),"kind":{"type":"add"}}]}
+    receipts = verify.file_change_receipts(item,tmp_path)
+    assert receipts[0]["sha256"] == hashlib.sha256(f.read_bytes()).hexdigest()
+    assert not verify.file_change_receipts({**item,"status":"failed"},tmp_path)
+    assert not verify.file_change_receipts({**item,"changes":[{"path":"../elsewhere"}]},tmp_path)
+
+
+def test_native_inspection_requires_a_successful_typed_action_inside_the_project(tmp_path):
+    root = tmp_path / "work"
+    root.mkdir()
+    (root / "readme.md").write_text("hello", encoding="utf8")
+    action = {"type":"read","command":"cat readme.md","path":"readme.md","name":"readme.md"}
+    item = {"type":"commandExecution","id":"cmd1","cwd":str(root),"command":action["command"],
+            "commandActions":[action],"status":"completed","exitCode":0}
+    receipt = verify.command_receipt(item, root)
+    assert receipt["inspection"] == {"operation":"read","path":"readme.md","scope":"role","root":str(root)}
+    for changes in [
+        {"exitCode":1}, {"status":"failed"}, {"command":"echo readme.md"}, {"commandActions":[]},
+        {"commandActions":[{**action,"path":str(tmp_path)}]}, {"commandActions":[{**action,"path":"missing.md"}]},
+        {"commandActions":[{**action,"type":"unknown"}]},
+    ]:
+        assert "inspection" not in verify.command_receipt({**item, **changes}, root)
+    listing = {"type":"listFiles","command":"ls","path":None}
+    assert verify.command_receipt({**item,"command":"ls","commandActions":[listing]},root)["inspection"]["path"]=="."
+
+
+@pytest.mark.asyncio
 async def test_file_claim_requires_actual_matching_artifact(tmp_path):
     role=tmp_path/"worker"
     folder=role/"任务"/"2"

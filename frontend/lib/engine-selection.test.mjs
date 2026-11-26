@@ -2,6 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { resolveEngineModel, readCachedPreference, writeCachedPreference } from "./engine-selection.ts";
 
+
+
+test("employee model choices preserve the engine, vendor and supported effort", async () => {
+  const { employeeModelProfile } = await import("./engine-selection.ts");
+  assert.deepEqual(employeeModelProfile("codex", "deepseek", "deepseek-flash", "high"), {
+    provider:"codex", model_vendor:"deepseek", model:"deepseek-flash", effort:"high",
+  });
+  assert.equal(employeeModelProfile("openai_compat", null, "internal", null).model_vendor, null);
+  assert.equal(employeeModelProfile("codex", null, "gpt-5.4", null).model_vendor, "openai");
+});
+
+
 const mockEngines = [
   {
     id: "claude",

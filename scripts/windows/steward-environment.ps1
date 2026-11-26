@@ -45,6 +45,28 @@ function Initialize-StewardEnvironment {
     $env:ATTACHMENTS_DIR = Join-Path $DataDir "attachments"
     $env:LOCAL_WORKSPACE_ROOT = Join-Path $DataDir "workspace"
     $env:LOCAL_EXECUTION_ENABLED = "true"
+    $pilotFile = Join-Path $DataDir "employee-project-runtime.json"
+    if ([IO.File]::Exists($pilotFile)) {
+        try {
+            $pilot = Get-Content -LiteralPath $pilotFile -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            $ids = foreach ($id in @($pilot.employees)) {
+                if ($null -eq $id) { continue }
+                if (($id -isnot [int] -and $id -isnot [long]) -or $id -le 0) {
+                    throw 'Employee IDs must be positive integers.'
+                }
+                "local-owner/$id"
+            }
+            if (-not $env:SUPARAGENT_EMPLOYEE_NATIVE_IDS) {
+                $env:SUPARAGENT_EMPLOYEE_NATIVE_IDS = (@($ids | Select-Object -Unique) -join ",")
+            }
+            if (-not $env:SUPARAGENT_WEEKLY_KNOWLEDGE_ENABLED -and
+                ($pilot.weekly_knowledge -is [bool]) -and $pilot.weekly_knowledge) {
+                $env:SUPARAGENT_WEEKLY_KNOWLEDGE_ENABLED = "1"
+            }
+        } catch {
+            Write-Warning "Invalid employee-project-runtime.json. Check the employee IDs and weekly_knowledge setting."
+        }
+    }
     $networkSettings = Join-Path $DataDir "codex-network.json"
     if (-not $env:SUPARAGENT_CODEX_HTTPS_PROXY -and [IO.File]::Exists($networkSettings)) {
         $useProxy = (Get-Content -LiteralPath $networkSettings -Raw -Encoding UTF8 | ConvertFrom-Json).use_windows_proxy

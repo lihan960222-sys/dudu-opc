@@ -74,6 +74,21 @@ def code_of(response) -> str:
     return response.json()["detail"]["error_code"]
 
 
+
+
+async def test_independent_employee_model_vendors_are_persisted_and_validated(api, rt):
+    from app.services.codex_adapter import CodexAdapter
+    rt.adapters["codex"] = CodexAdapter()
+    jensen = await make(api, provider="codex", model_vendor="openai", model="gpt-5.4")
+    staff = await make(api, provider="codex", model_vendor="deepseek", model="deepseek-flash", effort="high")
+    assert (staff["provider"], staff["model_vendor"], staff["effort"]) == ("codex", "deepseek", "high")
+    assert (await api.patch(f"/api/v1/agents/{staff['id']}", json={"model_vendor": "openai"})).status_code == 422
+    changed = await api.patch(f"/api/v1/agents/{staff['id']}",
+                              json={"model_vendor":"openai","model":"gpt-5.4"})
+    assert changed.status_code == 200 and changed.json()["effort"] is None
+    assert (await api.get(f"/api/v1/agents/{jensen['id']}")).json() == jensen
+
+
 # --- who may use it ------------------------------------------------------------------------------
 
 ROUTES = [

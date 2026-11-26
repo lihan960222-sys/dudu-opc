@@ -20,7 +20,7 @@ export type TeamJobItem = { kind: "team_job"; key: string; turnId: number | null
 export type NeedsYouItem = { kind: "needs_you"; key: string; turnId: number | null; cardId: string; revision: number; title: string; subtitle: string; emptyText: string; more: number; checkedAt?: string; providerCheckedAt?: string; timeZone?: string; sources?: Record<string, string>; rows: NeedsYouRow[] };
 
 export type TeamSetupOperation =
-  | { op: "create"; name: string; title?: string; description?: string; instructions: string; provider?: string; model?: string | null; share_workspace?: boolean; workspace_path?: string; first_task?: string }
+  | { op: "create"; name: string; title?: string; description?: string; instructions: string; provider?: string; model_vendor?: string | null; model?: string | null; effort?: string | null; share_workspace?: boolean; workspace_path?: string; first_task?: string }
   | { op: "update"; agent_id: number; name?: string; current?: Record<string, string | null>; fields: Record<string, string | null>; expected_revision: string };
 export type TeamSetupPlan = { summary?: string; operations: TeamSetupOperation[] };
 
@@ -43,6 +43,8 @@ function teamSetupPlan(value: unknown): TeamSetupPlan | null {
         ...(typeof operation.description === "string" ? { description: operation.description } : {}),
         instructions: text(operation.instructions),
         ...(typeof operation.provider === "string" ? { provider: operation.provider } : {}),
+        ...(typeof operation.model_vendor === "string" ? { model_vendor: operation.model_vendor } : {}),
+        ...(typeof operation.effort === "string" ? { effort: operation.effort } : {}),
         ...(typeof operation.model === "string" || operation.model === null ? { model: operation.model } : {}),
         ...(typeof operation.share_workspace === "boolean" ? { share_workspace: operation.share_workspace } : {}),
         ...(typeof operation.workspace_path === "string" ? { workspace_path: operation.workspace_path } : {}),

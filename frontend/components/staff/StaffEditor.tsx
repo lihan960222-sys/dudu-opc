@@ -13,6 +13,7 @@ import { StaffModelFields } from "./ProfileControls";
 import { directoryMode, directoryModes } from "@/lib/directory-mode";
 import { TeamWorkspaceAccess } from "./TeamWorkspaceAccess";
 import { DeepSeekKey } from "./DeepSeekKey";
+import { employeeModelProfile } from "@/lib/engine-selection";
 import { FeishuAccess } from "./FeishuAccess";
 import { useSession } from "../AuthGate";
 import {
@@ -53,6 +54,12 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
   const [provider, setProvider] = useState(agent?.provider ?? "codex"),
     [model, setModel] = useState<string | null>(agent?.model ?? null);
   const [effort,setEffort] = useState<string | null>(agent?.effort ?? null);
+  const [vendor, setVendor] = useState<string | null>(agent?.model_vendor ?? null);
+  const profile = employeeModelProfile(provider, vendor, model, effort);
+  const engine = engines.find(item => item.id === provider);
+  const gapLabels: Record<string, string> = {project_workspace:"项目目录隔离", tools:"终端与文件工具",
+    approvals:"工具审批", mcp:"MCP 工具", resume:"会话续办"};
+  const [delegateWrites, setDelegateWrites] = useState(agent?.delegate_project_writes ?? false);
   const [teamFiles, setTeamFiles] = useState(agent?.team_workspaces_readable ?? false);
   const [approvalMode, setApprovalMode] = useState(directoryMode(agent?.approval_mode));
   const [confirm,setConfirm] = useState<ProfileTeamAction | null>(null);
@@ -138,10 +145,11 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
         name: name.trim(),
         title: title.trim() || null,
         description: summary.trim() || null,
-        provider,
-        model, effort, ...(ownsHost ? { approval_mode: approvalMode } : {}),
-        ...(ownsHost && !isLead && !makeLead && ((provider === "codex" && teamFiles) !== (agent?.team_workspaces_readable ?? false))
-          ? { team_workspaces_readable: provider === "codex" && teamFiles } : {}),
+        ...profile, ...(ownsHost ? { approval_mode: approvalMode } : {}),
+        ...(ownsHost && delegateWrites !== (agent?.delegate_project_writes ?? false)
+          ? { delegate_project_writes: delegateWrites } : {}),
+        ...(ownsHost && !isLead && !makeLead && teamFiles !== (agent?.team_workspaces_readable ?? false)
+          ? { team_workspaces_readable: teamFiles } : {}),
       };
       const before = persisted.current;
       if (agent?.role_path && !rules) throw Error("请先重新读取工作指令");
@@ -156,13 +164,14 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
         rules &&
         before &&
         path === rules.path &&
-        (body !== rules.instructions || model !== rules?.model)
+        (body !== rules.instructions || model !== rules.model || provider !== before.provider ||
+          profile.model_vendor !== before.model_vendor || effort !== before.effort)
       ) {
         if (!model) throw Error("角色目录需要明确的模型 ID");
         step = "保存 AGENTS.md";
         const next = await request<Rules>(`/staff/${before.id}/rules`, {
           method: "PUT",
-          body: JSON.stringify({ ...rules, instructions: body, model }),
+          body: JSON.stringify({ ...rules, ...profile, instructions: body }),
         });
         setRules(next);
       }
@@ -231,9 +240,14 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
                   </select>
                   <small>{directoryModes[approvalMode].help}</small>
                 </label>}
-                {ownsHost && !isLead && !makeLead && provider === "codex" && (
+                {ownsHost && !isLead && !makeLead && (
                   <TeamWorkspaceAccess value={teamFiles} onChange={setTeamFiles} disabled={busy} />
                 )}
+                {ownsHost && !isLead && !makeLead && <label className="dp-field">
+                  <span><input type="checkbox" checked={delegateWrites} disabled={busy}
+                    onChange={e => setDelegateWrites(e.target.checked)} /> 可将项目写入任务交给直属员工</span>
+                  <small>下属只能使用自己已有的目录权限。只读任务仍然只读。</small>
+                </label>}
               </section>
   </>);
   return (
@@ -313,20 +327,27 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
                 effort={effort}
                 requireModel={!agent || !!agent.role_path}
                 disabled={!!agent?.role_path && !rules}
-                lockProvider={!!agent?.role_path}
-                stewardModels={isLead}
                 onChange={(p, m, e) => {
                   setEffort(e ?? null);
                   setProvider(p);
                   setModel(m);
+                  const selected = employeeModelProfile(p, null, m, e ?? null).model_vendor;
+                  setVendor(selected ?? (p === provider ? vendor : null));
                 }}
               />
+              {employeeModelProfile(provider, null, model, effort).model_vendor ? <small>模型供应商 · {profile.model_vendor}</small> :
+                <label className="dp-field"><span>模型供应商 · 待选择</span>
+                  <input className="dp-input" value={vendor ?? ""} placeholder="输入供应商标识" maxLength={64}
+                    onChange={event => setVendor(event.target.value.trim().toLowerCase() || null)} /></label>}
+              {!!engine?.project_capability_gaps?.length && <small>
+                项目执行缺少{engine.project_capability_gaps.map(key => gapLabels[key] ?? key).join("、")}。
+              </small>}
               {ownsHost && (isLead || (!agent && makeLead)) && <label className="dp-field">
                 <span><input type="checkbox" checked={canStaff} onChange={e => setCanStaff(e.target.checked)} /> 允许大管家按需招人</span>
                 <small>大管家可代审只读岗位，沿用发起员工的模型，使用独立工作目录，不增加工具权限。超出范围仍由你审批。</small>
               </label>}
-              {isLead && ownsHost && provider === "codex" && (model === "deepseek-flash" || model === "deepseek-v4-pro") && (
-                <DeepSeekKey />
+              {agent && ownsHost && profile.model_vendor === "deepseek" && (
+                <DeepSeekKey employee={isLead ? undefined : agent.id} />
               )}
               {!agent && (
                 <label className="dp-field">

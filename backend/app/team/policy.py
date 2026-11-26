@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 # Origins that no person is watching: they may not create agents or rooms.
 UNATTENDED = ('outside', 'webhook', 'routine', 'harness', 'restricted')
+FEISHU_READ_TOOLS = frozenset({"feishu_list_sources", "feishu_read_history",
+                              "feishu_read_message", "feishu_read_document"})
 # Least to most trusted-away; a room turn takes the strictest origin it read.
 _RANK = ('person', 'restricted', 'harness', 'routine', 'webhook', 'outside')
 
@@ -27,6 +29,7 @@ class TurnTeam:
     strict_hierarchy: bool = False
     feature_consult: bool = False
     feishu_tools: tuple[str, ...] = ()
+    scheduled_knowledge: bool = False
 
 
 def automatic(tool, mode, team, arguments):
@@ -35,14 +38,20 @@ def automatic(tool, mode, team, arguments):
     if team is None:
         return 'denied', 'no_team'
     name = tool.removeprefix('mcp__team__')
+    if getattr(team, "scheduled_knowledge", False):
+        if team.origin == "routine" and name in team.feishu_tools and not team.is_lead:
+            return "allowed", "bound_weekly_knowledge"
+        return "denied", "weekly_tool_not_granted"
     if name == "employee_capabilities":
         return "allowed","own_capabilities"
     if name == "enable_local_skill":
+        if arguments.get("template_id") in ("employee", "project"):
+            return "allowed", "read_enabled_skill"
         if mode=="plan" or team.origin!="person":
             return "denied","outside_skill_scope"
         return "allowed","vetted_local_skill"
     if name.startswith('feishu_'):
-        if name in team.feishu_tools and not team.is_lead and mode != 'plan':
+        if name in team.feishu_tools and not team.is_lead and (mode != 'plan' or name in FEISHU_READ_TOOLS):
             return 'allowed', 'owner_feishu_assignment'
         return 'denied', 'outside_feishu_assignment'
     if name == 'propose_direct_report':

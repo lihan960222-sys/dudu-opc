@@ -46,7 +46,8 @@ def validate_configured_location(folder: Path) -> None:
     from app.core.config import settings
     base = settings.SQLITE_FILE.parent
     private = [Path(__file__).resolve().parents[3], settings.SQLITE_FILE,
-               *(base / n for n in ("key.dpapi", "steward-deepseek.dpapi", "deepseek-codex", "feishu.json", "feishu-state", "decisions",
+               *(base / n for n in ("key.dpapi", "steward-deepseek.dpapi", "employee-credentials", "employee-runtime", "employee-settings",
+                                    "owner-oauth.sqlite3", "deepseek-codex", "feishu.json", "feishu-state", "decisions",
                                     "attachments", "engine-processes", "auth-limits"))]
     private.extend(Path(v) for v in (settings.ATTACHMENTS_DIR, settings.DECISION_LOG_DIR,
                                       settings.ENGINE_PROCESS_DIR, settings.AUTH_LIMITS_DIR) if v)
@@ -82,6 +83,73 @@ def load(root: Path, fallback_model: str | None = None) -> RoleConfig:
     return RoleConfig(match[1], (match[2] or "").strip(), hashlib.sha256(raw).hexdigest())
 
 
+def sync_model_file(db, agent, fields):
+    """Preserve the instruction bytes when a profile API or a reviewed setup changes a role's default."""
+    if not agent.role_path or "model" not in fields or fields["model"] == agent.model:
+        return
+    from sqlalchemy import event
+    from tempfile import NamedTemporaryFile
+    from app.team.service import TeamError
+
+    root = Path(agent.role_path)
+    model = fields["model"]
+    if not isinstance(model, str) or not re.fullmatch(r"[\w./:@+\[\]-]+", model):
+        raise TeamError("role_model", "岗位目录需要明确的默认模型。")
+    try:
+        role = load(root, agent.model)
+        if role.model == model:
+            return
+        if role.model != agent.model:
+            raise TeamError("role_model_changed", "岗位文件已有不同的默认模型，请重新读取员工档案。")
+        path = root / "AGENTS.md"
+        raw = path.read_bytes()
+        if path.stat().st_nlink != 1 or hashlib.sha256(raw).hexdigest() != role.digest:
+            raise TeamError("role_model_changed", "岗位文件已变更，请重新读取员工档案。")
+        encoding = "utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") else "utf-8"
+        text = raw.decode(encoding)
+        newline = "\r\n" if "\r\n" in text else "\n"
+        if text.startswith("---" + newline):
+            text = re.sub(r"(?m)^(\s*default_model:[ \t]+)\S+", lambda m: m[1] + model, text, count=1)
+        else:
+            text = f"---{newline}default_model: {model}{newline}---{newline}" + text
+        updated = text.encode(encoding)
+        if len(updated) > 65536:
+            raise TeamError("role_model", "岗位文件改后会超过 64 KiB。")
+
+        def replace(expected, content):
+            if linked(path) or path.stat().st_nlink != 1 or path.read_bytes() != expected:
+                return False
+            with NamedTemporaryFile(dir=root, delete=False) as tmp:
+                temporary = Path(tmp.name)
+                tmp.write(content)
+            try:
+                os.chmod(temporary, path.stat().st_mode)
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return True
+
+        if not replace(raw, updated):
+            raise TeamError("role_model_changed", "岗位文件已变更，请重新读取员工档案。")
+        session = db.sync_session
+        pending = session.info.get("role_model_rewrites")
+        if pending is None:
+            pending = session.info["role_model_rewrites"] = {}
+
+            def committed(s):
+                pending.pop(s.get_transaction(), None)
+
+            def ended(_session, transaction):
+                for restore in reversed(pending.pop(transaction, [])):
+                    restore()
+
+            event.listen(session, "after_commit", committed)
+            event.listen(session, "after_transaction_end", ended)
+        pending.setdefault(session.get_transaction(), []).append(lambda: replace(updated, raw))
+    except OSError as exc:
+        raise TeamError("role_model_changed", "当前无法读写岗位文件，请核对员工目录。") from exc
+
+
 def inventory(root: Path, task_id: str | None = None) -> list[dict]:
     checked_root(root)
     rows = []
@@ -103,13 +171,16 @@ def inventory(root: Path, task_id: str | None = None) -> list[dict]:
     return sorted(rows, key=lambda r: r["path"])
 
 
-async def validate_model(runtime, provider: str, model: str) -> None:
+async def validate_model(runtime, provider: str, model: str, model_vendor: str | None = None,
+                         effort: str | None = None, *, private_project: bool = False) -> None:
+    from app.services.engine_registry import resolve_model_profile
+    profile = resolve_model_profile(provider, model_vendor, model, effort)
     runtime.check_engine_model(provider, model)
-    if provider == "codex":
-        from app.services.codex_adapter import DEEPSEEK_MODELS
-        if model in DEEPSEEK_MODELS:
-            return
+    if provider == "codex" and profile.model_vendor != "deepseek" and not private_project:
         entries = await runtime.engines.describe(only=provider)
         models = {m["id"] for entry in entries for m in entry["models"]}
         if model not in models and not any(entry.get("custom_models") for entry in entries):
             raise ValueError(f"Model {model!r} is unavailable in the Codex model list")
+        option = next((m for entry in entries for m in entry["models"] if m["id"] == model), None)
+        if effort and option and effort not in option.get("supported_reasoning_efforts", []):
+            raise ValueError(f"Model {model!r} does not support reasoning effort {effort!r}.")

@@ -277,14 +277,14 @@ export function savePicture(id: number, data: string) {
 }
 
 export function StaffModelFields({
-  engines, provider, model, effort, disabled, lockProvider, stewardModels, requireModel, onChange,
+  engines, provider, model, effort, disabled, lockProvider, requireModel, onChange,
 }: {
   engines: Engine[]; provider: string; model: string | null; effort?: string | null;
-  disabled?: boolean; lockProvider?: boolean; stewardModels?: boolean; requireModel?: boolean;
+  disabled?: boolean; lockProvider?: boolean; requireModel?: boolean;
   onChange: (provider: string, model: string | null, effort?: string | null) => void;
 }) {
   return <EngineModelFields engines={engines} provider={provider} model={model} effort={effort}
     showEffort={effort !== undefined} disabled={disabled} lockProvider={lockProvider}
-    leadDefault={stewardModels ? null : undefined} requireModel={requireModel}
+    leadDefault={null} requireModel={requireModel}
     profile preferModelSelect onChange={onChange} />;
 }

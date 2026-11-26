@@ -118,6 +118,7 @@ class TurnCreateRequest(BaseModel):
     prompt_text: str = Field(min_length=1, max_length=100_000)
     # Ids from POST /threads/{id}/attachments (docs/EVERYDAY.md), at most 8.
     attachment_ids: list[str] = Field(default_factory=list, max_length=8)
+    reply_to_turn_id: int | None = Field(default=None, gt=0)
     # Names of the agent's saved skills the person chose for this message
     # (docs/SKILLS.md), at most 3. Never applied unless named here.
     skills: list[str] = Field(default_factory=list, max_length=3)
@@ -132,6 +133,9 @@ class TurnCreateRequest(BaseModel):
 
 class DirectTurnRequest(TurnCreateRequest):
     direct_event_key: str = Field(min_length=1, max_length=240)
+    owner_text: str | None = Field(default=None, max_length=100_000)
+    reference_event_key: str | None = Field(default=None, min_length=1, max_length=240)
+    reference_task_id: int | None = Field(default=None, gt=0)
 
 
 class FeatureTurnRequest(TurnCreateRequest):
@@ -216,6 +220,8 @@ class StopResponse(BaseModel):
 class ApprovalAnswerRequest(BaseModel):
     decision: Literal["allow", "deny"]
     expected_turn_id: int | None = None
+    expected_assignment_epoch: int | None = Field(default=None, ge=1)
+    expected_employee_id: int | None = Field(default=None, gt=0)
     # With an allow on a Bash call: also always allow this exact command from
     # now on (see /api/v1/approval-rules). Ignored for a deny or other tools.
     remember: bool = False

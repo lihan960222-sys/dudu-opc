@@ -111,7 +111,11 @@ def employee_config(employee):
 def connection_status(request: Request, employee: int | None = None):
     owner_browser(request)
     uri = redirect_uri(request)
-    return JSONResponse({**owner_oauth.status(employee_config(employee)),"redirect_uri":uri},headers=HEADERS)
+    cfg=employee_config(employee)
+    current=owner_oauth.status(cfg)
+    return JSONResponse({**current,"redirect_uri":uri,
+        "consent":owner_oauth.consent_progress(cfg,current["scopes"]),
+        "permissions_url":"https://open.feishu.cn/app/"+cfg["steward"]["app_id"]+"/auth"},headers=HEADERS)
 
 
 @router.post("/start")
@@ -134,18 +138,19 @@ def begin(payload: StartRequest, request: Request, employee: int | None = None):
 def callback(request: Request, state: str = "", code: str = "", error: str = ""):
     principal = owner_browser(request)
     uri = redirect_uri(request,callback=True)
+    nonce = request.cookies.get(COOKIE) or ""
+    prefix, sep, _ = nonce.partition(".")
+    employee = int(prefix) if sep and prefix.isascii() and prefix.isdigit() and len(prefix)<16 else None
+    destination = f"/?section=people&capability=feishu&employee={employee}" if employee is not None else "/?section=host"
     try:
-        nonce = request.cookies.get(COOKIE) or ""
-        prefix, sep, _ = nonce.partition(".")
-        employee = int(prefix) if sep and prefix.isascii() and prefix.isdigit() and len(prefix)<16 else None
         owner_oauth.finish(employee_config(employee),state,_binding(principal,nonce),uri,"" if error else code)
         outcome = "connected"
     except owner_oauth.OwnerOAuthError as exc:
         if employee is not None:
             return HTMLResponse("<meta charset=utf-8><title>飞书授权</title><h2>授权未保存</h2><p>"
-                                +escape(str(exc))+"</p><a href='/'>返回工作台</a>",headers=HEADERS)
+                                +escape(str(exc))+f"</p><a href='{escape(destination)}'>返回这名员工的飞书连接</a>",headers=HEADERS)
         outcome = "error"
-    response = RedirectResponse(uri.removesuffix(CALLBACK)+"/?section=host&feishu_oauth="+outcome,status_code=303,headers=HEADERS)
+    response = RedirectResponse(uri.removesuffix(CALLBACK)+destination+"&feishu_oauth="+outcome,status_code=303,headers=HEADERS)
     if outcome == "connected":
         response.delete_cookie(COOKIE,path=COOKIE_PATH,secure=uri.startswith("https://"),httponly=True,samesite="lax")
     return response

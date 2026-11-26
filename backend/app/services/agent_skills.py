@@ -20,6 +20,7 @@ import hashlib
 from contextlib import contextmanager
 import re
 import tempfile
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -307,6 +308,73 @@ def read_skill(agent_id: int, name: str) -> Skill:
     return skill
 
 
+def _project_skill(root: Path, name: str, *, include_disabled: bool = False) -> Skill:
+    from app.services.role_workspace import checked_root, linked
+    check_name(name)
+    unavailable = SkillError(422, "skill_unavailable", "此项目技能已移除、停用或无法读取。")
+    try:
+        directory = checked_root(root) / ".agents" / "skills" / name
+        path = checked_root(directory) / SKILL_FILE
+        if linked(path) or not path.is_file():
+            raise unavailable
+        info = path.stat()
+        if info.st_nlink != 1 or info.st_size > FILE_MAX_BYTES:
+            raise unavailable
+        with path.open("rb") as stream:
+            if not os.path.samestat(info, os.fstat(stream.fileno())) or path.resolve(strict=True) != path:
+                raise unavailable
+            if os.name == "nt":
+                import ctypes
+                import msvcrt
+                final = ctypes.create_unicode_buffer(32768)
+                size = ctypes.windll.kernel32.GetFinalPathNameByHandleW(
+                    ctypes.c_void_p(msvcrt.get_osfhandle(stream.fileno())), final, len(final), 0)
+                if not 0 < size < len(final) or Path(final.value.removeprefix("\\\\?\\")) != path:
+                    raise unavailable
+            elif Path("/proc/self/fd").is_dir() and Path(f"/proc/self/fd/{stream.fileno()}").resolve(strict=True) != path:
+                raise unavailable
+            raw = stream.read(FILE_MAX_BYTES + 1)
+        parsed = parse_markdown(raw.decode("utf-8-sig"))
+        if parsed["name"] != name or not parsed["body"] or (parsed["enabled"] is False and not include_disabled):
+            raise unavailable
+        return Skill(name, redact_secrets(parsed["description"] or "")[0], redact_secrets(parsed["body"])[0],
+                     source="project", enabled=parsed["enabled"] is not False, revision=hashlib.sha256(raw).hexdigest())
+    except (OSError, UnicodeError, ValueError):
+        raise unavailable from None
+
+
+def project_skill_catalog(root: Path, agent_id: int | None = None) -> list[dict]:
+    from app.services.role_workspace import checked_root
+    try:
+        entries = sorted(checked_root(root / ".agents" / "skills").iterdir(), key=lambda p: p.name)
+    except (OSError, ValueError):
+        return []
+    items = []
+    disabled = {s.name for s in list_skills(agent_id) if not s.enabled} if agent_id else set()
+    for entry in entries:
+        try:
+            skill = _project_skill(root, entry.name, include_disabled=True)
+        except SkillError:
+            continue
+        items.append({"name": skill.name, "description": skill.description, "source": "project",
+                      "template_id": "project", "enabled": skill.enabled and skill.name not in disabled, "revision": skill.revision})
+        if len(items) >= MAX_SKILLS:
+            break
+    return items
+
+
+def selected_employee_skill(agent_id, name, template_id, project_root):
+    check_name(name)
+    if template_id == "employee":
+        return resolve(agent_id, [name])[0]
+    if template_id == "project" and project_root:
+        saved = _read_file(agent_id, name)
+        if saved is not None and not saved.enabled:
+            raise SkillError(422, "skill_unavailable", "老板已停用这项技能。")
+        return _project_skill(Path(project_root), name)
+    return enable_bundled_skill(agent_id, template_id, name)
+
+
 @contextmanager
 def _mutation_lock(agent_id: int):
     """Serialize app mutations across workers; the lock is outside skill folders.
@@ -540,7 +608,9 @@ def enable_bundled_skill(agent_id, template_id, name):
         local = _read_file(agent_id,entry.name)
         if local and not _same_bundled_skill(local,template.id,entry):
             raise SkillError(409,"skill_conflict","同名技能已由用户编辑，请保留现有版本。")
-        if local and local.enabled:
+        if local and not local.enabled:
+            raise SkillError(409, "skill_unavailable", "老板已停用这个技能，可在员工档案中重新启用。")
+        if local:
             return local
         return _write_skill(agent_id,entry.name,entry.description,entry.body,enabled=True,
                             source=f"template:{template.id}",triggers=local.triggers if local else [])

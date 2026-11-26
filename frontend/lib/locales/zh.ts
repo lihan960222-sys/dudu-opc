@@ -1,6 +1,6 @@
-import type { MessageKey } from "../i18n";
+import type { en, MessageKey } from "../i18n";
 
-export const zh: Record<MessageKey, string> = {
+export const zh: Record<MessageKey, string> & Partial<Record<keyof typeof en, string>> = {
   "theme.label": "主题",
   "theme.system": "系统",
   "theme.light": "浅色",
@@ -131,6 +131,8 @@ export const zh: Record<MessageKey, string> = {
   "header.copyLink": "复制此聊天的链接",
   "header.linkCopied": "链接已复制",
   "branch.edit": "编辑并分支",
+  "chat.quote": "引用这条消息",
+  "chat.quoting": "正在回复",
   "branch.send": "在新分支中发送",
   "branch.cancel": "取消",
   "branch.from": "从之前的对话分支而来",

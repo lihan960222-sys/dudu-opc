@@ -9,6 +9,7 @@ import { directoryMode, directoryModes } from "@/lib/directory-mode";
 import { api, ApiError, isLaunchTokenMissing, type Agent, type Engine, type LocalStatus, type NotificationPreferences, type Thread } from "@/lib/api";
 import { notifyApprovalNeeded, notifyTurnCompletion } from "@/lib/desktop-notifications";
 import { activeAgents, chatModelLabel, modelChoice } from "@/lib/agents";
+import { canOpenWorkbench } from "@/lib/session";
 import { createdThreadHref, isStewardChatEntry, workspaceHref } from "@/lib/workspace-navigation";
 import { employeeChatHref } from "@/lib/sidebar";
 import { pendingApprovals, type NeedsYouItem } from "@/lib/transcript";
@@ -180,6 +181,8 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
   const setDraft = useCallback((text: string) => drafts.set(draftKey, text), [drafts, draftKey]);
   const [firstTaskSuggestion, setFirstTaskSuggestion] = useState<{key: string; text: string} | null>(null);
   const [sending, setSending] = useState(false);
+  const [quoted, setQuoted] = useState<{threadId: number; turnId: number; text: string} | null>(null);
+  const replyTarget = quoted?.threadId === threadId ? quoted : null;
   const subscribeToThreadQueue = useCallback(
     (subscriber: () => void) => threadId === null ? () => {} : subscribeQueuedFollowUps(threadId, subscriber),
     [threadId],
@@ -690,7 +693,7 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
   const waiting = pendingApprovals(transcript).length > 0;
   const canMessageDuringRun = stream.threadId === threadId && transcript.runningTurnId !== null && threadId !== null && thread?.kind === "chat" && !waiting;
   const workingMode = canMessageDuringRun
-    ? selectedEngine?.capabilities.steering ? "steer" as const : "queue" as const
+    ? selectedEngine?.capabilities.steering && !replyTarget ? "steer" as const : "queue" as const
     : null;
   const failedQueuedId = failedQueued?.threadId === threadId ? failedQueued.id : null;
   const queuedTurnPending = queuedTurn?.threadId === threadId &&
@@ -700,10 +703,10 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
     saveQueuedFollowUps(id, items);
   };
 
-  const enqueueFollowUp = (id: number, text: string): boolean => {
+  const enqueueFollowUp = (id: number, text: string, replyToTurnId?: number): boolean => {
     const current = loadQueuedFollowUps(id);
     if (current.length >= MAX_QUEUED_FOLLOW_UPS) return false;
-    writeQueuedFollowUps(id, [...current, newQueuedFollowUp(text)]);
+    writeQueuedFollowUps(id, [...current, newQueuedFollowUp(text, replyToTurnId)]);
     return true;
   };
 
@@ -716,7 +719,7 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
     queuedDrainRef.current = true;
     setQueuedSending(true);
     liveTurnStarted.current = true;
-    void api.sendTurn(threadId, first.text).then((turn) => {
+    void api.sendTurn(threadId, first.text, [], [], first.replyToTurnId).then((turn) => {
       const current = loadQueuedFollowUps(threadId);
       if (current[0]?.id === first.id) writeQueuedFollowUps(threadId, current.slice(1));
       if (currentThreadIdRef.current === threadId) setQueuedTurn({ threadId, turnId: turn.id });
@@ -815,11 +818,12 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
             }
           }
         }
-        if (queued && !enqueueFollowUp(threadId, text)) {
+        if (queued && !enqueueFollowUp(threadId, text, replyTarget?.turnId)) {
           setSendError(t("composer.queueFull"));
           return;
         }
         drafts.clearSubmitted(draftKey, draft);
+        setQuoted(null);
         setChosenSkills(() => []);
         setAttachNotice(null);
       } catch (err) {
@@ -859,7 +863,8 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
       processing.signal.throwIfAborted();
       liveTurnStarted.current = true;
       const record = drafts.markSending(String(id), draft, message);
-      await api.sendTurn(id, message, ids, usedSkills);
+      await api.sendTurn(id, message, ids, usedSkills, replyTarget?.turnId);
+      setQuoted(null);
       drafts.confirmSending(String(id), draft, record);
       setChosenSkills(() => []);
       setAttached([]);
@@ -1353,7 +1358,8 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
               hasComputer={startingAgent?.computer != null}
               inheritedModel={selectedAgent?.provider === modelDraft.provider ? (fixedModel ? selectedModel : selectedAgent.model) : undefined}
               inheritedEffort={threadId === null && selectedAgent?.provider === modelDraft.provider ? selectedAgent.effort : undefined}
-              leadDefault={selectedAgent?.provider === modelDraft.provider && selectedAgent.id === teamState?.team?.lead_agent_id ? (fixedModel ? selectedModel : selectedAgent.model) : undefined}
+              leadDefault={selectedAgent?.provider === modelDraft.provider && (selectedAgent.id === teamState?.team?.lead_agent_id || fixedModel)
+                ? (fixedModel ? selectedModel : selectedAgent.model) : undefined}
               preferModelSelect
             />
             {fixedModel ? <p className="text-xs text-muted">{t(`workspace.policy.${modelPolicy}`)} {unified && selectedAgent && modelPolicy === "role" && <button type="button" className="text-accent underline" onClick={() => { setModelDraft(null); openEmployee(selectedAgent.id); }}>{t("workspace.openProfile")}</button>}</p>
@@ -1467,6 +1473,10 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
               undoneRules={undoneRules}
               onUndo={undoRule}
               onBranch={roomId === null && ready && transcript.runningTurnId === null && !sending ? branchFromMessage : undefined}
+              onQuote={threadId !== null && thread?.kind === "chat" && thread.agent_id === leadId &&
+                (session === null || canOpenWorkbench(session)) && !sending ? (turnId, text) => {
+                  setQuoted({threadId, turnId, text}); setFocusComposer(true);
+                } : undefined}
             />
           )}
 
@@ -1556,6 +1566,12 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
             <div className="mx-auto flex w-full max-w-3xl gap-3 px-3 text-xs">
               <button type="button" className="underline" onClick={() => drafts.restore(draftKey)}>{t("composer.restoreOldDraft")}</button>
               <button type="button" onClick={() => drafts.dismiss(draftKey)}>{t("composer.dismissOldDraft")}</button>
+            </div>
+          )}
+          {replyTarget && (
+            <div className="mx-auto flex w-full max-w-3xl items-center gap-3 px-3 py-1 text-xs text-muted">
+              <span className="truncate">{t("chat.quoting")} · {replyTarget.text}</span>
+              <button type="button" className="shrink-0 underline" onClick={() => setQuoted(null)}>{t("common.cancel")}</button>
             </div>
           )}
           <Composer

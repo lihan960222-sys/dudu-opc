@@ -52,9 +52,11 @@ export function EngineModelFields({
   const engine = engines.find((item) => item.id === provider);
   const hasStewardSources = leadDefault !== undefined && (!lockProvider || provider === "codex");
   const inherited = inheritedModel !== undefined ? inheritedModel : leadDefault;
-  const { id: active, engineDefault, efforts, defaultEffort } = modelChoice(engine, model, inherited);
+  const { id: active, engineDefault, efforts: nativeEfforts, defaultEffort: nativeEffort } = modelChoice(engine, model, inherited);
   const isDeep = (id: string | null) => STEWARD_MODELS.some(item => item.id === id);
   const deep = provider === "codex" && hasStewardSources && isDeep(active);
+  const efforts = deep ? ["low", "high", "max"] : nativeEfforts;
+  const defaultEffort = deep ? "high" : nativeEffort;
   const catalog = (engine?.models ?? []).filter(item => !(provider === "codex" && isDeep(item.id)));
   const custom = engine?.custom_models && (!preferModelSelect || customProvider === provider);
   const known = !model || catalog.some(item => item.id === model);
@@ -92,7 +94,7 @@ export function EngineModelFields({
               {!item.available ? " · " + t("portal.notReady") : ""}
             </option>
           ))}
-          {hasStewardSources && (provider === "codex" || engines.some(item => item.id === "codex")) && <option value="__deepseek" disabled={hasComputer && !engines.find(item => item.id === "codex")?.capabilities.computers}>DeepSeek</option>}
+          {hasStewardSources && (provider === "codex" || engines.some(item => item.id === "codex")) && <option value="__deepseek" disabled={hasComputer && !engines.find(item => item.id === "codex")?.capabilities.computers}>DeepSeek · Codex</option>}
         </Select>
       </div>}
       {!deep && engine?.limit && (
@@ -103,7 +105,7 @@ export function EngineModelFields({
           {engine.limit.message}
         </p>
       )}
-      {engine && !engine.available && (
+      {!deep && engine && !engine.available && (
         <p className="text-xs text-warning">
           {engine.reason} <Link href="/settings/engines/" className="underline">{t("portal.settings")}</Link>
         </p>
@@ -130,7 +132,7 @@ export function EngineModelFields({
           {!deep && engine?.custom_models && <option value="__custom_model__">{t("portal.customModel")}</option>}
         </Select>}
       </div>}
-      {!fixedModelUnavailable && !deep && showEffort && efforts.length > 0 && <div>
+      {!fixedModelUnavailable && showEffort && efforts.length > 0 && <div>
         <label htmlFor={listId + "-effort"} className="block text-xs text-muted">{t("portal.reasoning")}</label>
         <Select id={listId + "-effort"} className={FIELD} containerClassName="w-full" value={effort ?? ""} disabled={disabled}
           onChange={e => onChange(provider,model,e.target.value || null)}>

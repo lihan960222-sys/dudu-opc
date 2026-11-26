@@ -117,6 +117,18 @@ def test_http_browser_roundtrip_and_dashboard(tmp_path,monkeypatch):
         assert not owner.delete(prefix+"/connection").json()["connected"]
         assert owner.post(prefix+"/start",json={"action":"doc","redirect_uri":"https://public.example"}).status_code==422
 
+        config["steward"]["tenant_key"] = "test-tenant"
+        config["roles"] = {"employee": {"app_id": "cli_testemployee", "agent_id": 4,
+                                      "owner_open_id": "ou_me", "secret_env": "FEISHU_TEST_SECRET"}}
+        start = owner.post(prefix + "/start?employee=4", json={"action": "folder"})
+        state = parse_qs(urlsplit(start.json()["authorize_url"]).query)["state"][0]
+        done = owner.get(prefix + "/callback", params={"state": state, "code": "fake"}, follow_redirects=False)
+        assert done.status_code == 303
+        assert parse_qs(urlsplit(done.headers["location"]).query) == {
+            "section": ["people"], "capability": ["feishu"], "employee": ["4"], "feishu_oauth": ["connected"]}
+        assert owner.get(prefix + "/status?employee=4").json()["actions"]["folder"]
+        assert not owner.get(prefix + "/status").json()["actions"]["folder"]
+
 
 def test_extending_consent_keeps_prior_capabilities_until_confirmed(tmp_path,monkeypatch):
     from app.feishu import owner_oauth as oauth

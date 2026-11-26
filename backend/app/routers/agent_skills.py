@@ -6,7 +6,7 @@ Errors carry `{"detail": {"error_code": "...", "message": "..."}}`."""
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.db.models import Thread, Turn
@@ -128,25 +128,76 @@ async def list_skills(agent_id: int, rt: ThreadRuntime = Depends(get_runtime)):
 
 
 @router.get("/catalog/available")
-async def bundled_catalog(agent_id: int, rt: ThreadRuntime = Depends(get_runtime)):
-    await _agent_or_404(rt, agent_id)
+async def bundled_catalog(agent_id: int, request: Request, rt: ThreadRuntime = Depends(get_runtime)):
+    agent = await _agent_or_404(rt, agent_id)
     try:
         from sqlalchemy import select
         from app.db.models.community_mcp import CommunityMcpConnection, CommunityMcpToolGrant
         from app.db.models.custom_mcp import CustomMcpConnection, CustomMcpToolGrant
         from app.db.models.muapi import MuapiToolGrant
-        result=skills.bundled_catalog(agent_id)
-        tools=[]
+        from app.db.models import Event
+        from app.routers.staff import local_owner
+        from app.services import employee_runtime, role_workspace
+        from pathlib import Path
+        result = skills.bundled_catalog(agent_id)
+        tools, used, verified = [], {}, {}
+        result.update(project_skills=[], last_model=None)
+        try:
+            local_owner(request)
+            show_receipts = True
+        except HTTPException:
+            show_receipts = False
+        if show_receipts and agent.role_path and employee_runtime.native_enabled(rt.owner_id, agent_id):
+            try:
+                folder = role_workspace.checked_root(Path(agent.role_path))
+                role_workspace.validate_configured_location(folder)
+                result["project_skills"] = skills.project_skill_catalog(folder, agent_id)
+            except (OSError, ValueError):
+                pass
         async with rt.session() as db:
-            for grant,connection,label in ((CommunityMcpToolGrant,CommunityMcpConnection,CommunityMcpConnection.slug),
-                                           (CustomMcpToolGrant,CustomMcpConnection,CustomMcpConnection.name)):
-                rows=await db.execute(select(label,grant.tool_name,grant.description).join_from(
-                    grant,connection,grant.connection_id==connection.id).where(
-                    grant.agent_id==agent_id,connection.owner_id==rt.owner_id))
-                tools.extend({"name":f"{source} · {name}","description":desc} for source,name,desc in rows)
-            rows=await db.execute(select(MuapiToolGrant.tool_name,MuapiToolGrant.description)
-                                  .where(MuapiToolGrant.agent_id==agent_id))
-            tools.extend({"name":f"MuAPI · {name}","description":desc} for name,desc in rows)
+            if show_receipts:
+                from app.db.models.knowledge_weekly import KnowledgeWeeklyGrant
+                from app.routers.weekly_knowledge import public as weekly_details
+                weekly = await db.get(KnowledgeWeeklyGrant, (rt.owner_id, agent_id))
+                if weekly:
+                    result["weekly_knowledge"] = weekly_details(weekly)
+                recent = await db.scalars(select(Event).join(Thread, Thread.id == Event.thread_id).where(
+                    Thread.owner_id == rt.owner_id, Thread.agent_id == agent_id,
+                    Event.type.in_(("skill.used", "mcp.verified", "model.receipt"))).order_by(Event.id.desc()).limit(300))
+                for event in recent:
+                    data = event.data or {}
+                    if event.type == "skill.used" and data.get("revision"):
+                        for name in data.get("skills", []):
+                            used.setdefault((name, data["revision"]), event.created_at)
+                    elif event.type == "mcp.verified":
+                        key = (data.get("connection"), data.get("revision"), data.get("tool"), data.get("schema_digest"))
+                        verified.setdefault(key, event.created_at)
+                    elif event.type == "model.receipt" and result["last_model"] is None:
+                        result["last_model"] = {**data, "at":event.created_at}
+            for grant, connection in ((CommunityMcpToolGrant, CommunityMcpConnection), (CustomMcpToolGrant, CustomMcpConnection)):
+                rows = await db.execute(select(grant, connection).join_from(grant, connection, grant.connection_id == connection.id)
+                                        .where(grant.agent_id == agent_id, connection.owner_id == rt.owner_id))
+                for item, source in rows:
+                    custom = isinstance(source, CustomMcpConnection)
+                    status = "granted"
+                    if custom:
+                        if not source.enabled:
+                            status = "disabled"
+                        elif source.tested_revision != source.revision or source.last_error_code:
+                            status = "needs_test"
+                        elif not source.shared:
+                            status = "private"
+                    label = source.name if custom else source.slug
+                    tools.append({"name":f"{label} · {item.tool_name}", "description":item.description,
+                                  "source":"自定义 MCP" if custom else "MCP 应用市场", "status":status,
+                                  "verified_at":verified.get((source.id, source.revision, item.tool_name, item.schema_digest))})
+            for item in await db.scalars(select(MuapiToolGrant).where(MuapiToolGrant.agent_id == agent_id)):
+                tools.append({"name":f"MuAPI · {item.tool_name}", "description":item.description,
+                              "source":"MuAPI 接口", "status":"granted",
+                              "verified_at":verified.get(("muapi-direct", 1, item.tool_name, item.schema_digest))})
+        result["skill_receipts"] = {s.name:used[s.name, s.revision] for s in skills.list_skills(agent_id) if (s.name, s.revision) in used}
+        for item in result["project_skills"]:
+            item["verified_at"] = used.get((item["name"], item["revision"]))
         result["tools"]=sorted(tools,key=lambda item:item["name"])
         return result
     except skills.SkillError as exc:

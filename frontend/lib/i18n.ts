@@ -187,6 +187,8 @@ export const en = {
   "header.copyLink": "Copy link to this chat",
   "header.linkCopied": "Link copied",
   "branch.edit": "Edit and branch",
+  "chat.quote": "Reply to this message",
+  "chat.quoting": "Replying to",
   "branch.send": "Send in new branch",
   "branch.cancel": "Cancel",
   "branch.from": "Branched from an earlier conversation",
@@ -549,6 +551,8 @@ export type MessageKey = Exclude<keyof typeof en,
   | "channels.boatTasksCompactDescription"
   | "channels.openBoatTasks"
   | "chat.reaction.thumbsUp"
+  | "chat.quote"
+  | "chat.quoting"
   | "chat.reaction.thumbsDown"
   | "chat.reaction.replyThumbsUp"
   | "chat.reaction.replyThumbsDown"

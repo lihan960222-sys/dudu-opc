@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ChevronRight, Copy, GitBranch, Loader2, Square, ThumbsDown, ThumbsUp, X } from "lucide-react";
+import { Check, ChevronRight, Copy, GitBranch, Loader2, Reply, Square, ThumbsDown, ThumbsUp, X } from "lucide-react";
 import type { ReactionKind } from "@/lib/reactions";
 import { useState } from "react";
 import { canAlwaysAllow, isScreenInput } from "@/lib/approvals";
@@ -97,15 +97,27 @@ function CopyButton({ text, className }: { text: string; className?: string }) {
   );
 }
 
+function QuoteButton({ onQuote }: { onQuote: () => void }) {
+  const t = useT();
+  return (
+    <button type="button" onClick={onQuote} aria-label={t("chat.quote")} title={t("chat.quote")}
+      className="shrink-0 rounded-md p-1 text-muted hover:text-ink">
+      <Reply size={14} aria-hidden="true" />
+    </button>
+  );
+}
+
 export function UserMessage({
   item,
   threadId = null,
   onBranch,
+  onQuote,
 }: {
   item: Item<"user">;
   threadId?: number | null;
   // Edit this message and resend it in a new branch; resolves false on failure.
   onBranch?: (turnId: number, text: string) => Promise<boolean>;
+  onQuote?: () => void;
 }) {
   const t = useT();
   const timeStr = formatMessageTime(item.ts, t);
@@ -147,6 +159,7 @@ export function UserMessage({
       <MessageAttachments threadId={threadId} items={item.attachments ?? []} />
       <div className="flex max-w-[88%] items-end gap-1.5 sm:max-w-[80%]">
         {item.text && <CopyButton text={item.text} />}
+        {onQuote && <QuoteButton onQuote={onQuote} />}
         {canBranch && (
           <button
             type="button"
@@ -191,6 +204,7 @@ export function AssistantMessage({
   ts = null,
   reaction = null,
   onReact,
+  onQuote,
   disabled = false,
   threadId = null,
   workspacePath = null,
@@ -205,6 +219,7 @@ export function AssistantMessage({
   ts?: string | null;
   reaction?: ReactionKind | null;
   onReact?: (reaction: ReactionKind) => void;
+  onQuote?: () => void;
   disabled?: boolean;
   threadId?: number | null;
   workspacePath?: string | null;
@@ -224,6 +239,7 @@ export function AssistantMessage({
       {!live && text && (
         <div className="-ml-1 mt-1 flex flex-wrap items-center gap-1.5">
           <CopyButton text={text} />
+          {onQuote && <QuoteButton onQuote={onQuote} />}
           {onReact && (
             <div className="flex items-center gap-1">
               <button

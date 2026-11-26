@@ -1,4 +1,6 @@
 import hashlib
+import json
+import re
 import unicodedata
 from pathlib import PureWindowsPath
 
@@ -14,12 +16,36 @@ def initialize(db):
     for column in ("decision","actor_open_id"):
         if column not in existing:
             db.execute(f"alter table approval_dm add column {column} text")
+    for column in ("agent_id", "assignment_epoch"):
+        if column not in existing:
+            db.execute(f"alter table approval_dm add column {column} integer")
 
 
-def describe(approval):
-    if approval.get("tool") != "feature_files.write_text":
-        return None
+def _exact_text(value):
+    from app.services.decision_log import redact
+    return (isinstance(value, str) and 0 < len(value) <= 1200
+            and not any(unicodedata.category(c).startswith("C") for c in value)
+            and redact(value) == value)
+
+
+def describe(approval, *, native=False):
+    tool = approval.get("tool", "")
     args = approval.get("input") or {}
+    if not isinstance(args, dict):
+        return None
+    if native and tool == "Bash":
+        cmd, cwd = args.get("command"), args.get("cwd")
+        if set(args) == {"command", "cwd"} and _exact_text(cmd) and _exact_text(cwd):
+            return f"执行命令：{cmd}\n工作目录：{cwd}"
+        return None
+    if native and isinstance(tool, str) and tool.startswith("mcp__community__"):
+        exact = json.dumps(args, ensure_ascii=False, sort_keys=True)
+        sensitive = re.search(r'"[^"]*(?:password|token|secret|api[_-]?key|credential|auth)[^"]*"\s*:', exact, re.I)
+        if not sensitive and _exact_text(exact) and re.fullmatch(r"mcp__community__[A-Za-z0-9_-]{1,128}", tool):
+            return f"调用工具：{tool}\n完整参数：{exact}"
+        return None
+    if tool != "feature_files.write_text" or set(args) != {"path", "text"}:
+        return None
     name, text = args.get("path"), args.get("text")
     if not isinstance(name, str) or not isinstance(text, str) or not name or len(name) > 280:
         return None
@@ -44,14 +70,18 @@ def queue_notice(db, execution, task, approval, label):
     with db:
         if db.execute("select 1 from approval_dm where approval=?", (approval["id"],)).fetchone():
             return
-        detail = describe(approval)
+        epoch, agent_id = execution.get("assignment_epoch"), execution.get("agent_id")
+        detail = describe(approval, native=epoch is not None and agent_id is not None)
         if detail is None:
             body = f"{label} 有一项操作需要核对完整请求，请在管理网页的团队派工记录中处理。"
         else:
             body = f"{label} 请求一次操作许可。\n{detail}\n请引用本条私聊回复「确认」或「拒绝」。"
-        outgoing = enqueue(db, task, "steward", {"text":body})
-        db.execute("insert into approval_dm(approval,dispatch,thread,turn,outgoing,state) values(?,?,?,?,?,?)",
-                   (approval["id"], execution["event"], execution["thread"], execution["turn"], outgoing,
+        notice = {"text":body}
+        if execution.get("source_message"):
+            notice["reply_to"] = execution["source_message"]
+        outgoing = enqueue(db, task, "steward", notice)
+        db.execute("insert into approval_dm(approval,dispatch,thread,turn,outgoing,agent_id,assignment_epoch,state) values(?,?,?,?,?,?,?,?)",
+                   (approval["id"], execution["event"], execution["thread"], execution["turn"], outgoing, agent_id, epoch,
                     "pending" if detail is not None else "local"))
 
 
@@ -61,7 +91,8 @@ async def collect_team_requests(worker):
     from sqlalchemy import select
     from app.db import session
     from app.db.models import Agent, AgentJob, AgentJobEvent, Approval, Team, Thread, Turn
-    from app.team.steward_review import preview
+    from app.services.feature_tasks import assignment_current
+    from app.team.steward_review import effective_job_mode, preview
     owner = worker.cfg.get("owner_id")
     lead = worker.cfg.get("steward", {}).get("agent_id")
     if not owner or not lead:
@@ -75,11 +106,14 @@ async def collect_team_requests(worker):
                     Team.owner_id == owner, Team.lead_agent_id == lead, Agent.owner_id == owner,
                     Thread.owner_id == owner, Thread.agent_id == Agent.id, Agent.archived_at.is_(None),
                     AgentJob.owner_id == owner, AgentJob.assignee_thread_id == Thread.id,
-                    AgentJob.requester_agent_id == lead,
-                    (Agent.manager_agent_id.is_(None) | (Agent.manager_agent_id == lead)),
                     AgentJob.kind == "job", AgentJob.mode == "work"))
     async with session.AsyncSessionLocal() as db:
         for job, approval, agent in await db.execute(query):
+            if not await assignment_current(db, job):
+                continue
+            if job.requester_agent_id != lead or agent.manager_agent_id not in (None, lead):
+                if not job.task_id or await effective_job_mode(db, job) == "plan":
+                    continue
             if (approval.created_at > datetime.now(UTC) - timedelta(minutes=3)
                     and await preview(db, owner, job, approval)):
                 escalations = await db.scalars(select(AgentJobEvent.detail).where(
@@ -88,6 +122,17 @@ async def collect_team_requests(worker):
                     continue
             item = {"id": approval.id, "tool": approval.tool, "input": approval.input}
             execution = {"thread": approval.thread_id, "turn": approval.turn_id, "event": f"team:{job.id}"}
+            thread = await db.get(Thread, approval.thread_id)
+            if job.task_id and (thread.provider_state or {}).get("employee_project"):
+                execution.update(assignment_epoch=job.assignment_epoch, agent_id=agent.id)
+            if worker.db.execute("select 1 from sqlite_master where name='direct_turns'").fetchone():
+                original = await db.get(AgentJob, job.root_id) if job.root_id else job
+                if original and original.owner_id == owner and original.requester_agent_id == lead:
+                    origin = worker.db.execute("""select i.message from inbox i join direct_turns d using(app,event)
+                        where i.app=? and d.thread=? and d.turn=?""",
+                        (worker.cfg["steward"].get("app_id"), original.requester_thread_id, original.requester_turn_id)).fetchone()
+                    if origin and origin[0]:
+                        execution["source_message"] = origin[0]
             queue_notice(worker.db, execution, job.task_id, item, f"{agent.name} 的派工 #{job.id}")
 
 
@@ -117,13 +162,15 @@ def answer(worker, row, msg, text):
     if not won:
         worker.respond(row,"done","该请求已由另一条回复处理。",task)
         return True
-    resp = worker.api.post(f"threads/{binding['thread']}/approvals/{binding['approval']}",
-        json={"decision":decision, "remember":False, "expected_turn_id":binding["turn"]})
+    payload = {"decision":decision, "remember":False, "expected_turn_id":binding["turn"]}
+    if binding["assignment_epoch"] is not None:
+        payload.update(expected_assignment_epoch=binding["assignment_epoch"], expected_employee_id=binding["agent_id"])
+    resp = worker.api.post(f"threads/{binding['thread']}/approvals/{binding['approval']}", json=payload)
     if resp.status_code in (404,409):
         state, message = "expired", "请求已失效，或该轮任务已结束。"
     else:
         resp.raise_for_status()
-        state, message = "answered", "已允许本次写入。" if decision == "allow" else "已拒绝本次写入。"
+        state, message = "answered", "已允许本次操作。" if decision == "allow" else "已拒绝本次操作。"
     with db:
         db.execute("update approval_dm set state=? where approval=?", (state,binding["approval"]))
         worker.respond(row,"done",message,task)

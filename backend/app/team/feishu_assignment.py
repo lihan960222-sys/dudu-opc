@@ -35,7 +35,7 @@ def gateway_pin(cfg, key):
         return proof
 
 
-async def resolve(db, owner, lead, thread, turn, employee):
+async def resolve(db, owner, lead, thread, turn, employee, *, delivery=None, original=""):
     cfg = configuration()
     if not cfg or cfg["owner_id"] != owner or cfg["steward"]["agent_id"] != lead:
         return None
@@ -51,9 +51,20 @@ async def resolve(db, owner, lead, thread, turn, employee):
     aliases = [name for name,src in sources.items() if src.get("agent_id")==employee
                and src.get("oauth_app") and any(role.get("agent_id")==employee and
                role.get("app_id")==src["oauth_app"] for role in cfg.get("roles",{}).values())]
-    if len(aliases)==1:
-        return {"app":cfg["steward"]["app_id"],"event":f"employee-{turn}-{employee}",
-                "employee":employee,"contact":aliases[0],"action":"employee"}
+    named=[name for name in aliases if name and name in (original or "")]
+    contact=named[0] if len(named)==1 else None
+    if delivery in ("create_document","edit_document","read_document"):
+        if not any(role.get("agent_id")==employee and role.get("app_id") for role in cfg.get("roles",{}).values()):
+            return None
+        # A document-only instruction does not implicitly authorize reading a person's chat.
+        if len(named)>1:
+            return None
+    elif contact is None:
+        if len(aliases)!=1:
+            return None
+        contact=aliases[0]
+    return {"app":cfg["steward"]["app_id"],"event":f"employee-{turn}-{employee}",
+            "employee":employee,"contact":contact,"action":"employee"}
 
 
 async def for_job(db, job_id):
@@ -80,6 +91,10 @@ def delivery_contract(pin, delivery, original):
     from app.team import service
     if delivery is None:
         return pin
+    if delivery=="create_document":
+        if not isinstance(original,str) or not original.strip():
+            raise service.TeamError("invalid_input","请保留老板要求创建文档的原消息。")
+        return {**pin,"action":delivery,"original":original,"expected_tool":"feishu_create_document"}
     if delivery in ("read_document","edit_document"):
         from app.feishu.document_access import urls
         links=urls(original or "")
@@ -90,5 +105,5 @@ def delivery_contract(pin, delivery, original):
     if delivery not in ("read","update","restructure"):
         raise service.TeamError("invalid_input","未知的飞书交付要求。")
     if delivery=="read":
-        return {**pin,"expected_tool":"feishu_read_history"}
+        return {**pin,"expected_tool":"feishu_read_history","read_only":True}
     return {**pin,"action":delivery,"original":original or "","expected_tool":"feishu_publish_knowledge"}

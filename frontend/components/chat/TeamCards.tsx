@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { AvatarPicker, FolderField, savePicture } from "../staff/ProfileControls";
 import { request } from "@/lib/api";
 import { StaffModelFields } from "../staff/ProfileControls";
+import { employeeModelProfile } from "@/lib/engine-selection";
 import { api, ApiError, type Engine } from "@/lib/api";
 import { collaboration } from "@/lib/collaboration";
 import { can } from "@/lib/permissions";
@@ -125,8 +126,9 @@ function TeamSetupProposal({ item, onDecided }: { item: Extract<TranscriptItem, 
               value={operation[field] ?? ""} disabled={!canReview || busy} multiline={field !== "name" && field !== "title"}
               onChange={value => changeOperation(index, current => current.op === "create" ? { ...current, [field]: value } : current)} />)}
           <StaffModelFields engines={engines} provider={operation.provider ?? "codex"} model={operation.model ?? null}
-            disabled={!canReview || busy}
-            onChange={(provider, model) => changeOperation(index, current => current.op === "create" ? {...current, provider, model} : current)} />
+            effort={operation.effort ?? null} disabled={!canReview || busy}
+            onChange={(provider, model, effort) => changeOperation(index, current => current.op === "create" ?
+              {...current, ...employeeModelProfile(provider, null, model, effort ?? null)} : current)} />
           {isAdmin&&<div><span className="text-xs text-muted">员工头像 · 确认入职时保存</span>{pictures[index]&&<AgentPortrait src={pictures[index]} agentId={null} size="lg"/>}<AvatarPicker onChange={data=>setPictures(prev=>({...prev,[index]:data}))}/></div>}
           <FolderField value={operation.workspace_path??""} disabled={!isAdmin||busy||operation.share_workspace}
             onChange={value=>changeOperation(index,current=>current.op==="create"?{...current,workspace_path:value||undefined}:current)}/>

@@ -10,6 +10,21 @@ from app.services import thread_store as store
 from tests.services.thread_harness import sessions, owner
 
 
+def test_native_owner_decision_summarises_exact_operation_and_job(tmp_path):
+    db = journal(tmp_path / "native")
+    approvals.initialize(db)
+    item = {"id":"native", "tool":"Bash", "input":{"command":"python -m pytest", "cwd":"C:/fixture"}}
+    execution = {"thread":24, "turn":25, "event":"team:42", "assignment_epoch":3, "agent_id":17}
+    approvals.queue_notice(db, execution, 9, item, "Jensen 的派工 #42")
+    approvals.queue_notice(db, execution, 9, item, "Jensen 的派工 #42")
+    [sent] = db.execute("select * from outbox").fetchall()
+    assert sent["role"] == "steward" and "python -m pytest" in sent["body"]
+    assert "C:/fixture" in sent["body"] and "确认" in sent["body"]
+    binding = db.execute("select * from approval_dm").fetchone()
+    assert binding["state"] == "pending" and binding["assignment_epoch"] == 3 and binding["agent_id"] == 17
+    db.close()
+
+
 @pytest.mark.parametrize("reply, decision", [("确认", "allow"), ("拒绝", "deny")])
 def test_exact_private_approval_reply(tmp_path, reply, decision):
     db = journal(tmp_path/"journal")

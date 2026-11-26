@@ -83,6 +83,8 @@ class Capabilities:
     steering: bool = False
     memory_tools: bool = False
     connected_apps: bool = False
+    # The adapter can launch a confined project, bind its native history and honor its file scope.
+    project_workspace: bool = False
 
     @property
     def can_search_history(self) -> bool:
@@ -200,6 +202,10 @@ class TurnContext:
     feature_workspace: str | None = None
     consult_only: bool = False
     steward_deepseek: bool = False
+    model_vendor: str | None = None
+    project_runtime: object | None = None
+    scheduled_knowledge: bool = False
+    bind_native_session: Callable[[dict], Awaitable[bool]] | None = None
     media_review_only: bool = False
     # Extra instructions from the thread's named agent, for the provider's
     # system prompt (appended, never replacing it), or None. Read fresh each turn.

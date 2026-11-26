@@ -44,6 +44,8 @@ class AgentCreateRequest(BaseModel):
     # An engine id from GET /api/v1/engines; an unknown one is a 422, and the
     # model is checked against it (422 `unknown_model`).
     provider: str = Field(default="claude", min_length=1, max_length=64)
+    model_vendor: str | None = Field(default=None, min_length=1, max_length=64)
+    delegate_project_writes: bool = False
     model: str | None = Field(default=None, max_length=200)
     effort: str | None = Field(default=None, max_length=64)
     # Omitted: the agent gets its own folder under the default workspace root.
@@ -101,6 +103,8 @@ class AgentUpdateRequest(BaseModel):
     # Another engine. Its conversations keep the engine they started on; a
     # change without `model` goes back to the new engine's default model.
     provider: str | None = Field(default=None, min_length=1, max_length=64)
+    model_vendor: str | None = Field(default=None, min_length=1, max_length=64)
+    delegate_project_writes: bool | None = None
     model: str | None = Field(default=None, max_length=200)
     effort: str | None = Field(default=None, max_length=64)
     workspace_path: str | None = Field(default=None, max_length=1000)
@@ -142,7 +146,7 @@ class AgentUpdateRequest(BaseModel):
     def _something_to_change(self):
         if not self.model_fields_set:
             raise ValueError("send at least one field to change")
-        for field in ("name", "instructions", "provider", "approval_mode", "pinned", "team_workspaces_readable", "memory_enabled", "recall_enabled", "memory_upkeep", "compaction_summary", "use_helper", "archived"):
+        for field in ("name", "instructions", "provider", "approval_mode", "pinned", "team_workspaces_readable", "delegate_project_writes", "memory_enabled", "recall_enabled", "memory_upkeep", "compaction_summary", "use_helper", "archived"):
             if field in self.model_fields_set and getattr(self, field) is None:
                 raise ValueError(f"{field} cannot be null")
         return self
@@ -157,6 +161,8 @@ class AgentResponse(BaseModel):
     description: str | None
     instructions: str
     provider: str
+    model_vendor: str | None = None
+    delegate_project_writes: bool = False
     model: str | None
     effort: str | None = None
     # Null: a thread started from this agent gets its own folder, named by the

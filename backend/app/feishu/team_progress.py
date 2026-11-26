@@ -5,7 +5,7 @@ import time
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
-from .routing import enqueue, ensure_group_root
+from .routing import bind_outgoing, enqueue, ensure_group_root
 
 STATUS = {
     'queued':'已排队','admitted':'已领取','dispatched':'已派单','running':'执行中',
@@ -32,10 +32,11 @@ async def refresh(worker):
         return
     where = (AgentJob.owner_id==worker.cfg['owner_id'],AgentJob.project==worker.cfg['project'],
              AgentJob.kind=='job',AgentJob.mode=='work',AgentJob.task_id.is_not(None),AgentJob.assignee_agent_id.in_(roles))
-    query = select(AgentJob.id,AgentJob.task_id,AgentJob.assignee_agent_id,AgentJob.status,
+    query = select(AgentJob.id,AgentJob.task_id,AgentJob.assignee_agent_id,AgentJob.status,AgentJob.assignment_epoch,
                    AgentJob.origin_ref,WorkItem.title,WorkItem.agent_id).join(
                    WorkItem,WorkItem.id==AgentJob.task_id).join(FeatureScope,FeatureScope.task_id==WorkItem.id).where(
-                   *where,WorkItem.owner_id==worker.cfg['owner_id'],FeatureScope.project==worker.cfg['project'])
+                   *where,WorkItem.owner_id==worker.cfg['owner_id'],FeatureScope.project==worker.cfg['project'],
+                   AgentJob.assignment_epoch==FeatureScope.assignment_epoch)
     cursor = db.execute('select last_job from team_cursor where singleton=1').fetchone()
     async with session.AsyncSessionLocal() as owner:
         if cursor is None:
@@ -57,12 +58,13 @@ async def refresh(worker):
             native = db.execute('select 1 from submissions where event=?',(job.origin_ref,)).fetchone()
             if native or job.status==known.get(job.id):
                 continue
-            title = job.title if job.assignee_agent_id==job.agent_id else '项目协作任务'
+            title = job.title if job.assignee_agent_id==job.agent_id and job.assignment_epoch==1 else '项目协作任务'
             ensure_group_root(db,job.task_id,role,title)
             if job.id not in known:
-                enqueue(db,job.task_id,role,{'text':f'已收到派工 #{job.id}，任务 #{job.task_id}。当前状态：{STATUS.get(job.status,job.status)}。'})
+                outgoing = enqueue(db,job.task_id,role,{'text':f'已收到派工 #{job.id}，任务 #{job.task_id}。当前状态：{STATUS.get(job.status,job.status)}。'})
             else:
-                enqueue(db,job.task_id,role,{'text':f'派工 #{job.id} 状态更新：{STATUS.get(job.status,job.status)}。'})
+                outgoing = enqueue(db,job.task_id,role,{'text':f'派工 #{job.id} 状态更新：{STATUS.get(job.status,job.status)}。'})
+            bind_outgoing(db,outgoing,[job.id])
             db.execute('insert into team_publications(job,task,role,status) values(?,?,?,?) on conflict(job) do update set status=excluded.status',
                        (job.id,job.task_id,role,job.status))
         if fresh:

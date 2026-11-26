@@ -7,6 +7,7 @@ import { assignedContact, FEISHU_RETURN_EMPLOYEE, type FeishuContact } from "@/l
 type Access = {
   revision: string;
   allow_codex_summary: boolean;
+  employee_summary_vendors?: Record<string, string[]>;
   history_sources: Record<string, FeishuContact>;
   document_target: { tenant_origin?: string; folder_token?: string };
 };
@@ -15,6 +16,8 @@ type OAuth = {
   scopes: string[];
   actions: { history: boolean; doc: boolean; delete?: boolean; wiki?: boolean; folder?: boolean };
   redirect_uri: string;
+  permissions_url?: string;
+  consent?: {state: "expired" | "processing" | "awaiting_return"; missing_scopes: string[]} | null;
 };
 const oauth = "/feishu/owner-oauth";
 const settings = "/staff/feishu";
@@ -52,8 +55,15 @@ export function FeishuAccess({ employee, name, isLead, members }: {
   }, [accept, employee]);
   useEffect(() => {
     void load();
-    return () => { loadId.current = null; };
-  }, [load]);
+    let active = true;
+    const onFocus = () => {
+      void request<OAuth>(oauth + "/status?employee=" + employee).then(next => {
+        if (active) setAuth(next);
+      }).catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+    return () => { active = false; loadId.current = null; window.removeEventListener("focus", onFocus); };
+  }, [employee, load]);
 
   async function run(work: () => Promise<void>) {
     setBusy(true); setError(""); setNotice("");
@@ -116,8 +126,14 @@ export function FeishuAccess({ employee, name, isLead, members }: {
             setNotice("已断开该应用在本机的飞书授权。");
           })}>断开此应用授权</button>}
         </div>
+        {auth?.consent && <p role="status">
+          {auth.consent.state === "expired" ? "上次授权已过期，请重新发起缺少的授权。" :
+            auth.consent.state === "processing" ? "已收到飞书回调，正在核对授权。" : "等待飞书回到工作台。在授权页点「同意」后等它自动返回。"}
+          {" 缺少 "}{auth.consent.missing_scopes.join("、")}
+        </p>}
         <details>
           <summary>在飞书开放平台开通权限</summary>
+          {auth?.permissions_url && <a href={auth.permissions_url} target="_blank" rel="noreferrer">打开{name}应用的权限管理</a>}
           <p>在应用的权限管理中选择用户身份。读取私聊需要 <code>im:chat:read</code>、<code>im:message:readonly</code> 和 <code>im:message.p2p_msg:get_as_user</code>。文档读写需要 <code>docx:document:create</code>、<code>docx:document:write_only</code> 和 <code>docx:document:readonly</code>。打开知识库链接还需要 <code>wiki:node:read</code>。核对文档所在文件夹需要 <code>space:document:retrieve</code>。删除指定文档需要单独开通 <code>space:document:delete</code>。持续使用还需要 <code>offline_access</code>。</p>
           <p>把下面的地址填入应用的「安全设置 → 重定向 URL」，发布新版本，再回这里授权。</p>
           {auth?.redirect_uri && <input aria-label="飞书重定向 URL" readOnly value={auth.redirect_uri} onFocus={e => e.target.select()} />}
@@ -154,6 +170,23 @@ export function FeishuAccess({ employee, name, isLead, members }: {
           }} />
           允许已绑定联系人经办人在我要求时将摘录发送至 OpenAI Codex（共享设置）
         </label>}
+        {!isLead && access && <fieldset disabled={busy} className="dp-fields">
+          <legend>可整理指定私聊的模型供应商</legend>
+          {(["openai","deepseek","anthropic","google"] as const).map(vendor => {
+            const selected = access.employee_summary_vendors?.[String(employee)] ?? (access.allow_codex_summary ? ["openai"] : []);
+            return <label className="dp-check" key={vendor}>
+              <input type="checkbox" checked={selected.includes(vendor)} onChange={e => {
+                const vendors = e.target.checked ? [...selected,vendor] : selected.filter(v => v !== vendor);
+                void run(async () => {
+                  accept(await request<Access>(settings + "/analysis/" + employee,{method:"PUT",
+                    body:JSON.stringify({revision:access.revision,vendors})}));
+                  setNotice("已保存这名员工的私聊整理授权。");
+                });
+              }} />
+              {{openai:"OpenAI",deepseek:"DeepSeek",anthropic:"Anthropic",google:"Google"}[vendor]}
+            </label>;
+          })}
+        </fieldset>}
       </fieldset>
       {isLead && <fieldset disabled={busy || !access} className="dp-fields">
         <legend>新建飞书文档</legend>

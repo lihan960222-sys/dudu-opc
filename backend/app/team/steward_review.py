@@ -13,13 +13,103 @@ from app.services.feature_files import FeatureFiles
 from app.team import service
 
 
+async def delegated_mode(db, parent, caller, child, requester_mode):
+    """A supervisor can pass on project writes only within the owner's standing grant."""
+    from app.services.feature_tasks import assignment_current
+    from app.services.routine_service import effective_approval_mode
+    if (not parent or parent.kind != "job" or parent.mode != "work" or parent.origin_kind != "person"
+            or parent.status not in ("running", "waiting", "needs_input", "resume")
+            or parent.assignee_agent_id != caller.id or parent.owner_id != caller.owner_id
+            or child.owner_id != caller.owner_id or child.manager_agent_id != caller.id
+            or not caller.team_id or child.team_id != caller.team_id or child.archived_at or caller.archived_at
+            or not caller.delegation_enabled or not caller.delegate_project_writes
+            or not await assignment_current(db, parent)):
+        return "plan"
+    limit = effective_approval_mode(caller.approval_mode, child.approval_mode)
+    return effective_approval_mode(limit, effective_approval_mode(parent.approval_mode, requester_mode))
+
+
+async def effective_job_mode(db, job):
+    from app.services.feature_tasks import assignment_current
+    from app.services.routine_service import effective_approval_mode
+    if job.mode != "work" or not await assignment_current(db, job):
+        return "plan"
+    team = await service.team_for(db, job.owner_id)
+    if not team or not team.lead_agent_id:
+        return "plan"
+    mode = job.approval_mode or "ask"
+    seen = set()
+    while job and job.id not in seen:
+        seen.add(job.id)
+        worker = await db.get(Agent, job.assignee_agent_id)
+        caller = await db.get(Agent, job.requester_agent_id)
+        if (not worker or not caller or worker.archived_at or caller.archived_at or
+                caller.owner_id != team.owner_id or worker.owner_id != team.owner_id or
+                worker.team_id != team.id or caller.team_id != team.id or
+                (worker.manager_agent_id or team.lead_agent_id) != caller.id or not caller.delegation_enabled):
+            return "plan"
+        mode = effective_approval_mode(mode, worker.approval_mode)
+        if caller.id == team.lead_agent_id:
+            return mode
+        parent = await db.get(AgentJob, job.parent_id) if job.parent_id else None
+        if not parent or parent.project != job.project or parent.assignee_thread_id != job.requester_thread_id:
+            return "plan"
+        mode = await delegated_mode(db, parent, caller, worker, mode)
+        job = parent
+    return "plan"
+
+
+async def current_native_job(db, run, *, write=False, lock=False):
+    """Recheck the bound dispatch, owner, turn and live write ceiling before a broker calls a tool."""
+    from app.services.feature_tasks import assignment_current
+    project = getattr(run.ctx, "project_runtime", None)
+    if not project or run.ctx.aborted:
+        return None
+    query = select(AgentJob).where(
+        AgentJob.owner_id == project.owner_id, AgentJob.assignee_agent_id == project.employee_id,
+        AgentJob.assignee_thread_id == run.thread_id, AgentJob.assignee_turn_id == run.turn_id,
+        AgentJob.task_id == project.task_id, AgentJob.assignment_epoch == project.assignment_epoch,
+        AgentJob.kind == "job", AgentJob.mode == "work", AgentJob.status.in_(("running", "dispatched", "needs_input")))
+    job = await db.scalar(query.with_for_update() if lock else query)
+    if not job or not await assignment_current(db, job, lock=lock):
+        return None
+    if write and (not project.writable or run.ctx.approval_mode == "plan" or await effective_job_mode(db, job) == "plan"):
+        return None
+    return job
+
+
+async def protect_active_scope(db, agent, *, shared_folders=False):
+    """A live native process retains its startup file permissions until it exits."""
+    rows = (await db.execute(select(Thread, Agent).join(Turn, Turn.thread_id == Thread.id)
+        .join(Agent, Agent.id == Thread.agent_id).where(
+            Thread.owner_id == agent.owner_id, Thread.kind == "feature", Turn.status == "running")
+        .with_for_update())).all()
+    for thread, worker in rows:
+        if not (thread.provider_state or {}).get("employee_project"):
+            continue
+        shares = shared_folders and worker.team_workspaces_readable and worker.team_id == agent.team_id
+        current, visited = worker, set()
+        while current and current.id not in visited:
+            visited.add(current.id)
+            if shares or current.id == agent.id:
+                raise service.TeamError("project_running", f"请先停止 {worker.name} 的当前项目回合，再更改这项权限。")
+            if not current.manager_agent_id:
+                team = await service.team_for(db, worker.owner_id)
+                if team and team.lead_agent_id == agent.id and team.id == worker.team_id:
+                    raise service.TeamError("project_running", f"请先停止 {worker.name} 的当前项目回合，再更改团队权限。")
+                break
+            current = await db.get(Agent, current.manager_agent_id)
+
+
 async def preview(db, owner, job, approval):
+    from app.services.feature_tasks import assignment_current
     if (settings.STEWARD_STRICT_OWNER != owner or not approval or job.owner_id != owner
             or job.kind != 'job' or job.mode != 'work' or not job.task_id or job.reply != 'resume'
             or job.origin_kind != 'person' or job.status not in ('running','needs_input')
             or job.approval_mode == 'plan' or approval.status != 'pending'
             or approval.tool != 'feature_files.write_text' or approval.thread_id != job.assignee_thread_id
-            or approval.turn_id != job.current_turn_id or approval.turn_id != job.assignee_turn_id):
+            or approval.turn_id != job.current_turn_id or approval.turn_id != job.assignee_turn_id
+            or not await assignment_current(db, job, lock=True)):
         return None
     team = await service.team_for(db, owner, lock=True)
     worker = await db.get(Agent, job.assignee_agent_id, with_for_update=True)
@@ -53,6 +143,7 @@ async def preview(db, owner, job, approval):
     except (OSError, TypeError, ValueError):
         return None
     return {'job_id':job.id, 'approval_id':approval.id, 'turn_id':approval.turn_id, 'task_id':card.id,
+            'assignment_epoch':job.assignment_epoch, 'employee_id':worker.id,
             'path':args['path'], 'text':args['text'], 'sha256':hashlib.sha256(args['text'].encode()).hexdigest()}
 
 
@@ -83,7 +174,8 @@ async def decide(rt, run, args):
         if await db.scalar(select(AgentJobEvent.id).where(AgentJobEvent.job_id==job.id,
                 AgentJobEvent.kind=='review_escalated', AgentJobEvent.detail['approval_id'].as_string()==request.id)):
             raise service.TeamError('escalated','This decision was passed to the owner.')
-        audit = {'approval_id':request.id,'lead_turn_id':run.turn_id,'decision':choice,'reason':args['reason']}
+        audit = {'approval_id':request.id,'lead_turn_id':run.turn_id,'decision':choice,'reason':args['reason'],
+                 'assignment_epoch':job.assignment_epoch, 'employee_id':job.assignee_agent_id}
         event(db,job,'review_escalated' if choice=='escalate' else 'steward_review',audit)
         if choice=='escalate':
             await db.commit()
@@ -107,6 +199,7 @@ async def history(db, job):
     recent = await db.scalars(select(Approval).join(FeatureSession,FeatureSession.thread_id==Approval.thread_id)
         .join(FeatureScope,FeatureScope.task_id==FeatureSession.task_id).join(WorkItem,WorkItem.id==FeatureScope.task_id)
         .where(WorkItem.owner_id==job.owner_id,WorkItem.agent_id==job.assignee_agent_id,FeatureScope.project==job.project,
+               FeatureSession.assignment_epoch==FeatureScope.assignment_epoch,
                Approval.tool=='feature_files.write_text',Approval.status.in_(('allowed','denied')))
         .order_by(Approval.decided_at.desc()).limit(5))
     result = []

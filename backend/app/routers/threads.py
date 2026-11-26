@@ -260,10 +260,15 @@ async def send_turn(
     try:
         from app.auth.middleware import principal_of
         principal = principal_of(request.scope)
+        source_fields = {"reply_to_turn_id"}
+        if isinstance(payload, DirectTurnRequest):
+            source_fields.update(("owner_text","reference_event_key","reference_task_id"))
+        source = payload.model_dump(include=source_fields, exclude_none=True)
         return await rt.send_turn(
             thread_id, payload.prompt_text, attachment_ids=payload.attachment_ids, skills=payload.skills,
             **({"direct_event_key":payload.direct_event_key} if isinstance(payload, DirectTurnRequest) else {}),
             **({"feature_event_key":payload.feature_event_key} if isinstance(payload, FeatureTurnRequest) else {}),
+            **({"assignment_source":source} if source else {}),
             configuration_allowed=principal is None or principal.is_admin,
             setup_allowed=_setup_allowed(principal),
             person_id=principal.person_id if principal else None,
@@ -489,19 +494,22 @@ async def answer_approval(
     principal = principal_of(request.scope)
     if not has_permission(principal, "approve"):
         raise _error(403, "permission_denied", "You do not have permission to answer commands. Ask an admin.")
-    await _thread_or_404(rt, thread_id)
+    target_thread = await _thread_or_404(rt, thread_id)
     async with rt.session() as db:
         approval = await store.get_approval(db, approval_id)
     if approval is None or approval.thread_id != thread_id:
         raise HTTPException(status_code=404, detail="Approval not found")
     # A standing "always allow" rule applies to the whole workspace, so it needs its own permission.
     # Without it the answer still counts, just once.
-    may_remember = has_permission(principal, "rules")
+    project_scoped = bool((target_thread.provider_state or {}).get("employee_project"))
+    may_remember = has_permission(principal, "rules") and not project_scoped
     named = principal is not None and principal.person_id is not None
     if not await rt.answer_approval(
         approval_id, payload.decision, remember=payload.remember and may_remember,
         person_id=principal.person_id if named else None, person_label=principal.label if named else None,
         **({'expected_turn_id': payload.expected_turn_id} if payload.expected_turn_id is not None else {}),
+        **({'expected_assignment_epoch': payload.expected_assignment_epoch, 'expected_employee_id': payload.expected_employee_id}
+           if payload.expected_assignment_epoch is not None or payload.expected_employee_id is not None else {}),
     ):
         raise _error(
             409, "approval_not_waiting", "That request is no longer waiting for an answer."
@@ -509,7 +517,8 @@ async def answer_approval(
     if payload.remember and payload.decision == "allow" and not may_remember:
         return ApprovalAnswerResponse(
             decision=payload.decision,
-            remember_error="Allowed this once. Saving a standing rule needs the owner's permission.",
+            remember_error=("该员工项目的许可仅限这次操作。" if project_scoped else
+                            "Allowed this once. Saving a standing rule needs the owner's permission."),
         )
     if not (payload.remember and payload.decision == "allow"):
         return ApprovalAnswerResponse(decision=payload.decision)

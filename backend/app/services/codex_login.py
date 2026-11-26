@@ -85,6 +85,7 @@ class CodexLogin:
                 str(executable), "login", "--device-auth", stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                 env=env, cwd=str(Path.home()), start_new_session=os.name != "nt",
+                **host_exec.background_process_options(),
             ))
             # If cancellation arrives during OS process creation, retain the
             # resulting child so the finally block can kill and reap it.

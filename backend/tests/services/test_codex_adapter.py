@@ -66,6 +66,7 @@ def codex(monkeypatch, tmp_path):
         exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("FAKE_CODEX_DIR", str(folder))
     monkeypatch.setattr(codex_adapter, "resolve_codex_executable", lambda: exe)
+    monkeypatch.setattr(codex_adapter, "resolve_employee_executable", lambda: exe)
     workspace = tmp_path / "ws"
     workspace.mkdir()
     monkeypatch.setattr(local_claude_runner, "workspace_dir", lambda: workspace)
@@ -109,6 +110,258 @@ def test_policy_mapping():
     assert codex_policy("accept_edits", True).approval == "untrusted"
     assert codex_policy("plan", True) == codex_adapter.CodexPolicy("never", "read-only", "readOnly")
     assert codex_policy("ask", False).sandbox == "read-only"
+
+
+async def test_service_restarts_resume_private_thread(codex, tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.core import host_exec
+    from app.services import employee_runtime
+    from app.services.provider_adapter import TurnContext
+    from tests.services.test_employee_runtime import employee_project
+
+    runtime = employee_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "STEWARD_STRICT_OWNER", runtime.owner_id)
+    monkeypatch.setattr(settings, "LOCAL_TOOLS_ENABLED", True)
+    personal = tmp_path / "personal-codex"
+    personal.mkdir()
+    (personal / "sessions.index").write_text("personal-session", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(personal))
+    monkeypatch.setenv("CODEX_SQLITE_HOME", str(personal))
+    # The protocol fixture is a separate CLI process. The real MXC probe has its own test.
+    monkeypatch.setattr(employee_runtime.ProjectRuntime, "check_start", lambda self, exe: None)
+    monkeypatch.setattr(host_exec, "employee_host_blocker", lambda **_options: None)
+    monkeypatch.setattr(host_exec, "employee_process_lifetime", lambda _pid: None)
+    environment = employee_runtime.ProjectRuntime.process_environment
+    monkeypatch.setattr(employee_runtime.ProjectRuntime, "process_environment",
+        lambda self, env=None: {**environment(self, env), "FAKE_CODEX_DIR": str(codex.folder)})
+    codex.plan(private_history=True, user_mcp={"personal_files": {}})
+    sink = SimpleNamespace(lost=False, emit=AsyncMock(return_value=True), delta=lambda value: None)
+    saved = []
+
+    async def bind(state):
+        saved.append(state)
+        return True
+
+    async def invoke(number, state):
+        ctx = TurnContext(thread_id=8, turn_id=number, prompt="continue", workspace=runtime.root,
+            model="gpt-fake", provider_session_id="backend-session", provider_state=state,
+            resume=number > 1, history=AsyncMock(side_effect=AssertionError("private history is native")),
+            feature_workspace=str(runtime.root), approval_mode="accept_edits")
+        ctx.project_runtime, ctx.model_vendor, ctx.bind_native_session = runtime, "openai", bind
+        return await CodexAdapter().run_turn(ctx, sink, None)
+
+    first = await invoke(1, {"employee_project": runtime.stamp})
+    assert first.status == "succeeded", first.error
+    state = first.provider_state
+    native = state["codex_thread_id"]
+    assert saved[0]["codex_thread_id"] == native and state["employee_project"] == runtime.stamp
+    assert (runtime.profile / "fixture-threads" / native).is_file()
+    for number in (2, 3):
+        outcome = await invoke(number, state)
+        assert outcome.status == "succeeded", outcome.error
+        assert outcome.provider_state["codex_thread_id"] == native
+        state = outcome.provider_state
+    starts = codex.received("thread/start")
+    assert len(starts) == 1 and starts[0]["params"]["ephemeral"] is False
+    assert [r["params"]["threadId"] for r in codex.received("thread/resume")] == [native, native]
+    for request in [*starts, *codex.received("thread/resume")]:
+        params = request["params"]
+        assert Path(params["cwd"]) == runtime.root
+        assert params["permissions"] == runtime.permission_name
+        assert "environments" not in params and "sandbox" not in params
+        assert params["config"]["mcp_servers"]["personal_files"]["enabled"] is False
+    for request in codex.received("turn/start"):
+        params = request["params"]
+        assert params["permissions"] == runtime.permission_name
+        assert "sandboxPolicy" not in params and "environments" not in params
+    assert [p.name for p in personal.iterdir()] == ["sessions.index"]
+    assert (personal / "sessions.index").read_text(encoding="utf-8") == "personal-session"
+    codex.plan(private_history=True, active_writer=True)
+    assert (await invoke(4, state)).error_code == "native_session_busy"
+    codex.plan(private_history=True, resume_error="maintenance in progress")
+    uncertain = await invoke(5, state)
+    assert uncertain.error_code == "native_session_unverified" and uncertain.provider_state == state
+    count = len(codex.received("thread/resume"))
+    codex.plan(private_history=True, stored_cwd=str(tmp_path / "wrong-project"))
+    wrong = await invoke(6, state)
+    assert wrong.error_code == "project_binding_changed" and len(codex.received("thread/resume")) == count
+    (runtime.profile / "fixture-threads" / native).unlink()
+    missing = await invoke(7, state)
+    assert missing.error_code == "session_resume_failed" and missing.session_state == "broken"
+    assert len(codex.received("thread/start")) == 1 and len(codex.received("turn/start")) == 3
+
+
+async def test_private_turn_requires_same_scoped_feature_root(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.services.provider_adapter import TurnContext
+    from tests.services.test_employee_runtime import employee_project
+
+    project = employee_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(codex_adapter, "resolve_employee_executable", lambda: tmp_path / "codex.exe")
+    ctx = TurnContext(thread_id=8, turn_id=1, prompt="continue", workspace=project.root,
+        model="gpt-fake", provider_session_id="backend", resume=False, history=AsyncMock(),
+        provider_state={"employee_project": project.stamp}, project_runtime=project, model_vendor="openai",
+        bind_native_session=AsyncMock(), feature_workspace=None)
+    for workspace in (None, str(tmp_path / "other")):
+        ctx.feature_workspace = workspace
+        outcome = await CodexAdapter().run_turn(ctx, None, None)
+        assert outcome.error_code == "project_binding_changed"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows employee launch policy")
+async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+    from uuid import uuid4
+    from app.core import host_exec
+    from app.services import employee_runtime
+    from app.services.provider_adapter import TurnContext
+    from tests.services.test_employee_runtime import employee_project
+
+    project = employee_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(host_exec, "noninteractive_window_station", lambda: False)
+    monkeypatch.setattr(host_exec, "windows_worker_token_status", lambda: "standard")
+    monkeypatch.setattr(settings, "LOCAL_TOOLS_ENABLED", True)
+    probe = AsyncMock(side_effect=AssertionError("a regular assignment must never launch external checks"))
+    monkeypatch.setattr(employee_runtime.cli_probe, "run", probe)
+    exe = tmp_path / "codex.exe"
+    exe.write_bytes(b"unused protocol fixture")
+    monkeypatch.setattr(codex_adapter, "resolve_employee_executable", lambda: exe)
+    project.process_environment()
+    (project.profile / "auth.json").write_text("{}", encoding="utf-8")
+    assert (await codex_adapter.employee_codex_status(project, "openai")).ready
+    native = str(uuid4())
+    rollout = project.profile / "sessions" / native
+    stored_thread = {"id": native, "cwd": str(project.root), "path": str(rollout), "modelProvider": "openai",
+                     "ephemeral": False, "status": {"type": "idle"}}
+    requests = []
+    workspace_roots = [str(project.root)]
+    async def rpc(method, params, **_options):
+        requests.append((method, params))
+        if method in {"thread/start", "thread/resume"}:
+            return {"thread": dict(stored_thread), "modelProvider": "openai", "model": params["model"],
+                "approvalPolicy": params["approvalPolicy"], "activePermissionProfile": {"id": params["permissions"]},
+                "cwd": str(project.root), "runtimeWorkspaceRoots": list(workspace_roots),
+                "instructionSources": [str(project.root / "AGENTS.md")]}
+        if method == "thread/read":
+            return {"thread": dict(stored_thread)}
+        return {"initialize": {}, "account/read": {"account": {"type": "chatgpt"}},
+                "config/read": {"config": {}}, "thread/turns/list": {"data": []},
+                "skills/list": {"data": [{"cwd": str(project.root), "skills": []}]},
+                "mcpServerStatus/list": {"data": [], "nextCursor": None},
+                "turn/start": {"turn": {"id": "turn-1"}}}[method]
+
+    async def done(run):
+        run.completed, run.turn_status, run.final_text = True, "completed", "done"
+    virtual_rpc = Mock(request=rpc, close=AsyncMock(), over_limit=False)
+    spawn = AsyncMock(return_value=virtual_rpc)
+    monkeypatch.setattr(codex_adapter.StdioRpc, "spawn", spawn)
+    monkeypatch.setattr(codex_adapter._CodexTurn, "_pump", done)
+
+    async def start(state, number):
+        ctx = TurnContext(thread_id=12, turn_id=number, prompt="continue", workspace=project.root, model="gpt-fake",
+            provider_session_id="backend", provider_state=state, resume=number > 1, history=AsyncMock(),
+            feature_workspace=str(project.root), project_runtime=project, model_vendor="openai",
+            approval_mode="accept_edits", bind_native_session=AsyncMock(return_value=True))
+        return await CodexAdapter().run_turn(ctx, SimpleNamespace(lost=False, emit=AsyncMock(return_value=True)), None)
+
+    state = {"employee_project": project.stamp}
+    for number in (1, 2, 3):
+        result = await start(state, number)
+        assert result.status == "succeeded", result.error
+        state = result.provider_state
+        assert state["codex_thread_id"] == native
+    assert sum(m == "thread/start" for m, _ in requests) == 1
+    assert [p["threadId"] for m, p in requests if m == "thread/resume"] == [native, native]
+    assert all(p["permissions"] == project.permission_name for m, p in requests if m == "turn/start")
+    forged = {**state, "codex_thread_id": str(uuid4())}
+    count = sum(m == "thread/read" for m, _ in requests)
+    outcome = await start(forged, 4)
+    assert outcome.error_code == "project_binding_changed" and sum(m == "thread/read" for m, _ in requests) == count
+    workspace_roots.append(str(tmp_path / "another employee"))
+    unexpected = await start(state, 5)
+    assert unexpected.error_code == "codex_policy_mismatch" and sum(m == "turn/start" for m, _ in requests) == 3
+    assert spawn.await_count == 5
+    monkeypatch.setattr(host_exec, "windows_worker_token_status", lambda: "administrator")
+    rejected = await start(state, 6)
+    assert rejected.error_code == "employee_boundary_unavailable" and spawn.await_count == 5
+    probe.assert_not_awaited()
+
+
+def test_scheduled_knowledge_allows_only_scoped_feishu_tools():
+    from app.services import feature_files
+
+    selected = ("feishu_doc_read", "feishu_doc_write")
+    team = SimpleNamespace(feishu_tools=selected, delegation_enabled=True)
+    ctx = SimpleNamespace(team=team, scheduled_knowledge=True)
+    assert codex_adapter.feature_team_tools(ctx) == selected
+    config = feature_files.turn_config({"mcp_servers": {"personal": {}}, "plugins": {"own": {}}},
+        None, False, project_runtime=object(), scheduled_knowledge=True)
+    assert config["mcp_servers"] == {"personal": {"enabled": False}}
+    assert config["plugins"] == {"own": {"enabled": False}}
+    assert not any(config["features"].values()) and config["project_doc_max_bytes"] == 0
+
+
+def test_private_sqlite_start_error_explains_path_and_permissions(tmp_path, monkeypatch):
+    from tests.services.test_employee_runtime import employee_project
+
+    project = employee_project(tmp_path, monkeypatch)
+    run = _turn("plan", project_runtime=project, workspace=project.root, feature_workspace=str(project.root))
+    result = run._failed("Codex state sqlite migration 23: (code: 14) unable to open database file", "cli_error")
+    assert result.error_code == "employee_session_storage_unavailable"
+    assert "路径长度" in result.error and "写入权限" in result.error
+    assert run._failed("Provider temporarily offline", "cli_error").error_code == "cli_error"
+
+
+def test_disabled_skill_launch_rule_preserves_private_rules_without_writing(tmp_path, monkeypatch):
+    import tomllib
+    from tests.services.test_employee_runtime import employee_project
+
+    project = employee_project(tmp_path, monkeypatch)
+    project.process_environment()
+    config = project.profile / "config.toml"
+    content = '[[skills.config]]\nname="other"\nenabled=false\n'
+    config.write_text(content, encoding="utf-8")
+    disabled = project.root / ".agents" / "skills" / "example" / "SKILL.md"
+    args = codex_adapter._private_skill_options(project, {disabled})
+    assert args[0] == "-c" and tomllib.loads(args[1])["skills"]["config"] == [
+        {"name": "other", "enabled": False}, {"path": str(disabled), "enabled": False}]
+    assert config.read_text(encoding="utf-8") == content
+    assert codex_adapter._private_skill_options(project, set()) == []
+
+
+async def test_native_tool_discovery_checks_real_reported_names_and_skill_scope(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from tests.services.test_employee_runtime import employee_project
+
+    project = employee_project(tmp_path, monkeypatch)
+    skill = project.root / ".agents" / "skills" / "diagnose" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Diagnose", encoding="utf-8")
+    run = _turn("plan", project_runtime=project, workspace=project.root, feature_workspace=str(project.root))
+    run.thread_id = "private-thread"
+    entry = {"enabled": True, "name": "diagnose", "path": str(skill), "scope": "repo"}
+    skills = {"data": [{"cwd": str(project.root), "skills": [entry], "errors": []}]}
+    row = {"name": "team", "tools": {"feishu_read_document": {"name": "feishu_read_document"}}}
+    servers = {"data": [row], "nextCursor": None}
+    config = {"mcp_servers": {"unused-personal": {"enabled": False}, "team": {
+        "enabled": True, "enabled_tools": ["feishu_read_document"]}}}
+    run._call = AsyncMock(side_effect=[skills, servers])
+    seen = await run._project_discovery(config)
+    assert seen["project_skills"] == ["diagnose"] and seen["mcp"] == {"team": ["feishu_read_document"]}
+    assert run._call.await_args_list[1].args[1]["threadId"] == "private-thread"
+    run.disabled_project_skills = {skill}
+    run._call = AsyncMock(side_effect=[skills])
+    with pytest.raises(ValueError, match="disabled"):
+        await run._project_discovery(config)
+    run.disabled_project_skills = set()
+    row["tools"]["unexpected"] = {"name": "unexpected"}
+    run._call = AsyncMock(side_effect=[skills, servers])
+    with pytest.raises(ValueError):
+        await run._project_discovery(config)
+    entry["path"] = str(tmp_path / "other-employee" / "SKILL.md")
+    run._call = AsyncMock(side_effect=[skills])
+    with pytest.raises(ValueError):
+        await run._project_discovery(config)
 
 
 def _turn(mode, **launches):

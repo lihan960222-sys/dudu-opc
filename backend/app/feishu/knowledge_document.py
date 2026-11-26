@@ -77,25 +77,31 @@ def binding_key(app,employee,alias,source,dest,title):
                                      sort_keys=True).encode()).hexdigest()
 
 
+def inspect_document(client,auth,doc):
+    if not isinstance(doc,str) or not documents.TOKEN.fullmatch(doc):
+        raise ValueError("无法核对已保存的文档编号。")
+    response=client.get(API+f"/docx/v1/documents/{doc}",headers=auth(),timeout=15)
+    try:
+        body=response.json()
+    except ValueError:
+        body={}
+    code=body.get("code") if isinstance(body,dict) else None
+    if (response.status_code,code) in ((404,1770002),(400,1770003)):
+        return None
+    if code==99991679 or response.status_code==403:
+        raise ValueError("飞书拒绝读取原知识库。请核对员工的文档读取授权和原文档访问权限。")
+    meta=checked(response)["data"]["document"]
+    if meta.get("document_id")!=doc:
+        raise ValueError("无法确认原知识库文档的身份。")
+    return meta
+
 def resolve_document(db,client,auth,key,dest,title):
     saved=db.execute("select document from knowledge_documents where binding=?",(key,)).fetchone()
     previous=saved[0] if saved else None
     if saved and not previous:
         raise ValueError("创建文档的结果待核对，暂不重复创建。")
     if previous:
-        response=client.get(API+f"/docx/v1/documents/{previous}",headers=auth(),timeout=15)
-        try:
-            body=response.json()
-        except ValueError:
-            body={}
-        code=body.get("code") if isinstance(body,dict) else None
-        missing=(response.status_code,code) in ((404,1770002),(400,1770003))
-        if not missing:
-            if code==99991679 or response.status_code==403:
-                raise ValueError("飞书拒绝读取原知识库。请核对二狗的文档读取授权和原文档访问权限。")
-            data=checked(response)["data"]
-            if data.get("document",{}).get("document_id")!=previous:
-                raise ValueError("无法确认原知识库文档的身份。")
+        missing=inspect_document(client,auth,previous) is None
         # Legacy rows used the employee/contact binding alone. They belong to
         # this exact old document even when Feishu confirms it was deleted.
         with db:
@@ -133,7 +139,8 @@ def resolve_document(db,client,auth,key,dest,title):
     return created
 
 
-async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False,instructions=""):
+async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False,instructions="",
+                  employee_draft=None,assignment=None):
     def stage(name, count=None):
         if "event" not in row.keys():
             return
@@ -163,7 +170,19 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
     if history.peer_for(client,auth(history.SCOPES),source["chat_id"],cfg["steward"]["open_id"])!=source["peer_open_id"]:
         raise ValueError("会话身份已变更。")
     stage("read_history")
-    records=collect(client,lambda:auth(history.SCOPES),source,cutoff)
+    weekly = (assignment or {}).get("weekly")
+    prior = None
+    if weekly:
+        from . import weekly_knowledge, owner_oauth
+        if cutoff != assignment["cutoff"] or not await assignment["_weekly_authorized"]():
+            raise ValueError("周计划的授权或本次读取截止时间已变更。")
+        prior = weekly_knowledge.baseline(worker.db, client,
+            lambda:auth(documents.SCOPES | owner_oauth.ACTIONS["folder"]), assignment)
+        records = collect(client,lambda:auth(history.SCOPES),source,cutoff,start=assignment.get("since"))
+        seen = weekly_knowledge.source_ids(prior, source["chat_id"])
+        records = {mid:row for mid,row in records.items() if mid not in seen}
+    else:
+        records=collect(client,lambda:auth(history.SCOPES),source,cutoff)
     stage("history_received",len(records))
     if read_only:
         lines=[history.excerpt(item) for item in records.values()]
@@ -173,8 +192,24 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
     db.executescript("""create table if not exists knowledge_documents(binding text primary key,document text);
         create table if not exists knowledge_entries(binding text,id text,primary key(binding,id));""")
     if not records:
-        return "二狗查完了，当前可读取的全部历史里有 0 条消息。",0
-    created=resolve_document(db,client,lambda:auth(documents.SCOPES),key,dest,title)
+        if weekly:
+            return f"已核对原知识库，本周没有新增消息。\n《{title}》{dest['tenant_origin']}/docx/{weekly['document']}", 0
+        return f"{staff}查完了，当前可读取的全部历史里有 0 条消息。",0
+    draft_blocks = employee_draft(records) if employee_draft is not None else None
+    if weekly:
+        if not draft_blocks:
+            raise ValueError("本周更新需要员工提交包含新消息来源的综述。")
+        draft_blocks = weekly_knowledge.merged_draft(db, assignment, prior, draft_blocks)
+    def verify_target(doc):
+        from . import document_access, owner_oauth
+        folder_auth = lambda: auth(documents.SCOPES | owner_oauth.ACTIONS["folder"])
+        document_access.verify_destination(client,folder_auth,dest["folder_token"],doc,title)
+    if draft_blocks is not None:
+        from . import owner_oauth
+        auth(documents.SCOPES | owner_oauth.ACTIONS["folder"])
+    created=weekly["document"] if weekly else resolve_document(db,client,lambda:auth(documents.SCOPES),key,dest,title)
+    if draft_blocks is not None:
+        verify_target(created)
     layout_key=key
     key=key+"/"+created
     has_revision_log=db.execute("select 1 from sqlite_master where type='table' and name='knowledge_revisions'").fetchone()
@@ -182,12 +217,19 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
             "select 1 from knowledge_revisions where binding=? or binding like ? limit 1",(key,layout_key+"/%")).fetchone()):
         from .knowledge_revision import revise_document
         async def authorized():
-            if workspace_access.settings_for(worker.cfg).get("allow_codex_summary") is not True:
+            if weekly and not await assignment["_weekly_authorized"]():
+                return False
+            settings=workspace_access.settings_for(worker.cfg)
+            if not (workspace_access.permits_model(settings,profile,assignment) if draft_blocks is not None
+                    else settings.get("allow_codex_summary") is True):
                 return False
             auth(history.SCOPES)
             return await history.reviewer(worker.cfg,source,staff)==profile
+        opts={"employee_draft":draft_blocks} if draft_blocks is not None else {}
         result=await revise_document(db,client,lambda:auth(documents.SCOPES),authorized,profile,key,created,
-            dest["tenant_origin"],title,source["chat_id"],records,stage=stage,instructions=instructions,layout_key=layout_key)
+            dest["tenant_origin"],title,source["chat_id"],records,stage=stage,instructions=instructions,layout_key=layout_key,**opts)
+        if draft_blocks is not None:
+            verify_target(created)
         stage("revision_confirmed",result[1])
         return result
     known={r[0] for r in db.execute("select id from knowledge_entries where binding=?",(key,))}

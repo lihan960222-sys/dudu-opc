@@ -2,6 +2,39 @@ import pytest
 from app.services.role_workspace import initialize, inventory, load
 
 
+@pytest.mark.asyncio
+async def test_role_default_change_preserves_body_and_rolls_back_with_db(tmp_path, sessions, owner):
+    from app.services import agent_store, role_workspace
+    root = tmp_path / "staff"
+    root.mkdir()
+    body = "\r\n# 工作指令\r\n\r\n留着末行空格。   \r\n"
+    old = ("---\r\ndefault_model: gpt-old\r\n---\r\n" + body).encode("utf-8-sig")
+    path = root / "AGENTS.md"
+    path.write_bytes(old)
+    async with sessions() as db:
+        agent = await agent_store.create_agent(db, owner_id=owner, name="Role", model="gpt-old", provider="codex")
+        agent.role_path = str(root)
+        await db.commit()
+        await db.refresh(agent)
+        role_workspace.sync_model_file(db, agent, {"model":"gpt-next"})
+        assert path.read_bytes() == old.replace(b"gpt-old", b"gpt-next")
+        await db.rollback()
+        assert path.read_bytes() == old
+
+
+from tests.services.thread_harness import sessions, owner
+
+
+def test_configured_private_employee_store_excludes_parent_and_child(tmp_path, monkeypatch):
+    from app.services.role_workspace import validate_configured_location
+    storage = tmp_path / "isolated" / "private"
+    monkeypatch.setenv("SUPARAGENT_EMPLOYEE_RUNTIME_ROOT", str(storage))
+    for folder in (storage.parent, storage, storage / "profiles"):
+        with pytest.raises(ValueError, match="private"):
+            validate_configured_location(folder)
+    validate_configured_location(tmp_path / "employee-project")
+
+
 def test_plain_project_rules_use_employee_model_without_changing_file(tmp_path):
     tmp_path = tmp_path / "employee"
     tmp_path.mkdir()

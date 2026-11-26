@@ -29,11 +29,21 @@ TOOLS = [
 ]
 
 
-def turn_config(current, root, writable, *, consult_only=False, peer_access=None):
+def turn_config(current, root, writable, *, consult_only=False, peer_access=None, project_runtime=None,
+                scheduled_knowledge=False):
     if not isinstance(current, dict):
         raise ValueError("Cannot verify Codex configuration")
     servers = {key: {"enabled": False} for key in (current.get("mcp_servers") or {})}
     plugins = {key: {"enabled": False} for key in (current.get("plugins") or {})}
+    if project_runtime is not None:
+        # Native tools run in the verified OS sandbox. Only backend-created MCP
+        # brokers may be attached below; project/user MCP commands run as the host.
+        native_tools = not scheduled_knowledge
+        return {"mcp_servers": servers, "plugins": plugins, "web_search": "disabled",
+                **({"project_doc_max_bytes": 0} if scheduled_knowledge else {}),
+                "features": {"shell_tool": native_tools, "unified_exec": native_tools, "view_image": native_tools,
+                             "multi_agent": False, "apps": False, "plugins": False,
+                             "hooks": False, "code_mode": False, "skill_mcp_dependency_install": False}}
     names = [t["name"] for t in TOOLS if writable or t["name"] != "write_text"]
     servers[SERVER] = {"command": sys.executable, "args": ["-I", str(Path(__file__).resolve()), str(root),
                         "write" if writable else "read", *([json.dumps(peer_access)] if peer_access else [])], "enabled": True, "required": True,

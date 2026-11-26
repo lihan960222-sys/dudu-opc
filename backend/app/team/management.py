@@ -132,12 +132,12 @@ async def _call(rt, run, name, args):
         if name in ('propose_profile', 'propose_model'):
             strict(args, {'agent_id', 'fields', 'expected_revision', 'request_id'})
             fields = args.get('fields')
-            allowed = PROFILE_FIELDS if name == 'propose_profile' else {'provider', 'model'}
+            allowed = PROFILE_FIELDS if name == 'propose_profile' else {'provider', 'model', 'model_vendor', 'effort'}
             if not isinstance(fields, dict) or not fields or set(fields) - allowed:
                 raise service.TeamError('invalid_input', 'Supply only the profile or default-model fields this tool supports.')
             if args.get('expected_revision') != setup.revision(agent):
                 raise service.TeamError('changed_since', 'Read list_team_setup and use this agent\'s current revision.')
-            if any(value is None and key not in ('title', 'description', 'model', 'workspace_path') for key, value in fields.items()):
+            if any(value is None and key not in ('title', 'description', 'model', 'model_vendor', 'effort', 'workspace_path') for key, value in fields.items()):
                 raise service.TeamError('invalid_input', 'That setting cannot be null.')
             fields = AgentUpdateRequest.model_validate(fields).model_dump(exclude_unset=True)
             fields = setup.redacted(fields)
@@ -155,12 +155,21 @@ async def _call(rt, run, name, args):
                 fields.setdefault('model', None)
                 before.setdefault('model', agent.model)
             if name == 'propose_model':
-                setup._checker(rt)(provider, fields.get('model', agent.model))
+                model = fields.get('model', agent.model)
+                setup._checker(rt)(provider, model)
+                same = (provider, model) == (agent.provider, agent.model)
+                profile = setup.checked_profile(provider, model, fields.get('model_vendor', agent.model_vendor if same else None),
+                                                fields.get('effort', agent.effort if same else None))
+                before.setdefault('model_vendor', agent.model_vendor)
+                before.setdefault('effort', agent.effort)
+                fields.update(model_vendor=profile.model_vendor, effort=profile.effort)
                 caps = rt.engines.capabilities(provider)
                 if agent.id == team.lead_agent_id and not caps.mcp:
                     raise service.TeamError('lead_engine', 'The lead must keep an engine with team tools.')
                 if not caps.computers and await rt.computers.for_agent(agent.id) is not None:
                     raise service.TeamError('engine_without_computers', 'Remove the agent\'s computer in settings before choosing this engine.')
+            from app.services.role_workspace import sync_model_file
+            sync_model_file(db, agent, fields)
             for field, value in fields.items():
                 setattr(agent, field, value)
             agent.updated_at = service.now()

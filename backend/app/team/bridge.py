@@ -21,7 +21,9 @@ def canonical(value):
 async def consume_allowed_approval(db, turn_id, owner_token, tool, arguments):
     await begin_write(db)
     turn = await db.get(Turn, turn_id)
-    if turn is None or turn.status != 'running' or turn.owner_token != owner_token:
+    from app.services.feature_tasks import turn_assignment_current
+    if (turn is None or turn.status != 'running' or turn.owner_token != owner_token
+            or not await turn_assignment_current(db, turn.thread_id, turn.id, lock=True)):
         await db.rollback()
         return False
     threshold = service.now() - timedelta(minutes=15)
@@ -123,19 +125,33 @@ class TeamBridge:
                 turn=await db.get(Turn,run.turn_id)
                 if not turn or turn.owner_token!=run.owner_token or turn.status!="running":
                     raise service.TeamError("parent_gone","当前任务已结束。")
+                project = getattr(run.ctx, "project_runtime", None)
+                if project:
+                    from app.team.steward_review import current_native_job
+                    if not await current_native_job(db, run):
+                        raise service.TeamError("parent_gone", "这项派工已结束或已交给其他员工。")
                 if name=="employee_capabilities":
                     management.strict(args,set())
                     connector_tools = run.ctx.composio_exact_tools
                     if connector_tools is None and run.ctx.composio_launch is not None:
                         connector_tools = [item["name"] for item in composio_tools.mcp_tools(run.ctx.composio_apps or {})]
-                    return {**agent_skills.bundled_catalog(caller.id),"granted_tools":sorted(
+                    saved = [{"template_id":"employee", "name":skill.name, "description":skill.description,
+                              "source":skill.source, "revision":skill.revision}
+                             for skill in agent_skills.list_skills(caller.id) if skill.enabled]
+                    return {**agent_skills.bundled_catalog(caller.id), "saved_skills":saved,
+                            "project_skills":[s for s in agent_skills.project_skill_catalog(project.root, caller.id) if s["enabled"]] if project else [],
+                            "granted_tools":sorted(
                         set(run.ctx.team.feishu_tools)|set(run.ctx.community_tools)|set(connector_tools or []))}
                 management.strict(args,{"template_id","name"})
                 try:
-                    skill=agent_skills.enable_bundled_skill(caller.id,args.get("template_id"),args.get("name"))
+                    skill=agent_skills.selected_employee_skill(caller.id,args.get("name"),args.get("template_id"),
+                                                                project.root if project else None)
                 except agent_skills.SkillError as exc:
                     raise service.TeamError(exc.code,exc.message) from None
-                return {"enabled":True,"name":skill.name,"body":skill.body}
+                if getattr(run, "recorder", None):
+                    await run.recorder.emit("skill.used", {"skills":[skill.name], "source":skill.source,
+                                                          "revision":skill.revision})
+                return {"enabled":True,"name":skill.name,"body":skill.body,"source":skill.source,"revision":skill.revision}
         if name.startswith('feishu_'):
             from app.team.feishu_tools_bridge import execute
             return await execute(rt, run, name, args)

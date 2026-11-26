@@ -22,6 +22,35 @@ def text_block(kind, text, sources=(), chat=""):
     return {"block_type":tags[kind],kind:{"elements":elements}}
 
 
+def employee_blocks(topics, records, chat):
+    """Turn the employee's own draft into Docx blocks with checked source links."""
+    if not isinstance(topics, list) or not 1 <= len(topics) <= 100:
+        raise ValueError("请提交你已整理的主题、摘要和对应的消息编号。")
+    blocks = [text_block("heading1", "知识综述"),
+              text_block("text", f"本版涵盖 {len(records)} 条可见消息。")]
+    sections = {}
+    covered = set()
+    for topic in topics:
+        if not isinstance(topic, dict) or set(topic) != {"title", "summary", "sources"}:
+            raise ValueError("每个主题需要标题、摘要和来源。")
+        title, summary, sources = (topic[k] for k in ("title", "summary", "sources"))
+        if (not isinstance(title, str) or not 1 <= len(title.strip()) <= 80
+                or not isinstance(summary, str) or not 1 <= len(summary.strip()) <= 2000
+                or not isinstance(sources, list) or not sources
+                or any(not isinstance(mid, str) or mid not in records for mid in sources)
+                or len(sources) != len(set(sources))):
+            raise ValueError("请核对主题、摘要和来源，只能引用本次读取的消息编号。")
+        covered.update(sources)
+        notes = sections.setdefault(title.strip(), [])
+        for offset in range(0, len(sources), 32):
+            notes.append(text_block("text", summary.strip() if not offset else "更多来源", sources[offset:offset+32], chat))
+    if covered != set(records):
+        raise ValueError("整理稿尚未覆盖本次所有消息，请补齐来源后重试。")
+    for title, notes in sections.items():
+        blocks.extend([text_block("heading2", title), *notes])
+    return blocks
+
+
 def batches(records):
     pending=[]
     size=0
@@ -68,7 +97,7 @@ async def summarize(records,profile,authorized,chat,instructions=""):
 
 
 def block_signature(block):
-    kind={2:"text",3:"heading1",4:"heading2"}.get(block.get("block_type"))
+    kind={2:"text",3:"heading1",4:"heading2",5:"heading3"}.get(block.get("block_type"))
     if not kind:
         return None
     return (kind,[(run.get("content"),run.get("text_element_style",{}).get("link",{}).get("url"))
@@ -97,13 +126,18 @@ def removable(block):
 def root_blocks(client,auth,doc):
     params={"page_size":500}
     items=[]
+    seen=set()
     while True:
         data=checked(client.get(API+f"/docx/v1/documents/{doc}/blocks/{doc}/children",
                                 headers=auth(),params=params,timeout=20))["data"]
         items.extend(data["items"])
         if not data.get("has_more"):
             return items
-        params["page_token"]=data["page_token"]
+        cursor=data.get("page_token")
+        if not isinstance(cursor,str) or not cursor or cursor in seen:
+            raise ValueError("飞书未返回可继续读取的文档分页。")
+        seen.add(cursor)
+        params["page_token"]=cursor
 
 
 def matches(actual,expected):
@@ -111,7 +145,10 @@ def matches(actual,expected):
                                                for a,b in zip(actual,expected))
 
 
-async def revise_document(db,client,auth,authorized,profile,key,doc,origin,title,chat,records,*,stage=None,instructions="",layout_key=None):
+def remote_digest(blocks):
+    return hashlib.sha256(json.dumps(blocks,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+
+async def revise_document(db,client,auth,authorized,profile,key,doc,origin,title,chat,records,*,stage=None,instructions="",layout_key=None,employee_draft=None):
     snapshot=[(mid,item.get("update_time"),item.get("create_time"),item.get("msg_type"),item.get("body"))
               for mid,item in sorted(records.items())]
     db.execute("create table if not exists knowledge_layouts(binding text primary key,instructions text not null)")
@@ -121,10 +158,15 @@ async def revise_document(db,client,auth,authorized,profile,key,doc,origin,title
             instructions=layout[0]
     if instructions:
         snapshot=[instructions,snapshot]
+    if employee_draft is not None:
+        snapshot=["employee-draft",employee_draft,snapshot]
     version=hashlib.sha256(json.dumps(snapshot,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     db.execute("""create table if not exists knowledge_revisions(
         binding text,version text,plan text,remaining integer,status text,
         primary key(binding,version))""")
+    db.execute("""create table if not exists knowledge_write_attempts(
+        binding text,version text,remaining integer,prior_digest text,
+        primary key(binding,version,remaining))""")
     row=db.execute("select plan,remaining,status from knowledge_revisions where binding=? and version=?",
                    (key,version)).fetchone()
     link=origin+"/docx/"+doc
@@ -134,14 +176,32 @@ async def revise_document(db,client,auth,authorized,profile,key,doc,origin,title
         if not matches(root_blocks(client,auth,doc),json.loads(row[0])):
             raise ValueError("飞书现有综述已变化，需要核对后再更新。")
         return f"全部 {len(records)} 条消息与已写入的综述版本一致。\n《{title}》{link}",len(records)
-    if db.execute("select 1 from knowledge_revisions where binding=? and status='sending'",(key,)).fetchone():
-        raise ValueError("上次写入结果待核对，请先检查已有文档："+link)
+    pending=db.execute("select version,plan,remaining from knowledge_revisions where binding=? and status='sending'",(key,)).fetchone()
+    if pending:
+        old_version,old_plan,remaining=pending
+        before=db.execute("select prior_digest from knowledge_write_attempts where binding=? and version=? and remaining=?",
+                          (key,old_version,remaining)).fetchone()
+        if not before:
+            raise ValueError("上次写入结果待核对，请先检查已有文档："+link)
+        batch=json.loads(old_plan)[max(0,remaining-30):remaining]
+        remote=root_blocks(client,auth,doc)
+        if matches(remote,batch) and remote_digest(remote[len(batch):])==before[0]:
+            remaining-=len(batch)
+        elif remote_digest(remote)!=before[0] or old_version!=version:
+            raise ValueError("文档在写入中断后发生变化，请核对已有内容："+link)
+        with db:
+            db.execute("""update knowledge_revisions set remaining=?,status=?
+                where binding=? and version=? and status='sending'""",
+                (remaining,"planned" if remaining else "verify",key,old_version))
+        if old_version!=version:
+            raise ValueError("已找回上次写入回执，请先核对上一版，再提交这次的整理稿。")
+        row=(old_plan,remaining,"planned" if remaining else "verify")
     if row:
         blocks,remaining=json.loads(row[0]),row[1]
     else:
         if stage:
             stage("summarize",len(records))
-        blocks=await summarize(records,profile,authorized,chat,instructions)
+        blocks=employee_draft if employee_draft is not None else await summarize(records,profile,authorized,chat,instructions)
         remaining=len(blocks)
         with db:
             db.execute("insert into knowledge_revisions values(?,?,?,?,'planned')",
@@ -153,8 +213,14 @@ async def revise_document(db,client,auth,authorized,profile,key,doc,origin,title
         headers=auth()
         if stage:
             stage("write_blocks",remaining)
+        before=remote_digest(root_blocks(client,auth,doc)) if employee_draft is not None else None
         with db:
-            db.execute("update knowledge_revisions set status='sending' where binding=? and version=?",(key,version))
+            claimed=db.execute("""update knowledge_revisions set status='sending'
+                where binding=? and version=? and status='planned' and remaining=?""",(key,version,remaining))
+            if not claimed.rowcount:
+                raise ValueError("另一项任务正在核对本次写入，请稍候。")
+            if before is not None:
+                db.execute("insert or replace into knowledge_write_attempts values(?,?,?,?)",(key,version,remaining,before))
         response=client.post(API+f"/docx/v1/documents/{doc}/blocks/{doc}/children",
             headers=headers,params={"client_token":str(uuid5(NAMESPACE_URL,key+version+str(start)))},
             json={"index":0,"children":blocks[start:remaining]},timeout=20)
@@ -165,12 +231,12 @@ async def revise_document(db,client,auth,authorized,profile,key,doc,origin,title
         with db:
             db.execute("update knowledge_revisions set remaining=?,status=? where binding=? and version=?",
                 (remaining,"planned" if remaining else "verify",key,version))
-    if not instructions:
+    if not instructions and employee_draft is None:
         if not matches(root_blocks(client,auth,doc),blocks):
             raise ValueError("飞书读回的正文与整理稿不一致，尚未完成。")
         with db:
             db.execute("update knowledge_revisions set status='done' where binding=? and version=?",(key,version))
-    if instructions:
+    if instructions or employee_draft is not None:
         # Only remove adjacent, byte-for-byte equivalent generated sections.
         # A document revision pins deletion indexes against concurrent human edits.
         revision=checked(client.get(API+f"/docx/v1/documents/{doc}",headers=auth(),timeout=20))["data"]["document"]["revision_id"]

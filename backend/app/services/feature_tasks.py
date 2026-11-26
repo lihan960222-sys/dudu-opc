@@ -1,7 +1,7 @@
 """Atomic intake for scoped planner cards. Callers commit with their delivery receipt."""
 import unicodedata
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from app.db.models import Agent, AgentJob, Thread, Turn, WorkColumn, WorkItem
 from app.db.models.feature import FeatureMessage, FeatureScope, FeatureSession
 from app.db.transactions import begin_write
@@ -10,6 +10,156 @@ from app.services import thread_store, work_events, work_planner
 
 def normalized(value):
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+async def assignment_current(db, job, *, lock=False):
+    if not job.task_id or job.kind == "root":
+        return True
+    query = select(FeatureScope.assignment_epoch, WorkItem.agent_id, WorkItem.owner_id).join(
+        WorkItem, WorkItem.id == FeatureScope.task_id).where(FeatureScope.task_id == job.task_id)
+    row = (await db.execute(query.with_for_update() if lock else query)).one_or_none()
+    if not row or row.owner_id != job.owner_id or row.assignment_epoch != job.assignment_epoch:
+        return False
+    if job.depth > 1 and job.parent_id:
+        parent = await db.get(AgentJob, job.parent_id)
+        if not parent or parent.outcome == "reassigned" or not await assignment_current(db, parent):
+            return False
+    if job.mode == "consult":
+        return row.agent_id == job.requester_agent_id
+    return row.agent_id == job.assignee_agent_id
+
+
+async def turn_assignment_current(db, thread_id, turn_id=None, *, lock=False):
+    """Generic approvals can also originate outside the team; fence scoped threads only."""
+    binding = await db.get(FeatureSession, thread_id)
+    if not binding:
+        thread = await db.get(Thread, thread_id)
+        if thread and thread.kind == "feature_consult":
+            job = await db.get(AgentJob, thread.job_id)
+            return bool(job and job.status in ("running", "needs_input") and await assignment_current(db, job, lock=lock))
+        return True
+    # Nested assignments have a card of their own; withdrawing their parent still fences the active turn.
+    if turn_id is not None:
+        job = await db.scalar(select(AgentJob).where(AgentJob.assignee_thread_id == thread_id, AgentJob.kind == "job",
+            or_(AgentJob.assignee_turn_id == turn_id, AgentJob.current_turn_id == turn_id)).order_by(AgentJob.id.desc()).limit(1))
+        if job and (job.outcome == "reassigned" or not await assignment_current(db, job, lock=lock)):
+            return False
+    item = await db.get(WorkItem, binding.task_id, with_for_update=lock, populate_existing=lock)
+    return await session_is_current(db, item, binding)
+
+
+async def private_handoff(db, task_id):
+    scope = await db.get(FeatureScope, task_id)
+    if not scope or scope.assignment_epoch == 1:
+        return False
+    from app.db.models import AgentJobEvent
+    return bool(await db.scalar(select(AgentJobEvent.id).join(AgentJob, AgentJob.id == AgentJobEvent.job_id)
+        .where(AgentJob.task_id == task_id, AgentJob.assignment_epoch < scope.assignment_epoch,
+               AgentJobEvent.kind == "feishu_assignment").limit(1)))
+
+
+async def predecessor_running(db, task_id, epoch):
+    if epoch <= 1:
+        return False
+    return bool(await db.scalar(select(Turn.id).join(FeatureSession, FeatureSession.thread_id == Turn.thread_id)
+        .where(FeatureSession.task_id == task_id, FeatureSession.assignment_epoch < epoch,
+               Turn.status == "running").limit(1)))
+
+
+async def record_withdrawn_receipt(db, job, turn_id, status):
+    from app.db.models import AgentJobEvent
+    if not await db.scalar(select(AgentJobEvent.id).where(AgentJobEvent.job_id == job.id,
+            AgentJobEvent.kind == "late_receipt", AgentJobEvent.detail["turn_id"].as_integer() == turn_id)):
+        db.add(AgentJobEvent(job_id=job.id, kind="late_receipt",
+            detail={"turn_id":turn_id, "status":status, "assignment_epoch":job.assignment_epoch}))
+
+
+async def reassign(db, task_id, expected_epoch, target_agent_id, source_event_key, *, owner_id):
+    """Fence a tenure and its delegated work inside the correction's enqueue transaction."""
+    from app.db.models import AgentJobEvent, AgentJobInbox
+    from app.team import service
+    if type(expected_epoch) is not int or expected_epoch < 1 or not source_event_key:
+        raise ValueError("改派需要原派工版本和消息编号。")
+    await begin_write(db)
+    team = await service.team_for(db, owner_id, lock=True)
+    if not team or not team.lead_agent_id:
+        raise ValueError("当前老板未设管家。")
+    target = await service.member(db, owner_id, target_agent_id, team_id=team.id)
+    if target.id == team.lead_agent_id:
+        raise ValueError("请选择项目执行员工。")
+    key = f"reassign:{source_event_key}"
+    existing = await db.get(FeatureMessage, (owner_id, key))
+    if existing:
+        result = existing.result
+        if (result.get("task_id"), result.get("previous_epoch"), existing.agent_id) != (
+                task_id, expected_epoch, target_agent_id):
+            raise ValueError("这条纠错消息已用于另一项改派。")
+        return result
+    earlier = list(await db.scalars(select(AgentJob).where(AgentJob.owner_id == owner_id,
+        AgentJob.task_id == task_id, AgentJob.kind == "job", AgentJob.assignment_epoch == expected_epoch)
+        .order_by(AgentJob.id).with_for_update()))
+    item = await db.get(WorkItem, task_id, with_for_update=True)
+    scope = await db.get(FeatureScope, task_id, with_for_update=True)
+    if not item or item.owner_id != owner_id or not scope or scope.assignment_epoch != expected_epoch:
+        raise ValueError("任务负责人版本已改变，请重新查看这项任务。")
+    if target.id == item.agent_id:
+        raise ValueError("此员工已经是当前负责人。")
+    frontier = [j.id for j in earlier]
+    while frontier:
+        descendants = list(await db.scalars(select(AgentJob).where(AgentJob.owner_id == owner_id,
+            AgentJob.parent_id.in_(frontier), AgentJob.kind == "job").order_by(AgentJob.id).with_for_update()))
+        seen = {j.id for j in earlier}
+        extra = [j for j in descendants if j.id not in seen]
+        earlier.extend(extra)
+        frontier = [j.id for j in extra]
+    stopped = []
+    now = service.now()
+    ids = [job.id for job in earlier]
+    for job in earlier:
+        if job.status not in ("completed", "failed", "cancelled"):
+            job.status, job.outcome, job.finished_at = "cancelled", "reassigned", now
+            db.add(AgentJobEvent(job_id=job.id, kind="assignment_withdrawn", detail={
+                "task_id":task_id, "assignment_epoch":expected_epoch}))
+        for turn_id in {job.assignee_turn_id, job.current_turn_id} - {None}:
+            turn = await db.get(Turn, turn_id)
+            if turn and turn.status == "running":
+                stopped.append(turn.id)
+                await thread_store._cancel_open_approvals(db, turn.thread_id, turn.id)
+            elif turn and job.outcome == "reassigned":
+                await record_withdrawn_receipt(db, job, turn.id, turn.status)
+    if ids:
+        await db.execute(update(AgentJobInbox).where(AgentJobInbox.owner_id == owner_id,
+            AgentJobInbox.job_id.in_(ids), AgentJobInbox.delivered_at.is_(None)).values(delivered_at=now))
+        # A root with another assignment still owes that other employee a reply.
+        for parent_id in {j.parent_id for j in earlier if j.parent_id}:
+            parent = await db.get(AgentJob, parent_id, with_for_update=True)
+            if not parent or parent.kind != "root" or parent.status in ("completed","cancelled","failed"):
+                continue
+            siblings = await db.scalar(select(AgentJob.id).where(AgentJob.parent_id == parent.id,
+                AgentJob.id.not_in(ids), AgentJob.kind == "job").limit(1))
+            if not siblings:
+                parent.status, parent.outcome, parent.finished_at = "cancelled", "reassigned", now
+                if parent.current_turn_id and parent.current_turn_id != parent.requester_turn_id:
+                    stopped.append(parent.current_turn_id)
+    prior_agent = item.agent_id
+    item.agent_id, item.thread_id, item.completed_at, item.archived = target.id, None, None, False
+    item.column_id = await db.scalar(select(WorkColumn.id).where(WorkColumn.board_id == item.board_id,
+                                                                  WorkColumn.key == "ready"))
+    item.revision += 1
+    scope.assignment_epoch += 1
+    # Do not transfer former employees' stored prompts, private paths or tool payloads.
+    states = [{"job_id":j.id, "status":j.status, "execution_started":bool(j.assignee_turn_id)} for j in earlier]
+    import json
+    scope.checkpoint = ("接手前先核对已有文件及云端回执。已产生或结果未明的写入请勿重复。"
+                        + json.dumps(states, ensure_ascii=False)) if states else "前任没有派工执行记录。"
+    result = {"action":"reassigned", "task_id":task_id, "previous_epoch":expected_epoch,
+              "assignment_epoch":scope.assignment_epoch, "previous_agent_id":prior_agent,
+              "agent_id":target.id, "stop_turn_ids":sorted(set(stopped))}
+    db.add(FeatureMessage(owner_id=owner_id,event_key=key,agent_id=target.id,project=scope.project,
+                          text="",result=result))
+    work_events.add(db, item, "reassigned", detail=f"{prior_agent} → {target.id} ({scope.assignment_epoch})")
+    await db.flush()
+    return result
 
 
 async def route(db, *, owner_id, agent_id, project, event_key, title, text, version="",
@@ -71,6 +221,8 @@ async def route(db, *, owner_id, agent_id, project, event_key, title, text, vers
         action = "clarify"
     result = {"action": action, "task_id": card.id if card else None,
               "candidates": [c.id for c in matches] if action == "clarify" else []}
+    if card:
+        result["assignment_epoch"] = (await db.get(FeatureScope, card.id)).assignment_epoch
     if card and intent == "query":
         result["status"] = (await db.get(WorkColumn, card.column_id)).key
     elif card:
@@ -82,6 +234,8 @@ async def route(db, *, owner_id, agent_id, project, event_key, title, text, vers
 
 
 async def session_for(db, owner_id, task_id, *, model, workspace_path, job_id=None):
+    from app.services import employee_runtime
+    from app.services.engine_registry import resolve_model_profile
     await begin_write(db)
     item = await db.scalar(select(WorkItem).join(FeatureScope, FeatureScope.task_id == WorkItem.id).where(
         WorkItem.id == task_id, WorkItem.owner_id == owner_id).with_for_update())
@@ -91,32 +245,89 @@ async def session_for(db, owner_id, task_id, *, model, workspace_path, job_id=No
         job = await db.get(AgentJob, job_id)
         receipt = await db.get(FeatureMessage, (owner_id, job.origin_ref)) if job and job.origin_ref else None
         if (not receipt or receipt.result.get("task_id") != task_id or receipt.result.get("job_id") != job_id
-                or (job.owner_id, job.assignee_agent_id) != (owner_id, item.agent_id)):
+                or (job.owner_id, job.assignee_agent_id) != (owner_id, item.agent_id)
+                or not await assignment_current(db, job, lock=True)):
             raise ValueError("Job belongs to another specialist")
+    scope = await db.get(FeatureScope, task_id)
+    agent = await db.get(Agent, item.agent_id)
+    if not agent or agent.owner_id != owner_id or agent.archived_at:
+        raise ValueError("The assigned employee is unavailable.")
+    project = None
+    provider = "codex"
+    if employee_runtime.native_enabled(owner_id, agent.id):
+        profile = resolve_model_profile(agent.provider, agent.model_vendor, model, agent.effort)
+        if not profile.model_vendor:
+            raise ValueError("请在员工档案中选定可核实的模型供应商。")
+        project = employee_runtime.resolve_project_runtime(agent, item, approval_mode="plan",
+            model_vendor=profile.model_vendor, assignment_epoch=scope.assignment_epoch)
+        await check_employee_root(db, owner_id, agent, project.root)
+        workspace_path, provider = str(project.root), profile.engine_id
     previous = await db.scalar(select(Thread).join(FeatureSession, FeatureSession.thread_id == Thread.id)
-                               .where(FeatureSession.task_id == task_id).order_by(Thread.id.desc()).limit(1))
+        .where(FeatureSession.task_id == task_id, FeatureSession.assignment_epoch == scope.assignment_epoch,
+               Thread.agent_id == item.agent_id, Thread.owner_id == owner_id)
+        .order_by(Thread.id.desc()).limit(1))
     if previous:
-        if (previous.agent_id, previous.owner_id) != (item.agent_id, owner_id):
-            raise ValueError("Task assignment changed")
         if await thread_store.running_turn_id(db, previous.id):
             return previous, True
-        if (not previous.archived_at and previous.session_state != "broken" and previous.model == model
+        stamp = (previous.provider_state or {}).get("employee_project")
+        if project:
+            project.check_previous_storage(stamp)
+        compatible = (stamp == project.stamp if project else not stamp)
+        model_compatible = previous.model == model or (project and provider == "codex" and compatible)
+        if (not previous.archived_at and previous.session_state != "broken"
+                and previous.provider == provider and compatible and model_compatible
                 and previous.workspace_path == workspace_path):
             # Older task sessions could carry the creating job_id; each dispatch now
             # owns its individual Turn while the stable session belongs to the task.
-            if previous.job_id is not None:
-                previous.job_id = None
-                await db.flush()
+            previous.job_id, previous.model = None, model
+            await db.flush()
             return previous, False
+        if (item.thread_id and previous.id != item.thread_id
+                and (previous.provider_state or {}).get("employee_project")):
+            # A prior staged launch did not bind. Keep the last accepted predecessor.
+            previous = await db.get(Thread, item.thread_id)
+            accepted = await db.get(FeatureSession, item.thread_id)
+            if (not previous or not accepted or accepted.task_id != task_id
+                    or accepted.assignment_epoch != scope.assignment_epoch
+                    or previous.owner_id != owner_id or previous.agent_id != item.agent_id):
+                raise ValueError("无法核实任务之前的员工会话。")
         last = await db.scalar(select(Turn).where(Turn.thread_id == previous.id,
-            Turn.status != "running").order_by(Turn.seq.desc()).limit(1))
+            Turn.status != "running").order_by(Turn.seq.desc()).limit(1).execution_options(populate_existing=True))
         if last:
-            scope = await db.get(FeatureScope, task_id)
-            scope.checkpoint = f"Turn {last.id} ({last.status})\n{last.prompt_text[:2000]}\n{(last.result or last.error or '')[:6000]}"
-    thread = await thread_store.create_thread(db, owner_id=owner_id, agent_id=item.agent_id, provider="codex",
-        title=item.title, kind="feature", workspace_path=workspace_path, model=model, commit=False)
-    db.add(FeatureSession(task_id=task_id, thread_id=thread.id, previous_id=previous.id if previous else None))
-    item.thread_id = thread.id
+            scope.checkpoint = f"Thread {previous.id}, turn {last.id} ({last.status})."
+            from app.db.models import Event
+            history = (await db.execute(select(Event.id, Event.type, Event.data).where(
+                Event.thread_id == previous.id, Event.type.in_(("tool.completed", "approval.resolved")))
+                .order_by(Event.seq.desc()).limit(32))).all()
+            for event in history:
+                if event.type == "approval.resolved" and event.data.get("status") in ("allowed", "denied", "expired", "cancelled"):
+                    scope.checkpoint += f"\nApproval {event.data['status']} (event #{event.id})."
+                elif event.type == "tool.completed" and any(event.data.get(k) for k in
+                        ("file_receipt", "file_receipts", "command_receipt")):
+                    result = "succeeded" if event.data.get("ok") is True else "verify before retry"
+                    scope.checkpoint += f"\nTool receipt (event #{event.id}, {result})."
+            # Cross-vendor handoffs must not forward a prior vendor's private payloads.
+            prior_stamp = (previous.provider_state or {}).get("employee_project") or {}
+            vendor = prior_stamp.get("vendor") if isinstance(prior_stamp, dict) else None
+            if not vendor:
+                try:
+                    vendor = resolve_model_profile(previous.provider, None, previous.model).model_vendor
+                except ValueError:
+                    pass
+            target_vendor = project.model_vendor if project else resolve_model_profile(provider, None, model).model_vendor
+            same_legacy_model = not project and not prior_stamp and previous.provider == provider and previous.model == model
+            if same_legacy_model or (vendor and vendor == target_vendor):
+                scope.checkpoint += f"\n{last.prompt_text[:2000]}\n{(last.result or last.error or '')[:6000]}"
+    state = {"employee_project": project.stamp} if project else None
+    title = f"任务 #{task_id}" if await private_handoff(db, task_id) else item.title
+    thread = await thread_store.create_thread(db, owner_id=owner_id, agent_id=item.agent_id, provider=provider,
+        title=title, kind="feature", workspace_path=workspace_path, model=model, provider_state=state, commit=False)
+    db.add(FeatureSession(task_id=task_id, thread_id=thread.id, previous_id=previous.id if previous else None,
+                          assignment_epoch=scope.assignment_epoch))
+    # A successor is usable for intake while its upstream ID is established. Keep
+    # the original pointer for the workbench until both changes can commit together.
+    if not project or item.thread_id is None:
+        item.thread_id = thread.id
     await db.flush()
     return thread, False
 
@@ -125,7 +336,8 @@ async def check_employee_root(db, owner, agent, root):
     from pathlib import Path
     from app.core.config import settings
     from app.db.models import Agent
-    if not settings.STEWARD_STRICT_OWNER or owner!=settings.STEWARD_STRICT_OWNER:
+    from app.services.employee_runtime import native_enabled
+    if owner != settings.STEWARD_STRICT_OWNER and not native_enabled(owner, agent.id):
         return
     peers=await db.execute(select(Agent.role_path,Agent.workspace_path).where(Agent.id!=agent.id))
     for paths in peers:
@@ -136,29 +348,122 @@ async def check_employee_root(db, owner, agent, root):
                     raise ValueError("员工目录相互重叠，请为每位员工指定独立目录。")
 
 
-async def context_for(db, owner_id, agent, thread):
-    from pathlib import Path
-    from app.services.role_workspace import checked_root
+async def session_is_current(db, item, binding):
+    if not item or not binding or item.id != binding.task_id:
+        return False
+    scope = await db.get(FeatureScope, item.id)
+    if not scope or scope.assignment_epoch != binding.assignment_epoch:
+        return False
+    latest = await db.scalar(select(Thread).join(FeatureSession, Thread.id == FeatureSession.thread_id)
+        .where(FeatureSession.task_id == item.id, FeatureSession.assignment_epoch == scope.assignment_epoch,
+               Thread.owner_id == item.owner_id, Thread.agent_id == item.agent_id)
+        .order_by(FeatureSession.thread_id.desc()).limit(1))
+    return bool(latest and latest.id == binding.thread_id and (
+        item.thread_id == latest.id or (binding.previous_id == item.thread_id
+        and (latest.provider_state or {}).get("employee_project"))))
+
+
+async def _current_feature(db, owner_id, agent, thread):
     row = (await db.execute(select(WorkItem, FeatureScope, FeatureSession)
         .join(FeatureScope, FeatureScope.task_id == WorkItem.id)
         .join(FeatureSession, FeatureSession.task_id == WorkItem.id)
         .where(WorkItem.owner_id == owner_id, WorkItem.agent_id == agent.id,
-               WorkItem.thread_id == thread.id, FeatureSession.thread_id == thread.id))).one_or_none()
-    if row is None or (agent.owner_id, thread.owner_id, thread.agent_id) != (owner_id, owner_id, agent.id):
+               FeatureSession.thread_id == thread.id))).one_or_none()
+    if (not row or (agent.owner_id, thread.owner_id, thread.agent_id) != (owner_id, owner_id, agent.id)
+            or not await session_is_current(db, row[0], row[2])):
         raise ValueError("This thread is no longer the current execution session for its task.")
-    item, scope, binding = row
+    return row
+
+
+async def project_runtime_for(db, owner_id, agent, thread, approval_mode):
+    from pathlib import Path
+    from app.db.models import Team
+    from app.services import employee_runtime
+    from app.services.engine_registry import resolve_model_profile
+    from app.services.role_workspace import checked_root, validate_configured_location
+    stamp = (thread.provider_state or {}).get("employee_project")
+    if not employee_runtime.native_enabled(owner_id, agent.id):
+        if stamp:
+            raise ValueError("这名员工已切回原执行方式，请从原工单继续。")
+        return None
+    item, scope, binding = await _current_feature(db, owner_id, agent, thread)
+    selected = resolve_model_profile(agent.provider, agent.model_vendor, thread.model, agent.effort)
+    roots = []
+    rows = (await db.execute(select(Agent.id, Agent.owner_id, Agent.team_id, Agent.role_path,
+                                    Agent.workspace_path, Agent.archived_at))).all()
+    barriers = [(r.id, Path(value).resolve()) for r in rows for value in (r.role_path, r.workspace_path) if value]
+    team = await db.get(Team, agent.team_id) if agent.team_id else None
+    if agent.team_workspaces_readable and team and team.owner_id == owner_id and team.lead_agent_id != agent.id:
+        for row in rows:
+            if (row.id in (agent.id, team.lead_agent_id) or row.owner_id != owner_id or row.team_id != team.id
+                    or row.archived_at or not row.role_path):
+                continue
+            try:
+                path = checked_root(Path(row.role_path))
+                validate_configured_location(path)
+            except (ValueError, OSError):
+                continue
+            if not any(i != row.id and (p.is_relative_to(path) or path.is_relative_to(p)) for i,p in barriers):
+                roots.append(path)
+    runtime = employee_runtime.resolve_project_runtime(agent, item, approval_mode=approval_mode,
+        readable_roots=roots, model_vendor=selected.model_vendor, assignment_epoch=scope.assignment_epoch,
+        protected_roots=tuple(path for _, path in barriers))
+    await check_employee_root(db, owner_id, agent, runtime.root)
+    runtime.check_previous_storage(stamp)
+    if (stamp != runtime.stamp or Path(thread.workspace_path) != runtime.root or thread.provider != selected.engine_id):
+        raise ValueError("项目或服务配置已变更，请从原工单建立新的员工会话。")
+    return runtime
+
+
+async def bind_native_session(db, owner_id, thread_id, turn_id, owner_token, state):
+    from uuid import UUID
+    from app.services.employee_runtime import native_enabled
+    await begin_write(db)
+    binding = await db.get(FeatureSession, thread_id)
+    item = await db.get(WorkItem, binding.task_id, with_for_update=True) if binding else None
+    thread = await db.get(Thread, thread_id, with_for_update=True)
+    turn = await db.get(Turn, turn_id, with_for_update=True)
+    existing = (thread.provider_state or {}) if thread else {}
+    native = state.get("codex_thread_id") if isinstance(state, dict) else None
+    try:
+        if not isinstance(native, str) or str(UUID(native)) != native:
+            return False
+    except ValueError:
+        return False
+    if (not thread or not turn or not item or item.owner_id != owner_id or thread.owner_id != owner_id
+            or item.agent_id != thread.agent_id or not native_enabled(owner_id, item.agent_id)
+            or turn.thread_id != thread_id or turn.owner_token != owner_token or turn.status != "running"
+            or not existing.get("employee_project") or existing["employee_project"] != state.get("employee_project")
+            or state.get("native_cwd") != thread.workspace_path
+            or existing.get("codex_thread_id") not in (None, native)
+            or not await session_is_current(db, item, binding)):
+        return False
+    item.thread_id = thread.id
+    thread.provider_state, thread.session_state = {**existing, **state}, "active"
+    await db.commit()
+    return True
+
+
+async def context_for(db, owner_id, agent, thread):
+    from pathlib import Path
+    from app.services.role_workspace import checked_root
+    item, scope, binding = await _current_feature(db, owner_id, agent, thread)
     root = checked_root(Path(agent.role_path))
     await check_employee_root(db,owner_id,agent,root)
-    task_dir = checked_root(root / "任务" / str(item.id))
-    if Path(thread.workspace_path) != task_dir:
-        raise ValueError("Thread workspace differs from the task directory.")
-    parts = [f"Task #{item.id}: {item.title}", item.description,
+    project = bool((thread.provider_state or {}).get("employee_project"))
+    expected = root if project else checked_root(root / "任务" / str(item.id))
+    if Path(thread.workspace_path) != expected:
+        raise ValueError("Thread workspace differs from the assigned project directory.")
+    restricted = await private_handoff(db, item.id)
+    parts = [f"Task #{item.id}"] if restricted else [f"Task #{item.id}: {item.title}", item.description,
              f"Requested deliverables: {scope.deliverables or []}",
              f"Version: {scope.version}", f"Acceptance: {scope.acceptance}"]
+    if project:
+        parts.append(f"Project root: {root}. Earlier task files: 任务/{item.id}/")
     facts = confirmed_facts(root, scope.version)
     if facts:
         parts.append("Owner-confirmed domain facts:\n" + "\n".join(facts))
-    if binding.previous_id and scope.checkpoint:
+    if (binding.previous_id or scope.assignment_epoch > 1) and scope.checkpoint:
         parts.append(f"Previous checkpoint: {scope.checkpoint}")
     return "\n".join(parts) + "\n\n"
 
@@ -177,8 +482,10 @@ async def dispatch(db, *, owner_id, steward_id, task_id, event_key, thread_id):
     receipt = await db.get(FeatureMessage, (owner_id, event_key), with_for_update=True)
     session = await db.get(FeatureSession, thread_id)
     item = await db.get(WorkItem, task_id)
+    scope = await db.get(FeatureScope, task_id)
     if (not receipt or receipt.result.get("task_id") != task_id or not session or session.task_id != task_id
-            or not item or item.owner_id != owner_id or item.thread_id != thread_id
+            or not item or item.owner_id != owner_id or not await session_is_current(db,item,session)
+            or not scope or scope.assignment_epoch != receipt.result.get("assignment_epoch", 1)
             or receipt.agent_id != item.agent_id or receipt.agent_id == lead.id):
         raise ValueError("Dispatch does not belong to this specialist task")
     specialist = await service.member(db, owner_id, receipt.agent_id, team_id=team.id)
@@ -186,7 +493,6 @@ async def dispatch(db, *, owner_id, steward_id, task_id, event_key, thread_id):
         raise ValueError("派工需要由这名员工的直属主管发起。")
     if receipt.result.get("job_id"):
         return receipt.result["job_id"]
-    scope = await db.get(FeatureScope, task_id)
     if scope.dependencies:
         completed = set(await db.scalars(select(WorkItem.id).where(WorkItem.owner_id == owner_id,
             WorkItem.id.in_(scope.dependencies), WorkItem.completed_at.is_not(None))))
@@ -202,7 +508,7 @@ async def dispatch(db, *, owner_id, steward_id, task_id, event_key, thread_id):
                    result=f"派给任务 #{task_id}", origin="person", finished_at=service.now())
     db.add(request)
     await db.flush()
-    fields = dict(task_id=task_id, project=receipt.project, owner_id=owner_id, requester_agent_id=lead.id, requester_thread_id=ledger.id,
+    fields = dict(task_id=task_id, assignment_epoch=scope.assignment_epoch, project=receipt.project, owner_id=owner_id, requester_agent_id=lead.id, requester_thread_id=ledger.id,
                   requester_turn_id=request.id, origin_kind="person", origin_ref=event_key,
                   brief=receipt.text, brief_hash=hashlib.sha256(receipt.text.encode()).hexdigest(),
                   status="dispatched", reply="wait", started_at=service.now())
@@ -228,6 +534,8 @@ async def bind_turn(db, owner_id, event_key, thread_id, turn_id):
     if (not turn or turn.thread_id != thread_id or job.assignee_thread_id != thread_id or
             job.owner_id != owner_id or job.assignee_turn_id not in (None, turn_id)):
         raise ValueError("Turn does not belong to this dispatch")
+    if not await assignment_current(db, job, lock=True):
+        raise DispatchConflict("这项派工已改派。")
     if job.assignee_turn_id == turn_id:
         return
     await db.get(Thread, thread_id, with_for_update=True)
@@ -255,8 +563,11 @@ async def report(db, owner_id, event_key, thread_id, turn_id):
             or job.assignee_thread_id != thread_id or job.owner_id != owner_id
             or not binding or binding.task_id != msg.result["task_id"] or turn.status == "running"):
         raise ValueError("Report does not belong to a finished turn of this dispatch")
+    if not await assignment_current(db, job, lock=True):
+        await record_withdrawn_receipt(db, job, turn_id, turn.status)
+        return False
     if job.status != "dispatched":
-        return
+        return True
     parent = await db.get(AgentJob, job.parent_id, with_for_update=True)
     if (parent.owner_id != owner_id or parent.assignee_agent_id != job.requester_agent_id
             or parent.assignee_thread_id != job.requester_thread_id or parent.id != job.root_id):
@@ -286,6 +597,7 @@ async def report(db, owner_id, event_key, thread_id, turn_id):
     await thread_store.add_event_in_transaction(db, parent.assignee_thread_id, "steward.report",
         {"task_id":binding.task_id, "job_id":job.id, "turn_id":turn_id, "status":status},
         turn_id=parent.requester_turn_id)
+    return True
 
 
 def confirmed_facts(root, version):
@@ -324,10 +636,13 @@ class DispatchConflict(ValueError):
     pass
 
 
-def direct_input_hash(prompt, attachment_ids, skills):
+def direct_input_hash(prompt, attachment_ids, skills, assignment_source=None):
     import hashlib
     import json
-    return hashlib.sha256(json.dumps([prompt,attachment_ids or [],skills or []],ensure_ascii=False).encode()).hexdigest()
+    fields = [prompt, attachment_ids or [], skills or []]
+    if assignment_source:
+        fields.append(assignment_source)
+    return hashlib.sha256(json.dumps(fields, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
 async def direct_submission(db, thread, key, digest, *, lock=False):
@@ -361,6 +676,10 @@ async def submission(db, thread, key, prompt, attachment_ids, *, reserve=False):
     if (not job or job.origin_ref != key or job.owner_id != thread.owner_id
             or job.assignee_agent_id != thread.agent_id or job.assignee_thread_id != thread.id):
         raise DispatchConflict("Dispatch belongs to a different session.")
+    if not await assignment_current(db, job, lock=reserve):
+        raise DispatchConflict("这项派工已改派。")
+    if await predecessor_running(db, binding.task_id, job.assignment_epoch):
+        raise thread_store.ThreadBusy(thread.id)
     digest = hashlib.sha256(json.dumps([prompt, list(dict.fromkeys(attachment_ids))], ensure_ascii=False).encode()).hexdigest()
     saved = receipt.result.get("submission_sha256")
     if saved and saved != digest:
@@ -393,7 +712,7 @@ async def consult_scope(db, owner_id, team, caller, turn, thread):
                AgentJob.owner_id == owner_id, AgentJob.assignee_turn_id == turn.id,
                AgentJob.assignee_thread_id == thread.id, AgentJob.assignee_agent_id == caller.id,
                AgentJob.requester_agent_id == (caller.manager_agent_id or team.lead_agent_id), AgentJob.status.in_(("dispatched", "running")),
-               AgentJob.project == FeatureScope.project))).one_or_none()
+               AgentJob.assignment_epoch == FeatureScope.assignment_epoch, AgentJob.project == FeatureScope.project))).one_or_none()
     if row is None:
         raise TeamError("consult_scope", "No active steward dispatch was found for this task.")
     scope, job = row
@@ -496,7 +815,7 @@ async def thread_handoff(db, owner_id, thread_id, *, task_id=None):
     else:
         return None
     from app.core.config import settings
-    if state.get("service_history") or settings.STEWARD_STRICT_OWNER == owner_id:
+    if state.get("employee_project") or state.get("service_history") or settings.STEWARD_STRICT_OWNER == owner_id:
         return {"mode": "workbench", "thread_id": thread.id}
     native = state.get("codex_thread_id")
     try:
@@ -527,7 +846,7 @@ async def protocol(db, owner_id, task_id, *, owner_handoff=False):
     lead = await db.scalar(select(AgentJob.requester_agent_id).where(AgentJob.owner_id == owner_id,
         AgentJob.task_id == task_id, AgentJob.kind == "job", AgentJob.mode == "work").order_by(AgentJob.id).limit(1))
     handoff = await thread_handoff(db,owner_id,item.thread_id,task_id=item.id) if owner_handoff and item.thread_id else None
-    return {"native_handoff":handoff, "revision":item.revision,
+    return {"native_handoff":handoff, "revision":item.revision, "assignment_epoch":scope.assignment_epoch,
         "task_id": item.id, "project": scope.project, "from": lead, "to": item.agent_id,
         "objective": item.description or item.title, "priority": item.priority, "status": status,
         "dependencies": scope.dependencies or [], "deliverables": scope.deliverables or [],
@@ -542,7 +861,8 @@ async def attach_command(db, job, args, *, subtask=False):
     if not isinstance(title,str) or not title.strip() or len(title)>200:
         raise ValueError("A work assignment needs a short task title.")
     result = await route(db, owner_id=job.owner_id, agent_id=job.assignee_agent_id,
-        project=args["project"].strip(), event_key=key, title=title, text=job.brief, intent="independent" if subtask else "deliver",
+        project=args["project"].strip(), event_key=key, title=title, text=job.brief,
+        intent="independent" if subtask or args.get("assignment_intent")=="independent" else "deliver",
         version=args.get("version",""), acceptance=job.done_when or "", reference_id=args.get("task_id"),
         dependencies=args.get("dependencies",[]), deliverables=args.get("deliverables",[]),
         priority=args.get("priority","normal"))
@@ -560,6 +880,7 @@ async def attach_command(db, job, args, *, subtask=False):
     message = await db.get(FeatureMessage,(job.owner_id,key))
     message.result = {**result,"job_id":job.id}
     job.origin_ref,job.task_id,job.project = key,result["task_id"],message.project
+    job.assignment_epoch = result["assignment_epoch"]
 
 
 async def eligible_since(db, job):
@@ -582,7 +903,7 @@ async def command_thread(db, owner_id, job):
     from app.team import service
     await begin_write(db)
     team = await service.team_for(db, owner_id,lock=True)
-    if not team or job.owner_id != owner_id:
+    if not team or job.owner_id != owner_id or not await assignment_current(db, job, lock=True):
         raise ValueError("The current steward no longer owns this dispatch.")
     agent = await service.member(db,owner_id,job.assignee_agent_id,team_id=team.id)
     requester = await service.member(db,owner_id,job.requester_agent_id,team_id=team.id)
@@ -592,8 +913,10 @@ async def command_thread(db, owner_id, job):
         parent = await db.get(AgentJob, job.parent_id) if job.parent_id else None
         if not (parent and parent.owner_id == owner_id and parent.assignee_agent_id == requester.id
                 and parent.assignee_thread_id == job.requester_thread_id and parent.project == job.project
-                and parent.status in ("running","waiting","needs_input") and job.approval_mode == "plan"):
+                and parent.status in ("running","waiting","needs_input","resume")):
             raise ValueError("The parent assignment is no longer active.")
+        from app.team.steward_review import effective_job_mode
+        job.approval_mode = await effective_job_mode(db, job)
     root=checked_root(Path(agent.role_path))
     await check_employee_root(db,owner_id,agent,root)
     model=load(root, agent.model).model
@@ -610,6 +933,8 @@ async def command_thread(db, owner_id, job):
 
 
 async def set_command_state(db, job):
+    if not await assignment_current(db, job, lock=True):
+        return
     item = await db.get(WorkItem,job.task_id,with_for_update=True)
     if not item or item.owner_id!=job.owner_id or item.completed_at or item.archived:
         return

@@ -84,7 +84,8 @@ def _effective(cfg, row=None):
     value = json.loads(row[0]) if row else cfg
     fields = {"history_sources":_sources(value.get("history_sources",{}),cfg.get("steward",{}).get("open_id")),
               "document_target":validate_document_target(value.get("document_target",{})),
-              "allow_codex_summary":value.get("allow_codex_summary") is True}
+              "allow_codex_summary":value.get("allow_codex_summary") is True,
+              "employee_summary_vendors":value.get("employee_summary_vendors", {})}
     rev = hashlib.sha256(_serialized([_binding(cfg), fields]).encode()).hexdigest()
     return {**fields, "revision":rev}
 
@@ -105,7 +106,20 @@ def settings_for(cfg):
         return _effective(cfg, _row(db, cfg))
 
 
-def save_settings(path, *, expected_revision, history_sources=None, document_target=None, allow_codex_summary=None):
+def permits_model(settings, profile, assignment=None):
+    employee, _, engine, model, *_ = profile
+    vendor = (assignment or {}).get("runtime_vendor")
+    if not vendor:
+        from app.services.engine_registry import resolve_model_profile
+        vendor = resolve_model_profile(engine, None, model).model_vendor
+    explicit = settings.get("employee_summary_vendors", {}).get(str(employee))
+    if explicit is not None:
+        return vendor in explicit
+    return vendor == "openai" and settings.get("allow_codex_summary") is True
+
+
+def save_settings(path, *, expected_revision, history_sources=None, document_target=None, allow_codex_summary=None,
+                  employee_vendors=None):
     cfg = load_config(path)
     target = _database(cfg)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -120,7 +134,14 @@ def save_settings(path, *, expected_revision, history_sources=None, document_tar
         settings = {"history_sources":_sources(history_sources if history_sources is not None else before["history_sources"],
                                                cfg["steward"]["open_id"]),
                     "document_target":validate_document_target(document_target if document_target is not None else before["document_target"]),
-                    "allow_codex_summary":before["allow_codex_summary"] if allow_codex_summary is None else allow_codex_summary}
+                    "allow_codex_summary":before["allow_codex_summary"] if allow_codex_summary is None else allow_codex_summary,
+                    "employee_summary_vendors":dict(before["employee_summary_vendors"])}
+        if employee_vendors is not None:
+            employee, vendors = employee_vendors
+            if (type(employee) != int or employee <= 0 or not isinstance(vendors,list) or
+                    any(v not in ("openai","deepseek","anthropic","google") for v in vendors)):
+                raise ValueError("请选择该员工可用的模型供应商。")
+            settings["employee_summary_vendors"][str(employee)] = sorted(set(vendors))
         payload = _serialized(settings)
         db.execute("insert into access_policy(binding,allowed) values(?,?) on conflict(binding) do update set allowed=excluded.allowed",
                    (_binding(cfg), payload))

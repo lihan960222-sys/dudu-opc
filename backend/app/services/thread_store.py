@@ -547,6 +547,7 @@ async def start_turn(
     feature_event_key: str | None = None,
     feature_resume_job: int | None = None,
     direct_event_key: str | None = None,
+    assignment_source: dict | None = None,
     direct_attachment_ids: list[str] | None = None,
     direct_skills: list[str] | None = None,
     attachments: list[dict] | None = None,
@@ -569,7 +570,7 @@ async def start_turn(
         raise ThreadNotFound(thread_id)
     if direct_event_key is not None:
         from app.services import feature_tasks
-        digest = feature_tasks.direct_input_hash(prompt_text, direct_attachment_ids, direct_skills)
+        digest = feature_tasks.direct_input_hash(prompt_text, direct_attachment_ids, direct_skills, assignment_source)
         prior = await feature_tasks.direct_submission(db, thread, direct_event_key, digest, lock=True)
         if prior is not None:
             raise TurnAlreadyStarted(prior)
@@ -606,6 +607,10 @@ async def start_turn(
     if thread.title is None:
         thread.title = make_title(prompt_text) or None
     started = {"prompt_text": prompt_text}
+    if assignment_source:
+        started["assignment_source"] = assignment_source
+    if internal:
+        started["internal"] = True
     if prompt_text.startswith(("Harness message, not from the person.", "Harness incident report, not from the person.", "Harness escalation notice, not from the person.")):
         started["team_generated"] = internal
     if attachments:
@@ -623,10 +628,25 @@ async def start_turn(
                 holder.status != "running" or holder.current_turn_id is not None or holder.executions < 2 or
                 holder.assignee_thread_id != thread_id or holder.assignee_agent_id != thread.agent_id):
             raise ThreadBusy(thread_id)
+        from app.services import feature_tasks
+        if not await feature_tasks.assignment_current(db, holder, lock=True):
+            raise feature_tasks.DispatchConflict("派工已改派，原员工不能再续办。")
         holder.current_turn_id = holder.assignee_turn_id = turn.id
     if feature_event_key is not None:
         await feature_tasks.bind_turn(db, thread.owner_id, feature_event_key, thread_id, turn.id)
-    await _add_event(db, thread_id, "turn.started", started, turn.id)
+    start_event = await _add_event(db, thread_id, "turn.started", started, turn.id)
+    if not internal and thread.kind=="chat" and (assignment_source or "#" in prompt_text or "工单" in prompt_text or "任务" in prompt_text):
+        from app.db.models import FeatureScope
+        from app.services.assignment_context import resolve_assignment_context
+        try:
+            source = await resolve_assignment_context(db,thread.owner_id,turn.id)
+        except ValueError:
+            pass  # The steward can still answer the message or ask which card was meant.
+        else:
+            if source.reference_task_ids:
+                epochs = await db.execute(select(FeatureScope.task_id,FeatureScope.assignment_epoch).where(
+                    FeatureScope.task_id.in_(source.reference_task_ids)))
+                start_event.data = {**started,"reference_epochs":{str(task):epoch for task,epoch in epochs}}
     await db.commit()
     return turn
 
@@ -839,7 +859,8 @@ async def create_approval(
     if owner_token is not None:
         still_running.append(Turn.owner_token == owner_token)
     running = (await db.execute(select(Turn.id).where(*still_running))).scalar_one_or_none()
-    if running is None:
+    from app.services.feature_tasks import turn_assignment_current
+    if running is None or not await turn_assignment_current(db, thread_id, turn_id, lock=True):
         await db.rollback()
         raise TurnNotRunning(turn_id)
     approval = Approval(
@@ -870,6 +891,7 @@ async def decide_approval(
     db: AsyncSession, approval_id: str, decision: str, *, by: dict | None = None,
     person_id: int | None = None, person_label: str | None = None,
     expected_turn_id: int | None = None, owner_token: str | None = None, fresh_after: datetime | None = None,
+    expected_tool: str = "feature_files.write_text",
 ) -> bool:
     """The person's decision. One statement: it wins only if the approval is
     still pending AND its turn is still running. False means nothing changed
@@ -880,13 +902,19 @@ async def decide_approval(
     recorded on the approval and in the event (`person`), by the name they had then."""
     _check(decision, DECISIONS, "decision")
     await begin_write(db)
+    if decision == "allowed":
+        from app.services.feature_tasks import turn_assignment_current
+        target = (await db.execute(select(Approval.thread_id, Approval.turn_id).where(Approval.id == approval_id))).one_or_none()
+        if target and not await turn_assignment_current(db, target.thread_id, target.turn_id, lock=True):
+            await db.rollback()
+            return False
     running = _turn_is_running()
     if expected_turn_id is not None:
         if not owner_token or fresh_after is None:
             return False
         running = exists().where(Turn.id == Approval.turn_id, Turn.id == expected_turn_id, Turn.status == "running",
                                  Turn.owner_token == owner_token, Turn.heartbeat_at >= fresh_after,
-                                 Approval.tool == "feature_files.write_text")
+                                 Approval.tool == expected_tool)
     updated = await db.execute(
         update(Approval)
         .where(Approval.id == approval_id, Approval.status == "pending", running)
@@ -948,6 +976,11 @@ async def mark_allow_delivered(db: AsyncSession, approval_id: str, owner_token: 
     run may send the Allow only if this returns True; otherwise it has lost the
     turn and must stop."""
     await begin_write(db)
+    from app.services.feature_tasks import turn_assignment_current
+    target = (await db.execute(select(Approval.thread_id, Approval.turn_id).where(Approval.id == approval_id))).one_or_none()
+    if target and not await turn_assignment_current(db, target.thread_id, target.turn_id, lock=True):
+        await db.rollback()
+        return False
     owned = exists().where(
         Turn.id == Approval.turn_id, Turn.status == "running", Turn.owner_token == owner_token
     )

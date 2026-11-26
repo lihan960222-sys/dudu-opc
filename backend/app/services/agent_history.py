@@ -19,7 +19,7 @@ KEEP = 20
 # What a revision captures: the fields a person edits in the profile. Archiving, the lead role and
 # the team are not part of it.
 PROFILE_FIELDS = (
-    "name", "title", "description", "instructions", "provider", "model", "effort", "workspace_path",
+    "name", "title", "description", "instructions", "provider", "model_vendor", "model", "effort", "workspace_path",
     "approval_mode", "pinned", "memory_enabled", "recall_enabled", "memory_upkeep", "compaction_summary",
     "use_helper", "fallback_provider", "fallback_model", "connector_scopes", "connector_account_scopes",
 )

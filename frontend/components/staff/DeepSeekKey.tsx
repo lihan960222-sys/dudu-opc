@@ -4,9 +4,8 @@ import { useEffect, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { request } from "@/lib/api";
 
-const endpoint = "/staff/deepseek-key";
-
-export function DeepSeekKey() {
+export function DeepSeekKey({ employee }: { employee?: number }) {
+  const endpoint = employee ? "/staff/" + employee + "/deepseek-key" : "/staff/deepseek-key";
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [open, setOpen] = useState(false);
   const [key, setKey] = useState("");
@@ -17,10 +16,10 @@ export function DeepSeekKey() {
     let active = true;
     request<{configured: boolean}>(endpoint).then(
       result => { if (active) setConfigured(result.configured); },
-      () => { if (active) setError("无法读取密钥状态，请重新打开管家档案。"); },
+      () => { if (active) setError("无法读取密钥状态，请重新打开档案。"); },
     );
     return () => { active = false; };
-  }, []);
+  }, [endpoint]);
 
   async function save() {
     setBusy(true);
@@ -50,7 +49,7 @@ export function DeepSeekKey() {
       </button>
       {open && <div className="dp-fields">
       <label className="dp-field">
-        <span>管家的 DeepSeek API Key</span>
+        <span>{employee ? "这名员工" : "管家"}的 DeepSeek API Key</span>
         <input className="dp-input" type="password" value={key} autoComplete="off"
           maxLength={512} disabled={busy} onChange={e => setKey(e.target.value)}
           placeholder={configured ? "输入新密钥可替换" : "输入 DeepSeek API Key"} />
@@ -60,7 +59,7 @@ export function DeepSeekKey() {
           {busy ? "正在验证…" : "验证并保存密钥"}
         </button>
       </div>
-      <small>此密钥供管家调用 DeepSeek。「保存更改」会更新岗位默认模型。</small>
+      <small>密钥验证后保存在家庭主机，只供{employee ? "这名员工" : "管家"}使用。</small>
       </div>}
       {error && <p role="alert" className="dp-error">{error}</p>}
     </div>

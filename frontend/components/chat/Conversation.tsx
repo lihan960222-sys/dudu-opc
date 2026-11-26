@@ -86,6 +86,7 @@ export function Conversation({
   undoneRules = [],
   onUndo,
   onBranch,
+  onQuote,
   threadId = null,
   workspacePath = null,
   emptyHint,
@@ -96,6 +97,7 @@ export function Conversation({
 }: {
   // Edit a past message and resend it in a new branch.
   onBranch?: (turnId: number, text: string) => Promise<boolean>;
+  onQuote?: (turnId: number, text: string) => void;
   // The conversation the transcript belongs to: attachments are fetched from it.
   threadId?: number | null;
   // The pinned workspace also scopes download links in assistant replies.
@@ -124,6 +126,8 @@ export function Conversation({
   const scroller = useRef<HTMLDivElement>(null);
   const stuck = useRef(true);
   const [away, setAway] = useState(false);
+  const quote = ({turnId, text}: {turnId: number | null; text: string}) =>
+    onQuote && turnId !== null ? () => onQuote(turnId, text) : undefined;
 
   useEffect(() => {
     const el = scroller.current;
@@ -234,7 +238,7 @@ export function Conversation({
                   node = <ToolRun key={item.key} tools={item.tools as Extract<TranscriptItem, { kind: "tool" }>[]} />;
                   break;
                 case "user":
-                  node = <UserMessage key={item.key} item={item} threadId={threadId} onBranch={onBranch} />;
+                  node = <UserMessage key={item.key} item={item} threadId={threadId} onBranch={onBranch} onQuote={quote(item)} />;
                   break;
                 case "assistant": {
                   const canReplyToMessage = !item.incomplete && isLatestAssistantMessage(item.key, transcript.items);
@@ -251,6 +255,7 @@ export function Conversation({
                       ts={item.ts}
                       reaction={reactions[item.key] ?? null}
                       onReact={canReplyToMessage ? (r) => { void handleReact(item.key, r); } : undefined}
+                      onQuote={item.incomplete ? undefined : quote(item)}
                       disabled={answering !== null || sendingReactionReplyDisabled}
                     />
                   );

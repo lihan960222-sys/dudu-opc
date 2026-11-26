@@ -49,7 +49,7 @@ async def checked_manager(db, owner, team, lead, plan):
     manager = await db.get(Agent,plan['_manager'],with_for_update=True)
     if (not manager or manager.team_id != team.id or manager.owner_id != owner or manager.archived_at
             or manager.id == lead.id or manager.manager_agent_id not in (None,lead.id)
-            or not manager.delegation_enabled or manager.provider!='codex'):
+            or not manager.delegation_enabled):
         raise service.TeamError('manager_changed','The proposed supervisor is no longer a direct employee of this steward.')
     return manager
 
@@ -83,7 +83,9 @@ async def call(rt, run, name, args):
                 raise service.TeamError('outside_staff_scope','The private steward conversation has changed.')
             if set(args)!={'name','title','instructions','first_task'} or not actor.model:
                 raise service.TeamError('invalid_input','Supply the role, its instructions and initial task.')
-            plan={'summary':f'{actor.name} 申请增加直属员工（只读）','operations':[{'op':'create',**args,'provider':'codex','model':actor.model}]}
+            plan={'summary':f'{actor.name} 申请增加直属员工（只读）','operations':[{
+                'op':'create',**args,'provider':actor.provider,'model':actor.model,
+                'model_vendor':actor.model_vendor,'effort':actor.effort}]}
             setup._guided_plan(plan)
             plan=setup.redacted(plan)
             key='hire-'+setup.digest([owner,job.id,plan])[:42]

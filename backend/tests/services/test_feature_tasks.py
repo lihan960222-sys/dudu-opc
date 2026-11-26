@@ -1,7 +1,63 @@
+from pathlib import Path
+
 import pytest
 from sqlalchemy import func, select
 from app.db.models import Thread, WorkItem
 from app.services import agent_store, feature_tasks
+
+
+async def test_old_task_switches_only_after_private_binding_is_saved(sessions, owner, tmp_path, monkeypatch):
+    from uuid import uuid4
+    from app.db.models.feature import FeatureSession
+    from app.services import thread_store
+
+    root = tmp_path / "employee"
+    root.mkdir()
+    (root / "AGENTS.md").write_text("Role guide", encoding="utf-8")
+    async with sessions() as db:
+        agent = await agent_store.create_agent(db, owner_id=owner, name="Welder", provider="codex", model="gpt-fake")
+        agent.role_path = str(root)
+        card = await feature_tasks.route(db, owner_id=owner, agent_id=agent.id, project="test",
+            event_key="one", title="check tests", text="Check the failing import", intent="independent")
+        task_id = card["task_id"]
+        old_folder = root / "任务" / str(task_id)
+        old_folder.mkdir(parents=True)
+        artifact = old_folder / "notes.txt"
+        artifact.write_text("existing artifact", encoding="utf-8")
+        opts = {"workspace_path": str(old_folder), "model": "gpt-fake"}
+        old, _ = await feature_tasks.session_for(db, owner, task_id, **opts)
+        old.provider_state, old.session_state = {"service_history": True}, "active"
+        turn = await thread_store.start_turn(db, old.id, "Keep the original output.")
+        receipt = await thread_store.append_event(db, old.id, "tool.completed", {"ok": True,
+            "file_receipt": {"operation": "write_text", "scope": "task", "path": "notes.txt"},
+            "output": "private tool output that must not be copied"}, turn_id=turn.id)
+        decision = await thread_store.append_event(db, old.id, "approval.resolved", {"status": "allowed"}, turn_id=turn.id)
+        await thread_store.finish_turn(db, turn.id, turn.owner_token, status="succeeded", result="Already prepared notes.txt")
+        monkeypatch.setenv("SUPARAGENT_EMPLOYEE_NATIVE_IDS", f"{owner}/{agent.id}")
+        new, busy = await feature_tasks.session_for(db, owner, task_id, **opts)
+        item = await db.get(WorkItem, task_id)
+        assert not busy and new.id != old.id and Path(new.workspace_path) == root
+        assert item.thread_id == old.id
+        assert (await db.get(FeatureSession, new.id)).previous_id == old.id
+        assert (await feature_tasks.session_for(db, owner, task_id, **opts))[0].id == new.id
+        context = await feature_tasks.context_for(db, owner, agent, new)
+        assert "Keep the original output." in context and "Already prepared notes.txt" in context
+        assert f"event #{receipt.id}" in context and f"event #{decision.id}" in context
+        assert "private tool output" not in context
+        runtime = await feature_tasks.project_runtime_for(db, owner, agent, new, "plan")
+        assert runtime.root == root and not runtime.writable
+        started = await thread_store.start_turn(db, new.id, "continue")
+        state = {"employee_project": runtime.stamp, "codex_thread_id": str(uuid4()), "native_cwd": str(root)}
+        assert not await feature_tasks.bind_native_session(db, owner, new.id, started.id, "wrong-token", state)
+        assert await feature_tasks.bind_native_session(db, owner, new.id, started.id, started.owner_token, state)
+        await db.refresh(item)
+        assert item.thread_id == new.id and artifact.read_text(encoding="utf-8") == "existing artifact"
+        assert (await feature_tasks.thread_handoff(db, owner, new.id)) == {"mode":"workbench", "thread_id":new.id}
+        await thread_store.finish_turn(db, started.id, started.owner_token, status="succeeded")
+        monkeypatch.delenv("SUPARAGENT_EMPLOYEE_NATIVE_IDS")
+        legacy, _ = await feature_tasks.session_for(db, owner, task_id, **opts)
+        assert legacy.id not in (old.id, new.id) and Path(legacy.workspace_path) == old_folder
+        assert (await db.get(Thread, new.id)).provider_state["codex_thread_id"] == state["codex_thread_id"]
 
 
 @pytest.mark.asyncio

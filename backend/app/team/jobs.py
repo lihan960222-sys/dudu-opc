@@ -33,7 +33,7 @@ GRACE_SECONDS = 30
 
 
 def public(job):
-    return {name: getattr(job, name) for name in ('id', 'task_id', 'project', 'root_id', 'parent_id', 'depth', 'kind', 'reply', 'requester_agent_id', 'requester_thread_id', 'assignee_agent_id', 'assignee_thread_id', 'assignee_turn_id', 'mode', 'brief', 'status', 'outcome', 'outcome_detail', 'question', 'result', 'approval_mode', 'created_at', 'started_at', 'finished_at')}
+    return {name: getattr(job, name) for name in ('id', 'task_id', 'assignment_epoch', 'project', 'root_id', 'parent_id', 'depth', 'kind', 'reply', 'requester_agent_id', 'requester_thread_id', 'assignee_agent_id', 'assignee_thread_id', 'assignee_turn_id', 'mode', 'brief', 'status', 'outcome', 'outcome_detail', 'question', 'result', 'approval_mode', 'created_at', 'started_at', 'finished_at')}
 
 
 def _failure_outcome(turn):
@@ -57,7 +57,7 @@ class Jobs:
         self._closed = False
 
     async def enqueue(self, run, args, *, reply='wait'):
-        command_fields = {'project', 'task_title', 'task_id', 'priority', 'version', 'dependencies', 'deliverables'}
+        command_fields = {'project', 'task_title', 'task_id', 'priority', 'version', 'dependencies', 'deliverables', 'assignment_intent'}
         if set(args) - ({'agent_id', 'brief', 'mode', 'done_when', 'rework', 'feishu_delivery','completion_check'} | command_fields):
             raise service.TeamError('invalid_input', 'Unknown job fields.')
         brief, mode, target = args.get('brief'), args.get('mode', 'work'), args.get('agent_id')
@@ -65,7 +65,11 @@ class Jobs:
             raise service.TeamError('invalid_input', 'Supply an agent id, brief and work or consult mode.')
         if not isinstance(args.get('done_when', ''), str) or len(args.get('done_when', '')) > 2000:
             raise service.TeamError('invalid_input', 'Success criteria must be at most 2000 characters.')
-        pin = None
+        if args.get("assignment_intent") not in (None, "continue", "independent"):
+            raise service.TeamError("invalid_input", "Choose continued or independent project work.")
+        pin = context = None
+        restricted_handoff = False
+        stopped = ()
         async with self.rt.session() as db:
             await begin_write(db)
             team = await service.team_for(db, self.rt.owner_id, lock=True)
@@ -83,6 +87,54 @@ class Jobs:
             if not turn or turn.status != 'running' or turn.owner_token != run.owner_token:
                 raise service.TeamError('parent_gone', 'The requester turn is no longer running.')
             thread = await db.get(Thread, run.thread_id)
+            from app.services.assignment_context import accepted_job, resolve_assignment_context, resolve_card, status_only, status_text
+            scoped_command = (reply == 'resume' and mode == 'work' and
+                (settings.STEWARD_STRICT_OWNER == self.rt.owner_id or bool(command_fields.intersection(args))))
+            if ((scoped_command or status_only(turn.prompt_text)) and thread and thread.kind == "chat"
+                    and caller.id == team.lead_agent_id):
+                from app.services import feature_tasks
+                holder = await db.scalar(select(AgentJob).where(AgentJob.owner_id==self.rt.owner_id,
+                    AgentJob.kind=="root", AgentJob.requester_thread_id==thread.id, AgentJob.current_turn_id==turn.id))
+                if holder and holder.outcome == "reassigned":
+                    raise service.TeamError("parent_gone", "原派工已撤回。")
+                source_turn = holder.requester_turn_id if holder else turn.id
+                try:
+                    context = await resolve_assignment_context(db, self.rt.owner_id, source_turn)
+                    if status_only(context.original_text):
+                        raise service.TeamError("status_only", await status_text(db,self.rt.owner_id,context))
+                    if len(context.reference_task_ids) == 1 and not args.get("rework"):
+                        previous = await accepted_job(db, self.rt.owner_id, turn.id, context.reference_task_ids[0], target, context)
+                        if previous:
+                            return previous
+                    selected = await resolve_card(db, self.rt.owner_id, context, target, args)
+                    if selected:
+                        card, scope = selected
+                        args = {**args, "task_id":card.id, "project":scope.project, "assignment_intent":"continue"}
+                        if not context.reference_task_ids and card.agent_id == target and not args.get("rework"):
+                            previous = await accepted_job(db, self.rt.owner_id, turn.id, card.id, target, context)
+                            if previous:
+                                return previous
+                        if card.agent_id != target:
+                            change = await feature_tasks.reassign(db, card.id, scope.assignment_epoch, target,
+                                context.event_key, owner_id=self.rt.owner_id)
+                            stopped = change["stop_turn_ids"]
+                        restricted_handoff = await feature_tasks.private_handoff(db, card.id)
+                        if restricted_handoff:
+                            if brief.strip() not in context.original_text:
+                                brief = f"接续工单 #{card.id}。请先用本人的授权核对已有产物，再按老板这次的原文办理。"
+                            criteria = args.get("done_when", "").strip()
+                            args = {**args, "brief":brief, "task_title":f"接续工单 #{card.id}",
+                                    "done_when":criteria if criteria and criteria in context.original_text
+                                    else "按本轮老板要求核对交付物；缺少授权或材料时向管家说明。"}
+                    else:
+                        if context.project:
+                            args = {**args, "project":context.project}
+                        if not args.get("rework"):
+                            args = {**args, "assignment_intent":"independent"}
+                except service.TeamError:
+                    raise
+                except ValueError as exc:
+                    raise service.TeamError("assignment_context", str(exc)) from exc
             if (settings.STEWARD_STRICT_OWNER == self.rt.owner_id and mode == 'work' and
                     run.ctx.team.origin == 'person' and caller.id == team.lead_agent_id and
                     thread and thread.kind == 'chat' and turn.thread_id == thread.id):
@@ -93,7 +145,9 @@ class Jobs:
                     AgentJob.owner_id==self.rt.owner_id,AgentJob.kind=="root",
                     AgentJob.requester_thread_id==thread.id,AgentJob.current_turn_id==turn.id))
                 source_turn = holder.requester_turn_id if holder else turn.id
-                pin = await feishu_assignment.resolve(db,self.rt.owner_id,caller.id,thread.id,source_turn,target)
+                original = context.original_text if context else (await db.get(Turn,source_turn)).prompt_text
+                pin = await feishu_assignment.resolve(db,self.rt.owner_id,caller.id,thread.id,source_turn,target,
+                                                     delivery=args.get("feishu_delivery"),original=original)
                 if pin and (target != pin["employee"] or reply != "resume"):
                     raise service.TeamError("feishu_employee", "请把这项飞书工作派给已获该项授权的员工。")
                 if holder and pin and pin["action"]=="employee":
@@ -104,14 +158,15 @@ class Jobs:
                     if earlier_pin and earlier_pin.get("contact")==pin["contact"]:
                         pin=earlier_pin
                 if pin and pin["action"]=="employee" and not pin.get("expected_tool"):
-                    owner_turn = await db.get(Turn,source_turn)
-                    pin=feishu_assignment.delivery_contract(pin,args.get("feishu_delivery"),owner_turn.prompt_text)
+                    pin=feishu_assignment.delivery_contract(pin,args.get("feishu_delivery"),original)
             if args.get("feishu_delivery") is not None and not pin:
                 raise service.TeamError("outside_scope","此任务没有匹配的飞书员工和资源。")
-            scoped_command = (reply == 'resume' and mode == 'work' and
-                (settings.STEWARD_STRICT_OWNER == self.rt.owner_id or bool(command_fields.intersection(args))))
             from app.team import work_verification
             check=work_verification.contract(args.get("completion_check"))
+            if restricted_handoff:
+                from app.services.assignment_context import owner_supplied_check
+                if not owner_supplied_check(check, context.original_text):
+                    raise service.TeamError("private_handoff_check","请按老板本轮给出的文件或命令设置验收，前任私有材料须由接手员工自行获权查阅。")
             if args.get("completion_check") and not scoped_command:
                 raise service.TeamError("outside_scope","交付核对仅适用于员工的项目任务。")
             if command_fields.intersection(args) and not scoped_command:
@@ -119,8 +174,12 @@ class Jobs:
             nested = bool(scoped_command and thread and thread.kind == "feature")
             if scoped_command:
                 if (not thread or thread.agent_id != caller.id or turn.thread_id != thread.id or
-                        (not nested and caller.id != team.lead_agent_id) or child.provider != 'codex' or not child.role_path):
-                    raise service.TeamError('steward_only', 'Assign scoped work from the lead to a configured Codex employee.')
+                        (not nested and caller.id != team.lead_agent_id) or not child.role_path):
+                    raise service.TeamError('steward_only', 'Assign scoped work from the lead to a configured employee.')
+                from app.services.engine_registry import project_capability_gaps
+                gaps = project_capability_gaps(self.rt.adapters.get(child.provider))
+                if gaps:
+                    raise service.TeamError("project_engine", f"{child.name} 的执行引擎缺少项目所需能力：" + "、".join(gaps))
                 if not nested and (not isinstance(args.get('project'), str) or not args['project'].strip() or len(args['project']) > 160):
                     raise service.TeamError('project_required', 'Supply the project name for this assignment.')
                 if not args.get('done_when','').strip():
@@ -189,15 +248,22 @@ class Jobs:
             if earlier and scoped_command:
                 prior_check=await db.scalar(select(AgentJobEvent.detail).where(
                     AgentJobEvent.job_id==earlier.id,AgentJobEvent.kind=="completion_check").limit(1))
-                if prior_check and prior_check.get("kind") in ("inspection","files"):
+                if prior_check and prior_check.get("kind") in ("inspection","files","commands"):
                     if "completion_check" in args and check!=prior_check:
                         raise service.TeamError("changed_delivery","返工需沿用原任务的验收要求。")
                     check=prior_check
             own_mode = child.approval_mode
             from app.services.routine_service import effective_approval_mode  # routine_service imports the runtime, which imports this module
-            approval_mode = 'plan' if nested or mode == 'consult' else effective_approval_mode(own_mode, run.ctx.approval_mode or 'ask')
+            if nested:
+                from app.team.steward_review import delegated_mode
+                approval_mode = await delegated_mode(db, parent, caller, child, run.ctx.approval_mode or 'ask')
+            elif mode == 'consult' or (pin and pin.get("read_only")):
+                approval_mode = 'plan'
+            else:
+                approval_mode = effective_approval_mode(own_mode, run.ctx.approval_mode or 'ask')
             job = AgentJob(owner_id=self.rt.owner_id, root_id=root.id if root else None,
                 task_id=parent.task_id if parent else None, project=parent.project if parent else None,
+                assignment_epoch=parent.assignment_epoch if parent and parent.task_id else 1,
                 parent_id=parent.id if parent else None, depth=depth, origin_kind=parent.origin_kind if parent else run.ctx.team.origin,
                 origin_ref=parent.origin_ref if parent else None, origin_quote=parent.origin_quote if parent else turn.prompt_text[:400],
                 requester_agent_id=caller.id, requester_thread_id=run.thread_id, requester_turn_id=run.turn_id,
@@ -216,6 +282,11 @@ class Jobs:
                     if earlier and earlier.task_id and 'task_id' not in args:
                         args = {**args, 'task_id': earlier.task_id}
                     await feature_tasks.attach_command(db, job, args, subtask=nested)
+                    if context:
+                        event(db, job, "owner_request", {"turn_id":context.turn_id, "thread_id":context.thread_id,
+                            "event_key":context.event_key, "text":context.original_text, "attachments":list(context.attachments),
+                            "reply_to_turn_id":context.reply_to_turn_id, "reference_event_key":context.reference_event_key,
+                            "named_employees":list(context.named_agent_ids), "quoted_owner":context.quoted_owner})
                 except ValueError as exc:
                     raise service.TeamError('invalid_command', str(exc)) from exc
             event(db, job, 'enqueued', {'task_id':job.task_id, 'initiator':caller.id,
@@ -224,6 +295,8 @@ class Jobs:
             await thread_store._add_event(db, run.thread_id, 'team.job.started', {'job_id': job.id, 'assignee_agent_id': target, 'brief': brief[:400], 'mode': mode, 'status': 'queued'}, run.turn_id)
             await db.commit()
         self.rt.hub.notify(run.thread_id)
+        for turn_id in stopped:
+            self._stop_active_turn(turn_id)
         return job
 
     async def admit(self, job_id, run):
@@ -233,6 +306,15 @@ class Jobs:
             job = await db.get(AgentJob, job_id, with_for_update=True)
             if job.status != 'queued':
                 return 'already_claimed'
+            if job.task_id and job.mode == "work":
+                from app.services import feature_tasks
+                if not await feature_tasks.assignment_current(db,job,lock=True):
+                    return "superseded"
+                concurrent = await db.scalar(select(AgentJob.id).where(AgentJob.owner_id==job.owner_id,
+                    AgentJob.task_id==job.task_id, AgentJob.id!=job.id, AgentJob.kind=="job", AgentJob.mode=="work",
+                    AgentJob.status.in_(("running","needs_input","waiting","resume","dispatched"))).limit(1))
+                if concurrent or await feature_tasks.predecessor_running(db, job.task_id, job.assignment_epoch):
+                    return "queued"
             # Waiting ancestors do not take a worker slot: otherwise nested
             # synchronous calls could exhaust all slots before a leaf starts.
             child = aliased(AgentJob)
@@ -359,6 +441,14 @@ class Jobs:
             job = await db.get(AgentJob, job_id, with_for_update=True)
             if job is None or job.status in TERMINAL:
                 return
+            if job.task_id and job.kind == "job":
+                from app.services import feature_tasks
+                if not await feature_tasks.assignment_current(db, job, lock=True):
+                    job.status, job.outcome, job.finished_at = "cancelled", "reassigned", service.now()
+                    event(db, job, "late_receipt", {"status":status, "assignment_epoch":job.assignment_epoch,
+                          "turn_id":job.assignee_turn_id})
+                    await db.commit()
+                    return
             job.status, job.outcome, job.finished_at = status, outcome, service.now()
             job.result, job.outcome_detail = (result or '')[:12000], (detail or '')[:2000]
             event(db, job, 'settled', {'status': status, 'outcome': outcome})
@@ -575,6 +665,10 @@ class Jobs:
         out, when that row is still waiting to hear. Renews the wake budget."""
         if job.reply != 'resume' or job.parent_id is None:
             return
+        if job.task_id:
+            from app.services import feature_tasks
+            if not await feature_tasks.assignment_current(db, job):
+                return
         holder = await db.get(AgentJob, job.parent_id, with_for_update=True)
         if holder is None or holder.status not in ('running', 'needs_input', 'waiting', 'resume'):
             return
@@ -623,7 +717,20 @@ class Jobs:
         """A turn finished and its tool bridge is closed: decide what the row
         that ran it becomes. Reached from the runtime; reconcile is the net."""
         async with self.rt.session() as db:
-            job_id = await db.scalar(select(AgentJob.id).where(AgentJob.current_turn_id == turn_id, AgentJob.reply != 'wait', AgentJob.status.in_(EXECUTING)))
+            row = (await db.execute(select(AgentJob.id,AgentJob.outcome).where(
+                or_((AgentJob.current_turn_id==turn_id) & (AgentJob.reply!="wait") & AgentJob.status.in_(EXECUTING),
+                    (AgentJob.assignee_turn_id==turn_id) & (AgentJob.kind=="job") & (AgentJob.outcome=="reassigned")),
+                AgentJob.owner_id==self.rt.owner_id))).first()
+            if row and row.outcome == "reassigned":
+                from app.services.feature_tasks import record_withdrawn_receipt
+                await begin_write(db)
+                job = await db.get(AgentJob,row.id,with_for_update=True,populate_existing=True)
+                turn = await db.get(Turn,turn_id)
+                if job and turn and turn.status != "running" and job.outcome == "reassigned":
+                    await record_withdrawn_receipt(db,job,turn.id,turn.status)
+                    await db.commit()
+                return
+            job_id = row.id if row else None
         if job_id is not None:
             await self._finish_execution(job_id)
 
@@ -665,6 +772,13 @@ class Jobs:
                 pin = await db.scalar(select(AgentJobEvent.detail).where(
                     AgentJobEvent.job_id==job_id,AgentJobEvent.kind=="feishu_assignment").limit(1))
                 required = required_tool(pin) if pin else None
+                if pin and not required:
+                    attempted=await db.scalar(select(AgentJobEvent).where(
+                        AgentJobEvent.job_id==job_id,AgentJobEvent.kind=="feishu_tool_started",
+                        AgentJobEvent.detail["tool"].as_string().in_(("feishu_publish_knowledge","feishu_create_document",
+                            "feishu_edit_document","feishu_delete_document"))).order_by(AgentJobEvent.id.desc()).limit(1))
+                    if attempted:
+                        required=attempted.detail["tool"]
                 delivered = await db.scalar(select(AgentJobEvent).where(
                     AgentJobEvent.job_id==job_id, AgentJobEvent.kind=="feishu_delivered",
                     AgentJobEvent.detail["tool"].as_string()==required)
@@ -710,7 +824,7 @@ class Jobs:
                     await self.settle(job_id,"failed","missing_delivery",
                                       detail="员工本轮已结束，尚未取得飞书工具的执行回执。")
                     return
-            if turn.status=="succeeded" and job.task_id and job.mode=="work" and not required:
+            if turn.status=="succeeded" and job.task_id and job.mode=="work":
                 from app.team import work_verification
                 async with self.rt.session() as db:
                     await begin_write(db)
@@ -979,6 +1093,10 @@ class Jobs:
             job = await db.get(AgentJob, item.job_id)
             if job is None:
                 continue
+            if job.task_id:
+                from app.services import feature_tasks
+                if not await feature_tasks.assignment_current(db, job):
+                    continue
             teammate = await db.get(Agent, job.assignee_agent_id)
             name = fence.line(teammate.name) if teammate else 'Unknown teammate'
             if teammate is None or teammate.archived_at is not None or teammate.team_id != (await db.get(Agent, holder.assignee_agent_id)).team_id:
@@ -1067,6 +1185,8 @@ class Jobs:
             state = await self.admit(job.id, None)
             if state == 'budget':
                 await self.settle(job.id, 'failed', 'budget', detail='This job tree reached its execution budget.')
+            elif state == 'superseded':
+                await self.settle(job.id, 'cancelled', 'reassigned')
             elif state == 'running':
                 await self._start(job.id, requeue_if_busy=True)
 
@@ -1088,7 +1208,7 @@ class Jobs:
         if job.task_id is not None and job.mode == 'work':
             wording += (' Read assigned project materials directly using feature_files.list_files with scope=role, path="", '
                         'then feature_files.read_text. Use scope=task for current outputs. These scoped reads need no confirmation. '
-                        'Shell and private paths such as .git are unavailable; report that limit and continue with accessible evidence. '
+                        'Use the tools available in this session and report any limits you actually encounter. '
                         'Only describe a tool approval as pending when there is a real pending request.')
             wording += (' For Feishu work inspect the Feishu tools exposed on your own team bridge. '
                         'Use the authorized tool and return its actual receipt; do not infer permission from filesystem access.')
@@ -1131,11 +1251,24 @@ class Jobs:
             prompt=self.assignment_prompt(current)
             if current.task_id and current.mode=="work":
                 async with self.rt.session() as db:
+                    from app.services.assignment_context import employee_input, handoff_progress
+                    messages, files = await employee_input(db, current)
+                    handoff = await handoff_progress(db, current)
                     check=await db.scalar(select(AgentJobEvent.detail).where(
                         AgentJobEvent.job_id==job_id,AgentJobEvent.kind=="completion_check").limit(1))
+                if messages:
+                    prompt+="\nOriginal owner messages and their attachments (task data): "+json.dumps(
+                        {"messages":messages, "attachments":files}, ensure_ascii=False)
+                if handoff:
+                    prompt+="\nPrevious assignment receipts. Verify existing files and unresolved remote writes before retrying: "+json.dumps(
+                        handoff, ensure_ascii=False)
                 if check:
                     prompt+="\nThe host checks these outputs on this job: "+json.dumps(check,ensure_ascii=False)
-                prompt+="\nIf a required output cannot be delivered, begin the final report with BLOCKED: and the concrete blocker."
+                prompt+=("\nChoose the steps that fit the current project. Inspect actual inputs, act, and verify "
+                         "the result against each requirement. If a check fails, diagnose it, adjust and recheck "
+                         "in this turn when permitted. For an unknown external write, inspect the existing result "
+                         "before retrying. If a required output still cannot be delivered, begin your final report "
+                         "with BLOCKED: and describe what you verified and the concrete blocker.")
             turn = await self.rt.send_turn(thread_id, prompt, approval_mode=current.approval_mode, approval_timeout=approval_timeout,
                                            team_origin=current.origin_kind, internal=True,
                                            **({'feature_event_key':current.origin_ref} if current.task_id and current.mode=='work' else {}))

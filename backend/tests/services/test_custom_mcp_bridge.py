@@ -117,6 +117,34 @@ async def test_an_enabled_tested_connection_with_a_grant_is_mounted_for_a_person
         await bridge.close()
 
 
+async def test_employee_project_tool_rechecks_job_and_grant_before_each_call(world, sessions, remote, monkeypatch):
+    from app.team import steward_review
+    runtime, run, adapter, connection, agent, _ = world
+    live = {"assigned":True}
+    async def assigned(db, active, *, write=False, lock=False):
+        assert active is run
+        return live["assigned"]
+    monkeypatch.setattr(steward_review, "current_native_job", assigned)
+    async with sessions() as db:
+        (await db.get(Thread, run.thread_id)).kind = "feature"
+        (await db.get(CustomMcpConnection, connection.id)).shared = True
+        await db.commit()
+    run.ctx.team = NS()
+    run.ctx.project_runtime = NS(employee_id=agent.id, owner_id=runtime.owner_id)
+    adapter.capabilities.project_workspace = True
+    [item] = await mounted(world)
+    bridge = CommunityMcpBridge(runtime, run, [item])
+    try:
+        [alias] = bridge.aliases_allowed
+        await approve(sessions, run, alias, {"q":"test"})
+        assert "error" not in await bridge.execute(alias, {"q":"test"})
+        live["assigned"] = False
+        assert (await bridge.execute(alias, {"q":"test"}))["code"] == "revoked"
+        assert remote.calls == [("lookup", {"q":"test"})]
+    finally:
+        await bridge.close()
+
+
 @pytest.mark.parametrize("change", [
     {"enabled": False},
     {"tested_revision": None},

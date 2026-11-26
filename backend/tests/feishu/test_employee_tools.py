@@ -25,12 +25,25 @@ def run(monkeypatch):
         return {}
     monkeypatch.setattr(tools.documents,"user_headers",headers)
     calls=[]
+    cloud={"title":"","folder":"folder","children":[]}
     def respond(req):
         calls.append(req)
+        if req.method=="POST" and req.url.path.endswith("/documents"):
+            cloud["title"]=json.loads(req.content)["title"]
+            return httpx.Response(200,json={"code":0,"data":{"document":{"document_id":"doc"}}})
+        if req.method=="GET" and req.url.path.endswith("/drive/v1/files"):
+            return httpx.Response(200,json={"code":0,"data":{"files":[{"token":"doc","type":"docx","parent_token":cloud["folder"]}]}})
+        if req.method=="GET" and req.url.path.endswith("/documents/doc"):
+            return httpx.Response(200,json={"code":0,"data":{"document":{"document_id":"doc","title":cloud["title"]}}})
+        if req.method=="POST" and req.url.path.endswith("/children"):
+            cloud["children"]=json.loads(req.content)["children"]
+            if settings.pop("test_lost_ack",False):
+                raise httpx.ReadTimeout("synthetic interrupted reply",request=req)
+            return httpx.Response(200,json={"code":0,"data":{"children":[{"block_id":"a"} for _ in cloud["children"]]}})
         if req.method=="GET" and req.url.path.endswith("/children"):
-            body=json.loads(calls[1].content)
-            return httpx.Response(200,json={"code":0,"data":{"items":body["children"]}})
-        return httpx.Response(200,json={"code":0,"data":{"document":{"document_id":"doc"}} if len(calls)==1 else {"children":[{"block_id":"a"}]}})
+            return httpx.Response(200,json={"code":0,"data":{"items":cloud["children"]}})
+        raise AssertionError(f"Unexpected request to the test transport: {req.method} {req.url.path}")
+    settings["test_cloud"]=cloud
     db=sqlite3.connect(":memory:")
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         async def call(name,arguments,**changes):
@@ -55,14 +68,33 @@ async def test_pinned_source_and_scope(run):
 
 @pytest.mark.asyncio
 async def test_general_doc_uses_employee_and_is_idempotent(run):
-    call,calls,_=run
+    call,calls,settings=run
     args={"title":"测试","body":"正文"}
     result=await call("feishu_create_document",args)
     assert result==await call("feishu_create_document",args)
     assert result["confirmed"] and result["url"]=="https://demo.feishu.cn/docx/doc"
-    assert [r.method for r in calls]==["POST","POST","GET","GET"] and json.loads(calls[0].content)["folder_token"]=="folder"
+    assert sum(r.method=="POST" for r in calls)==2 and json.loads(calls[0].content)["folder_token"]=="folder"
+    assert any(r.url.path.endswith("/drive/v1/files") for r in calls)
+    assert any(r.method=="GET" and r.url.path.endswith("/documents/doc") for r in calls)
     with pytest.raises(ValueError):
         await call("feishu_create_document",{**args,"body":"另一份"})
+    settings["test_cloud"]["folder"]="elsewhere"
+    with pytest.raises(ValueError,match="文件夹"):
+        await call("feishu_create_document",args)
+    settings["test_cloud"].update(folder="folder",title="人工改名")
+    with pytest.raises(ValueError,match="名称"):
+        await call("feishu_create_document",args)
+    assert sum(r.method=="POST" for r in calls)==2
+
+
+async def test_create_document_recovers_written_body_after_lost_reply_without_a_second_write(run):
+    call,calls,settings=run
+    settings["test_lost_ack"]=True
+    args={"title":"摘要","body":"### 结果\n正文"}
+    with pytest.raises(httpx.ReadTimeout):
+        await call("feishu_create_document",args)
+    assert (await call("feishu_create_document",args))["confirmed"]
+    assert sum(r.method=="POST" for r in calls)==2
 
 @pytest.mark.asyncio
 async def test_employee_read_checks_contact_and_requires_every_page(run,monkeypatch):
@@ -85,14 +117,47 @@ async def test_employee_read_checks_contact_and_requires_every_page(run,monkeypa
 @pytest.mark.asyncio
 async def test_pinned_worker_publishes_semantic_revision_and_returns_receipt(run,monkeypatch):
     call,_,_=run
-    async def publish(worker,row,review,source,cutoff,*,revise,instructions):
+    records={"m1":{"msg_type":"text","create_time":"100","body":{"content":json.dumps({"text":"甲"*2600})}}}
+    monkeypatch.setattr(tools.history,"headers",lambda *_:{})
+    monkeypatch.setattr(tools.history,"peer_for",lambda *_:"ou_peer")
+    monkeypatch.setattr(tools.knowledge_document,"collect",lambda *_:records)
+    async def publish(worker,row,review,source,cutoff,*,revise,instructions,employee_draft,assignment):
         assert row["app"]=="lead" and review[1]=="二狗" and source["oauth_app"]=="employee" and revise
+        assert employee_draft(records)[-1]["text"]["elements"][0]["text_run"]["content"]=="员工写的摘要"
         return "已写入 https://demo.feishu.cn/docx/test123",11
     monkeypatch.setattr(tools.knowledge_document,"publish",publish)
-    receipt=await call("feishu_publish_knowledge",{})
+    draft={"topics":[{"title":"进展","summary":"员工写的摘要","sources":["m1"]}]}
+    with pytest.raises(ValueError,match="先读"):
+        await call("feishu_publish_knowledge",{})
+    with pytest.raises(ValueError,match="第一页"):
+        await call("feishu_publish_knowledge",draft)
+    page=await call("feishu_read_history",{})
+    with pytest.raises(ValueError,match="未读完"):
+        await call("feishu_publish_knowledge",draft)
+    await call("feishu_read_message",{"id":"m1","offset":page["excerpts"][0]["next_text_offset"]})
+    receipt=await call("feishu_publish_knowledge",draft)
     assert receipt["confirmed"] and receipt["url"]=="https://demo.feishu.cn/docx/test123"
+    records["m1"]["body"]["content"]=json.dumps({"text":"已修改"})
+    with pytest.raises(ValueError,match="已变更"):
+        await call("feishu_publish_knowledge",draft)
     with pytest.raises(ValueError):
         await call("feishu_publish_knowledge",{"folder":"external"})
+
+
+@pytest.mark.asyncio
+async def test_private_excerpts_follow_actual_employee_vendor_and_revocation(run,monkeypatch):
+    call,_,settings=run
+    monkeypatch.setattr(tools.history,"headers",lambda *_:{})
+    monkeypatch.setattr(tools.history,"peer_for",lambda *_:"ou_peer")
+    monkeypatch.setattr(tools.knowledge_document,"collect",lambda *_:{})
+    args={"assignment":{"action":"employee","runtime_vendor":"deepseek"}}
+    with pytest.raises(ValueError,match="供应商"):
+        await call("feishu_read_history",{},**args)
+    settings["employee_summary_vendors"]={"4":["deepseek"]}
+    assert (await call("feishu_read_history",{},**args))["complete"]
+    settings["employee_summary_vendors"]["4"]=[]
+    with pytest.raises(ValueError,match="供应商"):
+        await call("feishu_read_history",{},**args)
 
 @pytest.mark.asyncio
 async def test_source_metadata_only_discloses_confirmed_bound_document(run,monkeypatch):

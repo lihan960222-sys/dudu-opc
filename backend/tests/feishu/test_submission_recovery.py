@@ -10,6 +10,7 @@ from app.feishu.publisher import Publisher
 from app.feishu.routing import journal
 from app.feishu.worker import Worker
 from app.services import feature_tasks
+from tests.services.thread_harness import owner, sessions  # noqa: F401
 
 
 class Noop:
@@ -67,6 +68,47 @@ async def test_restart_reuses_exact_request(tmp_path, monkeypatch, failure):
     monkeypatch.setattr(resumed,'flush',lambda: None)
     await resumed.tick()
     assert store.execute('select state from inbox').fetchone()[0]=='running'
+    store.close()
+
+
+@pytest.mark.parametrize("already_accepted", [False, True])
+async def test_withdrawn_replay_adopts_only_matching_preexisting_turn(tmp_path,sessions,owner,monkeypatch,already_accepted):
+    from contextlib import closing
+    from types import SimpleNamespace
+    from app.services import agent_store, thread_store
+    from app.team import service
+    monkeypatch.setattr(session,"AsyncSessionLocal",sessions)
+    key = submissions.event_key({"app":"a","event":"e"})
+    async with sessions() as db:
+        lead = await agent_store.create_agent(db,owner_id=owner,name="Lead",make_lead=True)
+        old = await agent_store.create_agent(db,owner_id=owner,name="First")
+        new = await agent_store.create_agent(db,owner_id=owner,name="Next")
+        for employee in (old,new):
+            await service.change_member(db,owner,employee.id)
+        initial = await feature_tasks.route(db,owner_id=owner,agent_id=old.id,event_key=key,
+            project="P",title="Import",text="Certified request")
+        task = initial["task_id"]
+        thread, _ = await feature_tasks.session_for(db,owner,task,model="m",workspace_path=str(tmp_path))
+        await feature_tasks.dispatch(db,owner_id=owner,steward_id=lead.id,task_id=task,event_key=key,thread_id=thread.id)
+        if already_accepted:
+            accepted = await thread_store.start_turn(db,thread.id,"Certified request",feature_event_key=key)
+        await feature_tasks.reassign(db,task,1,new.id,"correction",owner_id=owner)
+        await db.commit()
+    with closing(journal(tmp_path/"recovery")) as channel, httpx.Client(base_url="http://localhost",
+            transport=httpx.MockTransport(lambda req:httpx.Response(409,json={"detail":{"code":"dispatch_conflict"}}))) as api:
+        worker = Worker({"owner_id":owner},SimpleNamespace(db=channel))
+        worker.api.close()
+        worker.api = api
+        channel.execute("insert into inbox(app,event,message,payload,state,task) values('a','e','m','{}','bound',?)",(task,))
+        row = channel.execute("select * from inbox").fetchone()
+        submissions.prepare(channel,row,thread.id,"First","Import","Certified request",[])
+        if already_accepted:
+            request = channel.execute("select * from submissions").fetchone()
+            assert not await submissions.adopt_withdrawn(worker,row,request,{"prompt_text":"changed","attachment_ids":[]})
+        await submissions.send(worker,row)
+        assert channel.execute("select state from inbox").fetchone()[0] == ("running" if already_accepted else "superseded")
+        found = channel.execute("select turn from executions").fetchone()
+        assert (found[0] if found else None) == (accepted.id if already_accepted else None)
 
 
 @pytest.mark.asyncio

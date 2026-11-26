@@ -15,6 +15,11 @@ def journal(path):
     create table if not exists outbox(
         id text primary key, task integer, role text, body text, is_root integer,
         state text default 'pending', remote text, error text, created real default (unixepoch()));
+    create table if not exists assignment_outbox(
+        outgoing text not null, job integer not null, primary key(outgoing,job));
+    create table if not exists owner_dm_sources(
+        app text, event text, message text, owner text not null, tenant text not null, chat text,
+        primary key(app,event), unique(app,message));
     create table if not exists delivery_timing(
         app text,event text,received real,submit real,accepted real,engine_start real,engine_end real,
         outgoing text unique,sent real,primary key(app,event));
@@ -90,6 +95,11 @@ def enqueue(db, task, role, body, *, root=False):
     db.execute('insert into outbox(id,task,role,body,is_root) values(?,?,?,?,?)',
                (outgoing, task, role, json.dumps(body, ensure_ascii=False), int(root)))
     return outgoing
+
+
+def bind_outgoing(db, outgoing, jobs):
+    db.executemany("insert or ignore into assignment_outbox(outgoing,job) values(?,?)",
+                   [(outgoing, job_id) for job_id in jobs])
 
 
 def ensure_group_root(db, task, role, title):

@@ -97,6 +97,9 @@ def _admin_only(field: str) -> HTTPException:
 def _guard_create(request: Request, payload: AgentCreateRequest) -> None:
     """What a `manage` device may not set on a new agent: a folder of its choosing, the lead role,
     or approvals that loosen. An agent made here asks first or only plans."""
+    if payload.delegate_project_writes:
+        from app.routers.feishu_owner_oauth import owner_browser
+        owner_browser(request)
     if not _restricted(request):
         return
     if payload.team_workspaces_readable:
@@ -113,6 +116,9 @@ def _guard_create(request: Request, payload: AgentCreateRequest) -> None:
 
 def _guard_update(request: Request, payload: AgentUpdateRequest, agent) -> None:
     """The same for an edit. Leaving "accept_edits" alone, or moving to "ask" or "plan", is fine."""
+    if "delegate_project_writes" in payload.model_fields_set:
+        from app.routers.feishu_owner_oauth import owner_browser
+        owner_browser(request)
     if not _restricted(request):
         return
     for field in ("team_workspaces_readable", "workspace_path", "connector_scopes", "connector_account_scopes", "claude_account"):
@@ -281,6 +287,14 @@ async def _agent_or_404(rt: ThreadRuntime, agent_id: int) -> store.Agent:
     return agent
 
 
+def _profile_vendor(provider, vendor, model, effort):
+    from app.services.engine_registry import InvalidModel, resolve_model_profile
+    try:
+        return resolve_model_profile(provider, vendor, model, effort).model_vendor
+    except InvalidModel as exc:
+        raise _error(422, "unknown_model", str(exc)) from None
+
+
 def _check_fallback(rt: ThreadRuntime, provider: str, fallback: str | None, model: str | None) -> None:
     """A fallback engine must be registered, accept its model and differ from
     the agent's own engine. What it must be able to do is checked per turn
@@ -388,6 +402,8 @@ async def create_agent(payload: AgentCreateRequest, request: Request, rt: Thread
                 description=payload.description,
                 instructions=payload.instructions,
                 provider=payload.provider,
+                model_vendor=_profile_vendor(payload.provider, payload.model_vendor, payload.model, payload.effort),
+                delegate_project_writes=payload.delegate_project_writes,
                 model=payload.model,
                 effort=payload.effort,
                 workspace_path=workspace,
@@ -438,6 +454,13 @@ async def configure_role(agent_id: int, payload: RoleFolderRequest, request: Req
             raise _error(422, "role_model", "Choose and save a model before setting up the role folder.")
         _check_engine(rt, agent.provider, agent.model)
         folder = Path(payload.path or agent.workspace_path or agent_memory.agent_home(agent.id))
+        if str(folder) != agent.role_path:
+            from app.team.steward_review import protect_active_scope
+            from app.team.service import TeamError
+            try:
+                await protect_active_scope(db, agent, shared_folders=True)
+            except TeamError as exc:
+                raise _error(409, exc.code, str(exc)) from None
         try:
             if not payload.path and not agent.workspace_path:
                 folder.mkdir(parents=True, exist_ok=True)
@@ -452,7 +475,9 @@ async def configure_role(agent_id: int, payload: RoleFolderRequest, request: Req
                 raise ValueError("Choose a folder separate from every other role folder.")
             role_workspace.initialize(folder, agent.model, agent.instructions)
             config = role_workspace.load(folder, agent.model)
-            await role_workspace.validate_model(rt, agent.provider, config.model)
+            from app.services.employee_runtime import native_enabled
+            await role_workspace.validate_model(rt, agent.provider, config.model, agent.model_vendor, agent.effort,
+                                                private_project=native_enabled(rt.owner_id, agent.id))
         except (ValueError, OSError, EngineModelInvalid) as exc:
             raise _error(422, "role_folder", f"{agent.name}: {exc}") from None
         agent.workspace_path = agent.role_path = str(folder.resolve())
@@ -527,6 +552,8 @@ async def _apply_update(
             "description",
             "instructions",
             "provider",
+            "model_vendor",
+            "delegate_project_writes",
             "model",
             "effort",
             "workspace_path",
@@ -584,14 +611,19 @@ async def _apply_update(
             )
     elif "model" in changes and changes["model"] != agent.model and "effort" not in changes:
         changes["effort"] = None  # a saved effort belongs to the previous model
-    from app.team.service import team_for
+    from app.team.service import TeamError, team_for
     async with rt.session() as db:
         current_team = await team_for(db, rt.owner_id)
     keeps_lead = payload.make_lead is True or (payload.make_lead is not False and current_team is not None and current_team.lead_agent_id == agent_id)
     if keeps_lead and not rt.engines.capabilities(provider).mcp:
         raise _error(409, 'lead_engine', 'A lead needs an engine with team tools (Claude or Codex). Remove the lead role to change to this engine.')
-    if "provider" in changes or "model" in changes:
-        _check_engine(rt, provider, changes.get("model", agent.model if provider == agent.provider else None))
+    if {"provider", "model", "model_vendor", "effort"} & changes.keys():
+        model = changes.get("model", agent.model)
+        _check_engine(rt, provider, model)
+        # Older clients select by model id and do not send a vendor when changing engine or model.
+        previous_vendor = agent.model_vendor if (provider == agent.provider and model == agent.model) else None
+        changes["model_vendor"] = _profile_vendor(
+            provider, changes.get("model_vendor", previous_vendor), model, changes.get("effort", agent.effort))
     if {"provider", "fallback_provider", "fallback_model"} & set(changes):
         _check_fallback(
             rt,
@@ -613,6 +645,8 @@ async def _apply_update(
             async with rt.session() as db:
                 await composio_actions.forget(db, rt.owner_id, agent_id=agent_id)
         return (await _with_computers(rt, [agent]))[0]
+    except TeamError as exc:
+        raise _error(409, exc.code, str(exc)) from None
     except store.AgentNotFound:
         raise HTTPException(status_code=404, detail="Agent not found") from None
     except store.AgentNameTaken:
@@ -706,8 +740,11 @@ async def delete_agent(agent_id: int, rt: ThreadRuntime = Depends(get_runtime)):
     their own provider and model (not its instructions). Archive instead to
     keep them linked."""
     await _agent_or_404(rt, agent_id)
+    from app.team.service import TeamError
     try:
         await remove_agent(rt, agent_id)
+    except TeamError as exc:
+        raise _error(409, exc.code, str(exc)) from None
     except store.AgentNotFound:
         raise HTTPException(status_code=404, detail="Agent not found") from None
 
