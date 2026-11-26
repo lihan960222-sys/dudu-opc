@@ -559,7 +559,7 @@ async def test_steward_receives_verified_document_or_actual_scope_error(team,ses
         action = "delete_document" if case=="deleted" else "restructure"
         await record(rt,job_id,run,tool,"feishu_assignment",action=action)
         if case!="no_scope":
-            receipt={"deleted":True} if case=="deleted" else {"url":"https://example.test/docx/a"}
+            receipt={"deleted":True} if case=="deleted" else {"url":"https://example.feishu.cn/docx/a","messages_read":3}
             await record_delivery(rt,job_id,run,tool,tool,action,f"job-{job_id}",receipt)
             if case=="readback_failed":
                 await record(rt,job_id,run,"feishu_read_document","feishu_tool_failed",detail=repair)
@@ -575,15 +575,19 @@ async def test_steward_receives_verified_document_or_actual_scope_error(team,ses
     await rt.send_turn(thread.id,"update the document")
     async def done():
         root=await root_of(sessions,thread.id)
-        return root and root.status=="completed"
-    await wait_until(done)
+        return root if root and root.status in ("completed","failed") else None
+    root=await wait_until(done)
     assert len(calls)==2
     report=(await turns_of(sessions,thread.id))[-1].prompt_text
     entry=json.loads(report.split("\n",1)[1])["reports"][0]
-    if case!="no_scope":
-        assert entry["verified_document"]["operation"]==tool
     if case in ("complete","deleted"):
-        assert entry["status"]=="completed" and "员工交付说明" in entry["result"]
+        assert entry["verified_document"]["operation"]==tool
+    elif case in ("blocked_after_write","engine_failed_after_write"):
+        assert entry["observed_tool_receipt"]["operation"]==tool and "verified_document" not in entry
+    else:
+        assert "verified_document" not in entry
+    if case in ("complete","deleted"):
+        assert root.status=="completed" and entry["status"]=="completed" and "员工交付说明" in entry["result"]
         if case=="deleted":
             assert "url" not in entry["verified_document"]
     elif case=="engine_failed_after_write":
@@ -591,4 +595,4 @@ async def test_steward_receives_verified_document_or_actual_scope_error(team,ses
     elif case=="blocked_after_write":
         assert entry["status"]=="failed" and "尚未核对来源" in entry["detail"]
     else:
-        assert "docx:document:readonly" in report and "missing_delivery" in report
+        assert root.status=="failed" and "docx:document:readonly" in report and "missing_delivery" in report

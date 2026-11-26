@@ -171,12 +171,16 @@ def append(cfg,employee,identity,db,client,job,url,body):
         if knowledge_document.target(cfg,employee)[0]!=dest:
             raise ValueError("目标文件夹已变更。")
         return documents.user_headers(identity,required={FOLDER_SCOPE,READ_SCOPE,"docx:document:write_only"})
-    if not in_folder(client,headers,dest["folder_token"],doc):
-        raise ValueError("目标文档不在二狗获准编辑的文件夹内。")
+    def verify_folder():
+        if not in_folder(client,headers,dest["folder_token"],doc):
+            raise ValueError("目标文档不在该员工获准编辑的文件夹内。")
+    verify_folder()
     token=str(uuid5(NAMESPACE_URL,json.dumps([identity["steward"]["app_id"],employee,job,url,body])))
     change=replacement(body)
     if change:
-        return replace_paragraph(client,headers,db,token,doc,url,*change)
+        result=replace_paragraph(client,headers,db,token,doc,url,*change)
+        verify_folder()
+        return result
     db.execute("create table if not exists employee_doc_appends(token text primary key,ids text)")
     with db:
         claimed=db.execute("insert or ignore into employee_doc_appends values(?,null)",(token,)).rowcount
@@ -200,6 +204,7 @@ def append(cfg,employee,identity,db,client,job,url,body):
             raise ValueError("飞书新增段落读回核对失败。")
         if [r.get("text_run",{}).get("content") for r in actual[kind]["elements"]]!=[r["text_run"]["content"] for r in expected[kind]["elements"]]:
             raise ValueError("飞书新增段落内容与派工不符。")
+    verify_folder()
     return {"confirmed":True,"url":url,"message":f"已追加并核对 {len(ids)} 段。\n"+url}
 
 async def read_page(client,identity,db,employee,job,url,offset):

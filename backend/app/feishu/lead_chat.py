@@ -167,6 +167,13 @@ async def publish_reports(worker):
         jobs={j.id:j for j in await db.scalars(select(AgentJob).where(AgentJob.id.in_([r['job'] for r in rows]),
             AgentJob.kind=='root',AgentJob.owner_id==cfg['owner_id'],AgentJob.requester_agent_id==actor,
             AgentJob.assignee_agent_id==actor))}
+        from app.team.document_delivery import owner_report
+        confirmed={}
+        for job in jobs.values():
+            if not dispatch_recovery.is_recovery(job) and (job.status=="completed" or job.outcome=="missing_delivery"):
+                report=await owner_report(db,job,job.result or job.outcome_detail)
+                if report:
+                    confirmed[job.id]=report
         from collections import defaultdict
         dispatches = defaultdict(list)
         children = await db.execute(select(AgentJob.parent_id, AgentJob.id).where(
@@ -209,7 +216,10 @@ async def publish_reports(worker):
                 worker.db.execute('update direct_team_reports set question=? where job=?',(signature(job.question),job.id))
             elif job.status in ('completed','failed','cancelled'):
                 from app.services.steward_reply import turn_status
-                report=job.result if job.status=='completed' else turn_status(job.status, job.outcome_detail)
+                checked=confirmed.get(job.id)
+                if checked and checked.pending:
+                    continue
+                report=checked.text if checked else (job.result if job.status=='completed' else turn_status(job.status, job.outcome_detail))
                 if not report:
                     report=turn_status(job.status)
                 worker.db.execute('update direct_team_reports set finished=1 where job=?',(job.id,))

@@ -18,6 +18,7 @@ from app.db.models.knowledge_weekly import KnowledgeWeeklyGrant, KnowledgeWeekly
 from app.db.transactions import begin_write
 from app.feishu import knowledge_document, owner_oauth, workspace_access
 from app.team import service
+from app.team.document_delivery import PUBLISH, evidence
 
 
 WEEK = timedelta(days=7)
@@ -117,10 +118,8 @@ async def enroll(db, cfg, employee, source_job_id, *, now=None):
                  (pin["action"] == "employee" and required_tool(pin) is None)) or source.requester_agent_id != scope["lead"]):
         raise ValueError("原派工未绑定同一名员工、联系人和知识库。")
     link = scope["destination"]["tenant_origin"] + "/docx/" + scope["document"]
-    receipts = await db.scalars(select(AgentJobEvent.detail).where(AgentJobEvent.job_id == source.id,
-        AgentJobEvent.kind == "feishu_delivered").order_by(AgentJobEvent.id.desc()))
-    if not any(r.get("tool") == "feishu_publish_knowledge" and r.get("employee") == employee
-               and (r.get("result") or {}).get("url") == link for r in receipts):
+    first = await evidence(db, source, PUBLISH, pin=pin, expected_url=link)
+    if not first.result:
         raise ValueError("尚无该员工对同一文档的首次发布回执。")
     grant = await db.get(KnowledgeWeeklyGrant, (cfg["owner_id"], employee), with_for_update=True)
     if grant and grant.enabled:
@@ -185,10 +184,8 @@ async def claim(db, cfg, employee, now):
     for slot, previous in recent:
         if previous.status != "completed":
             continue
-        receipts = await db.scalars(select(AgentJobEvent.detail).where(
-            AgentJobEvent.job_id == previous.id, AgentJobEvent.kind == "feishu_delivered"))
-        if any(r.get("tool") == "feishu_publish_knowledge" and r.get("employee") == employee
-               and (r.get("result") or {}).get("url") == expected_url for r in receipts):
+        receipt = await evidence(db, previous, PUBLISH, expected_url=expected_url)
+        if receipt.result:
             since = slot.cutoff
             break
     key = PREFIX + digest([owner, employee, grant.task_id, grant.assignment_epoch, grant.generation, due.isoformat()])
@@ -379,13 +376,10 @@ async def tick(worker):
         for slot, job, grant in rows:
             if worker.db.execute("select 1 from knowledge_weekly_notice where event_key=?", (slot.event_key,)).fetchone():
                 continue
-            receipt = await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id == job.id,
-                AgentJobEvent.kind == "feishu_delivered", AgentJobEvent.detail["tool"].as_string() == "feishu_publish_knowledge")
-                .order_by(AgentJobEvent.id.desc()).limit(1))
-            url = (receipt or {}).get("result", {}).get("url")
+            url=grant.scope["destination"]["tenant_origin"]+"/docx/"+grant.scope["document"]
+            receipt=await evidence(db,job,PUBLISH,expected_url=url)
             verified = (grant.enabled and slot.scope_digest == digest([grant.generation, grant.scope]) and
-                        job.status == "completed" and receipt and receipt.get("employee") == slot.employee_id and
-                        url == grant.scope["destination"]["tenant_origin"] + "/docx/" + grant.scope["document"])
+                        job.status == "completed" and job.assignee_agent_id==slot.employee_id and receipt.result)
             body = {"text":(f"老板，我核对了工单 #{job.task_id} 的更新回执，本周的知识库在这里。\n{url}" if verified else
                             f"老板，工单 #{job.task_id} 本周的知识库更新，我还没核实。{(job.outcome_detail or '')[:130]}")}
             original = await db.get(AgentJob, grant.source_job_id)

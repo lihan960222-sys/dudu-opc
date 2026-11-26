@@ -164,7 +164,8 @@ async def record(rt, job_id, run, name, stage, **details):
     from app.team.jobs import event
     async with rt.session() as db:
         job = await _lock_receipt_job(db, rt.owner_id, job_id, run.agent_id)
-        event(db, job, stage, {"employee":run.agent_id, "tool":name, **details})
+        event(db, job, stage, {"employee":run.agent_id, "tool":name, "epoch":job.assignment_epoch,
+                               "turn_id":run.turn_id, **details})
         await db.commit()
 
 
@@ -177,7 +178,8 @@ async def record_delivery(rt, job_id, run, name, logical_tool, action, operation
                    and await assignment_current(db, job, lock=True))
         stage = "feishu_delivered" if current else "feishu_superseded"
         event(db, job, stage, {"employee":run.agent_id,"action":action,"result":receipt,
-            "tool":logical_tool,"invoked_tool":name,"operation":operation,"epoch":job.assignment_epoch})
+            "tool":logical_tool,"invoked_tool":name,"operation":operation,"epoch":job.assignment_epoch,
+            "turn_id":run.turn_id})
         await db.commit()
     if not current:
         raise service.TeamError("assignment_replaced","派工已换人，刚才的操作结果已留给管家核对。")
@@ -197,9 +199,15 @@ async def execute(rt, run, name, args):
         scoped_write = name in feishu_handoff.WRITE_TOOLS and scope.job.task_id is not None
         if scoped_write:
             scope = await feishu_handoff.reserve(db,rt,run,scope,name,operation)
-    if not scoped_write:
-        await record(rt, job_id, run, name, "feishu_tool_started")
     proof, cfg = scope.assignment, scope.config
+    read_target={}
+    if name=="feishu_read_document" and isinstance(args,dict):
+        from app.team.document_delivery import target_hash
+        url=proof.get("target_url") or args.get("url")
+        if isinstance(url,str) and url:
+            read_target={"target_hash":target_hash(url)}
+    if not scoped_write:
+        await record(rt, job_id, run, name, "feishu_tool_started", **read_target)
     if proof.get("weekly"):
         async def weekly_live():
             async with rt.session() as db:
@@ -221,18 +229,18 @@ async def execute(rt, run, name, args):
                 owner_id=rt.owner_id, journal_db=journal, client=client, allowed_actions=scope.tools,
                 contact=proof.get("contact"), invocation_id=operation, assignment=proof)
     except ValueError as exc:
-        await record(rt, job_id, run, name, "feishu_tool_failed", category="validation")
+        await record(rt, job_id, run, name, "feishu_tool_failed", category="validation", **read_target)
         raise service.TeamError("feishu_tool_failed", str(exc)) from None
     except (httpx.HTTPError, PlatformError, OSError, sqlite3.Error, RuntimeError) as exc:
         code,detail=platform_failure(exc)
-        await record(rt,job_id,run,name,"feishu_tool_failed",category=type(exc).__name__,detail=detail)
+        await record(rt,job_id,run,name,"feishu_tool_failed",category=type(exc).__name__,detail=detail, **read_target)
         raise service.TeamError(code,detail) from None
     receipt = None
     action = proof["action"]
     if action=="read_document" and name=="feishu_read_document" and result.get("complete"):
         receipt={"url":result["url"]}
     elif name=="feishu_read_document" and result.get("complete"):
-        await record(rt, job_id, run, name, "feishu_read_verified")
+        await record(rt, job_id, run, name, "feishu_read_verified", **read_target)
     logical_tool=name
     if action in ("read","employee") and name in ("feishu_read_history","feishu_read_message") and result.get("source_complete"):
         receipt = {"messages_read": result["total"]}

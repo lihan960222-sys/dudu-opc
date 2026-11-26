@@ -140,6 +140,7 @@ async def reserve(db, rt, run, scope, name, operation):
         if unknown:
             raise service.TeamError("previous_write_unknown", "前任的飞书写入结果尚未核对。请先用当前已获准的只读工具查看，管家核实原操作前暂不再次写入。")
         raise service.TeamError("previous_write_confirmed", "原派工已有这项写入的确认回执。请按当前员工的授权核对成品。另有修改或新文档时，用老板指定的内容或标题派工。")
-    event(db, job, "feishu_tool_started", {"employee":run.agent_id, "tool":name, "operation":operation, "epoch":job.assignment_epoch})
+    event(db, job, "feishu_tool_started", {"employee":run.agent_id, "tool":name, "operation":operation,
+                                          "epoch":job.assignment_epoch,"turn_id":run.turn_id})
     await db.commit()
     return fresh

@@ -548,6 +548,7 @@ async def start_turn(
     feature_resume_job: int | None = None,
     recovery_job: int | None = None,
     recovery_followup: tuple[int, list[int]] | None = None,
+    delivery_root: int | None = None,
     direct_event_key: str | None = None,
     assignment_source: dict | None = None,
     direct_attachment_ids: list[str] | None = None,
@@ -639,6 +640,14 @@ async def start_turn(
     if recovery_job is not None:
         from app.feishu.dispatch_recovery import bind_wake
         await bind_wake(db,recovery_job,thread,turn.id,internal=internal)
+    if delivery_root is not None:
+        from app.db.models import AgentJob
+        holder=await db.get(AgentJob,delivery_root,with_for_update=True)
+        if (not internal or thread.kind!="chat" or not holder or holder.kind!="root" or holder.origin_kind!="person"
+                or holder.owner_id!=thread.owner_id or holder.assignee_agent_id!=thread.agent_id
+                or holder.assignee_thread_id!=thread.id or holder.status!="running" or holder.current_turn_id is not None):
+            raise ThreadBusy(thread_id)
+        holder.current_turn_id=holder.assignee_turn_id=turn.id
     if recovery_followup is not None:
         from app.db.models import AgentJob
         from app.feishu import dispatch_recovery
