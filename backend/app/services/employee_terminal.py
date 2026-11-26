@@ -10,16 +10,30 @@ from app.team import work_verification
 from app.team.mcp_server import MAILBOX_TIMEOUT_SECONDS
 
 
-def available(ctx, *, live=False):
+def allowed_tools(ctx, *, live=False):
     project = getattr(ctx, "project_runtime", None)
     team = getattr(ctx, "team", None)
-    if (not project or not project.writable or ctx.approval_mode != "ask" or not team or team.is_lead
+    if (not project or not team or team.is_lead
             or team.origin != "person" or not team.feature_consult or not team.strict_hierarchy
             or getattr(ctx, "consult_only", False) or getattr(ctx, "scheduled_knowledge", False)):
-        return False
+        return ()
     # Explicit operator settings at decision time also override a turn's captured default.
     setting = app_settings.resolve("LOCAL_TOOLS_ENABLED", live=live)
-    return setting.effective_value is True or (setting.source == "default" and not setting.error)
+    if setting.effective_value is not True and not (setting.source == "default" and not setting.error):
+        return ()
+    if ctx.approval_mode == "plan" and not project.writable:
+        return ("read_project_text",)
+    if project.writable and ctx.approval_mode == "ask":
+        return ("run_project_command","read_project_text","replace_project_text")
+    if project.writable and ctx.approval_mode == "accept_edits":
+        # Native in-project reads and edits already work. The reviewed command
+        # is available when an operation needs a specific review.
+        return ("run_project_command",)
+    return ()
+
+
+def available(ctx, *, live=False):
+    return "run_project_command" in allowed_tools(ctx, live=live)
 
 
 def checked_command(project, args):

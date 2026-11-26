@@ -30,7 +30,7 @@ async def consume_allowed_approval(db, turn_id, owner_token, tool, arguments):
     query = select(Approval).where(
         Approval.turn_id == turn_id, Approval.tool == tool, Approval.status == 'allowed',
         Approval.consumed_at.is_(None), Approval.decided_at >= threshold)
-    if tool == 'mcp__team__run_project_command':
+    if tool in ('mcp__team__run_project_command','mcp__team__read_project_text','mcp__team__replace_project_text'):
         query = query.where(Approval.delivered_at.is_not(None))
     approvals = (await db.execute(query.order_by(Approval.created_at))).scalars()
     expected = canonical(arguments)
@@ -62,8 +62,9 @@ class TeamBridge:
         if getattr(self.run.ctx.team, 'scheduled_knowledge', False):
             extra.append('--feishu-only')
         from app.services import employee_terminal
-        if employee_terminal.available(self.run.ctx):
-            extra.append('--project-command')
+        flags = {'run_project_command':'--project-command','read_project_text':'--project-read',
+                 'replace_project_text':'--project-edit'}
+        extra.extend(flags[name] for name in employee_terminal.allowed_tools(self.run.ctx))
         for tool in getattr(self.run.ctx.team, 'feishu_tools', ()):
             extra.extend(['--employee-tool', tool])
         if getattr(sys, 'frozen', False):
@@ -129,6 +130,42 @@ class TeamBridge:
 
     async def execute(self, name, args):
         rt, run = self.runtime, self.run
+        if name in ('read_project_text','replace_project_text'):
+            from app.core.config import settings
+            from app.services import employee_project_files, employee_runtime, employee_terminal, feature_tasks, workspace_files
+            from app.team.steward_review import current_native_job
+
+            writing = name == 'replace_project_text'
+            async with rt.session() as db:
+                await begin_write(db)
+                job = await current_native_job(db, run, write=writing, lock=True)
+                if (not job or name not in employee_terminal.allowed_tools(run.ctx, live=True)
+                        or not getattr(run, 'recorder', None) or run.recorder.lost):
+                    raise service.TeamError('outside_scope','工单归属或项目权限已变更。')
+                project = run.ctx.project_runtime
+                try:
+                    employee = await db.get(Agent,project.employee_id)
+                    turn = await db.get(Turn,run.turn_id,with_for_update=True)
+                    if (not turn or turn.thread_id!=run.thread_id or turn.owner_token!=run.owner_token or turn.status!='running'
+                            or not employee or not employee_runtime.native_enabled(project.owner_id, project.employee_id)
+                            or not employee.role_path or Path(employee.role_path)!=project.root):
+                        raise ValueError('员工岗位或项目授权已变更。')
+                    await feature_tasks.check_employee_root(db, project.owner_id, employee, project.root)
+                    if writing:
+                        result = await asyncio.to_thread(employee_project_files.edit,project,args,storage=settings.SQLITE_FILE.parent)
+                    else:
+                        result = await asyncio.to_thread(employee_project_files.read,project,args)
+                except (OSError, UnicodeError, ValueError, workspace_files.FileAccessError) as exc:
+                    raise service.TeamError('project_file_unavailable', str(exc)) from exc
+                await db.commit()
+            receipt = {'operation':'write_text' if writing else 'read_text', 'scope':'role',
+                       'path':result['path'], 'root':str(project.root)}
+            if writing:
+                receipt['sha256'] = result['sha256']
+            if not await run.recorder.emit('tool.completed', {'call_id':'project-file-' + os.urandom(16).hex(),
+                    'name':name, 'ok':True, 'truncated':False,'output':'','file_receipts':[receipt]}):
+                raise service.TeamError('receipt_lost','文件操作已结束，工单回执未保存，请先核对文件。')
+            return result
         if name == 'run_project_command':
             from app.db.models import AgentJobEvent
             from app.services import employee_terminal

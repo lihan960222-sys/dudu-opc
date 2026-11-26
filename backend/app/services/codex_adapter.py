@@ -133,7 +133,7 @@ def feature_team_tools(ctx):
     if getattr(ctx, "scheduled_knowledge", False):
         return tuple(feishu)
     from app.services import employee_terminal
-    reviewed = ("run_project_command",) if employee_terminal.available(ctx) else ()
+    reviewed = employee_terminal.allowed_tools(ctx)
     employee = ("employee_capabilities","enable_local_skill",*feishu,*reviewed)
     if team and not team.delegation_enabled:
         return employee
@@ -903,11 +903,20 @@ class _CodexTurn:
                 return self._failed("Could not confirm scoped task tools.", "codex_error")
             if not self.project or not self.tools:
                 common["environments"] = []
-            if self.project and "run_project_command" in feature_team_tools(self.ctx):
+            if self.project and self.mode == "ask" and "run_project_command" in feature_team_tools(self.ctx):
                 common["config"]["features"].update(shell_tool=False, unified_exec=False)
                 note = ("Run terminal commands through team.run_project_command using an argv array and project-relative cwd. "
                         "Each operation waits for its own review and returns the actual exit code, stdout and stderr. "
-                        "For Windows cmd built-ins use cmd.exe /d /c. Use this tool to read and edit project files as needed.")
+                        "Read UTF-8 project files with team.read_project_text and edit them with team.replace_project_text. "
+                        "Use the returned SHA-256 and one unique old/new literal. Do not use shell commands for these file operations.")
+                instructions = f"{instructions}\n\n{note}" if instructions else note
+            elif self.project and "read_project_text" in feature_team_tools(self.ctx):
+                note = "Use team.read_project_text to inspect one existing project text file. This task has read-only access."
+                instructions = f"{instructions}\n\n{note}" if instructions else note
+            elif self.project and "run_project_command" in feature_team_tools(self.ctx):
+                note = ("Use the native terminal and editor for ordinary work within the named project permissions. "
+                        "If a project check needs review, use team.run_project_command with its complete argv and relative cwd. "
+                        "It always stays within the same project permissions.")
                 instructions = f"{instructions}\n\n{note}" if instructions else note
         launch = self.ctx.memory_launch
         if self.computer is not None:
@@ -1652,15 +1661,22 @@ class _CodexTurn:
                     self.rpc.respond(rid, payload(False))
                     return
                 name, tool_input = found
-                from app.team.mcp_server import PROJECT_COMMAND, TOOLS
+                from app.team.mcp_server import PROJECT_COMMAND, PROJECT_FILES, TOOLS
                 feishu_tools = getattr(getattr(self.ctx, 'team', None), 'feishu_tools', ())
-                if ((name not in {entry['name'] for entry in TOOLS} and name not in feishu_tools and name != PROJECT_COMMAND['name']) or
+                if ((name not in {entry['name'] for entry in (*TOOLS, *PROJECT_FILES, PROJECT_COMMAND)} and name not in feishu_tools) or
                         (self.feature and (name not in feature_team_tools(self.ctx) or
                          (name == 'ask_agent' and tool_input.get('mode') != 'consult')))):
                     self.rpc.respond(rid, payload(False))
                     return
                 tool, approval_kind = "mcp__team__" + name, "other"
                 summary = summarize_tool(tool, tool_input)
+                if name in ('read_project_text','replace_project_text'):
+                    if not project or name not in feature_team_tools(self.ctx):
+                        self.rpc.respond(rid, payload(False))
+                        return
+                    operation = '修改' if name == 'replace_project_text' else '读取'
+                    summary = f"{operation}岗位文件 {str(tool_input.get('path',''))[:150]}"
+                    approval_kind = 'file_write' if name == 'replace_project_text' else 'other'
                 if name == PROJECT_COMMAND['name']:
                     from app.services import employee_terminal
                     import subprocess

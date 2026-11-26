@@ -118,12 +118,19 @@ PROJECT_COMMAND = {'name':'run_project_command',
     'description':'Run exactly this argv in the employee project after one-operation review. cwd is relative to its project root. Returns the real exit code, stdout and stderr. For Windows shell built-ins or pipelines invoke cmd.exe /d /c explicitly.',
     'inputSchema':schema({'argv':{'type':'array','minItems':1,'maxItems':128,'items':string(8192)},'cwd':string(400)},('argv',))}
 
+PROJECT_FILES = [
+    {'name':'read_project_text', 'description':'Read a single existing UTF-8 project file after review. Returns its text and SHA-256.',
+     'inputSchema':schema({'path': string(400)}, ('path',))},
+    {'name':'replace_project_text', 'description':'Replace one unique literal in a previously read UTF-8 project file. Supply the SHA-256 from the read. Preserves other bytes.',
+     'inputSchema':schema({'path':string(400),'sha256':string(64),'old':string(4096),'new':string(4096)}, ('path','sha256','old','new'))},
+]
+
 OPTIONAL = {'raise_escalation'}
 
 
 class Server:
     def __init__(self, mailbox, escalations=False, project_consult=False, feishu_tools=(), employee_only=False,
-                 feishu_only=False, project_command=False):
+                 feishu_only=False, project_command=False, project_read=False, project_edit=False):
         self.mailbox = Path(mailbox)
         if feishu_only:
             self.tools = [tool for tool in FEISHU_TOOLS if tool["name"] in feishu_tools]
@@ -148,6 +155,10 @@ class Server:
             self.tools.extend(t for t in TOOLS if t["name"] in ("employee_capabilities","enable_local_skill"))
             if project_command:
                 self.tools.append(PROJECT_COMMAND)
+            if project_read:
+                self.tools.append(PROJECT_FILES[0])
+            if project_edit:
+                self.tools.append(PROJECT_FILES[1])
         self.tools.extend(t for t in FEISHU_TOOLS if t["name"] in feishu_tools)
 
     def call(self, name, arguments):
@@ -198,10 +209,13 @@ def main():
     parser.add_argument('--employee-only', action='store_true')
     parser.add_argument('--feishu-only', action='store_true')
     parser.add_argument('--project-command', action='store_true')
+    parser.add_argument('--project-read', action='store_true')
+    parser.add_argument('--project-edit', action='store_true')
     parser.add_argument('--employee-tool', action='append', choices=[t['name'] for t in FEISHU_TOOLS], default=[])
     arguments = parser.parse_args()
     server = Server(arguments.mailbox, arguments.escalations, arguments.project_consult, arguments.employee_tool,
-                    arguments.employee_only, arguments.feishu_only, arguments.project_command)
+                    arguments.employee_only, arguments.feishu_only, arguments.project_command,
+                    arguments.project_read, arguments.project_edit)
     for line in sys.stdin:
         try:
             if len(line) > 100000:
