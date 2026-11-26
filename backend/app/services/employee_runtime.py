@@ -47,7 +47,8 @@ def native_enabled(owner_id: str, employee_id: int) -> bool:
         info = path.lstat()
     except FileNotFoundError:
         return _host_native_default(owner_id, employee_id)
-    if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 8:
+    if (stat.S_ISREG(info.st_mode) and not getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            and info.st_nlink == 1 and info.st_size <= 8):
         with path.open("rb") as stream:
             value = stream.read(9).strip()
         if value in (b"true", b"false"):
@@ -62,6 +63,8 @@ def _host_native_default(owner_id: str, employee_id: int) -> bool:
 
 def save_native_enabled(owner_id: str, employee_id: int, enabled: bool) -> None:
     from app.services.agent_memory import write_atomic
+    if type(enabled) is not bool:
+        raise ValueError("员工项目终端只能设为开启或关闭。")
     path = _terminal_preference_path(owner_id, employee_id)
     _private_directory(path.parent)
     write_atomic(path, "true\n" if enabled else "false\n")
