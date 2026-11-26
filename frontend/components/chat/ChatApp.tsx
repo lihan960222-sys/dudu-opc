@@ -1452,7 +1452,7 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
             <Notice title={t("workspace.chatFailed")}>{stream.error}</Notice>
           ) : (
             <Conversation
-              steward={Boolean(thread?.kind === "chat" && thread.agent_id && (teamState === undefined || thread.agent_id === leadId))}
+              steward={thread?.is_steward_chat ?? Boolean(thread?.kind === "chat" && thread.agent_id && thread.agent_id === leadId)}
               threadId={threadId}
               workspacePath={thread?.workspace_path ?? null}
               loading={threadId !== null && thread === null}

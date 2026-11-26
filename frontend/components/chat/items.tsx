@@ -14,7 +14,7 @@ import { useT } from "@/lib/use-i18n";
 import { toolRunSummary } from "@/lib/transcript-view";
 import { Button } from "@/components/ui/Button";
 import { useSession } from "../AuthGate";
-import { stewardPreview, downloadStewardReply } from "@/lib/steward-preview";
+import { presentStewardReply, stewardTurnStatus, downloadStewardReply } from "@/lib/steward-preview";
 import { Markdown } from "./Markdown";
 import { copyToClipboard } from "@/lib/clipboard";
 import { MessageAttachments } from "./Attachments";
@@ -226,13 +226,13 @@ export function AssistantMessage({
 }) {
   const t = useT();
   const timeStr = formatMessageTime(ts, t);
-  const visible = steward ? stewardPreview(text) : text;
+  const reply = steward ? presentStewardReply(text) : { text, markdown: null };
   const usageSummary = turnUsageText(usage, t);
   return (
     <div className="conversation-answer group/msg max-w-full">
       <div className="conversation-byline">{portrait ?? <span aria-hidden="true" className="conversation-speaker-mark" />}{speaker || t("search.kindAgent")}</div>
-      <Markdown text={visible} threadId={live ? null : threadId} workspacePath={live ? null : workspacePath} />
-      {!live && steward && Array.from(text).length > 200 && (
+      <Markdown text={reply.text} threadId={live ? null : threadId} workspacePath={live ? null : workspacePath} />
+      {!live && reply.markdown !== null && (
         <button type="button" className="text-sm text-accent underline" onClick={() => downloadStewardReply(text, (speaker || "管家") + "完整回复")}>下载完整回复（.md）</button>
       )}
       {live && <span aria-hidden="true" className="animate-pulse text-muted motion-reduce:animate-none">▍</span>}
@@ -539,11 +539,14 @@ const END_TEXT: Record<Item<"turn_end">["status"], (item: Item<"turn_end">) => s
   interrupted: (i) => interruptedText(i.reason, i.replay),
 };
 
-export function TurnEnd({ item, usage }: { item: Item<"turn_end">; usage?: Record<string, unknown> }) {
+export function TurnEnd({ item, usage, steward = false }: { item: Item<"turn_end">; usage?: Record<string, unknown>; steward?: boolean }) {
   const t = useT();
-  const message = END_TEXT[item.status](item);
+  const status = steward && item.status !== "completed"
+    ? presentStewardReply(stewardTurnStatus(item.status, item.error || item.reason))
+    : null;
+  const message = status?.text ?? END_TEXT[item.status](item);
   const summary = turnUsageText(usage, t);
-  const next = item.status === "failed" ? failureNextStep(item.errorCode) : null;
+  const next = !steward && item.status === "failed" ? failureNextStep(item.errorCode) : null;
   const bad = item.status === "failed";
   return (
     <>
@@ -553,6 +556,7 @@ export function TurnEnd({ item, usage }: { item: Item<"turn_end">; usage?: Recor
           className={cn("rounded-card border px-3.5 py-2.5 text-sm", bad ? "border-danger/50 bg-danger/10 text-ink" : "border-line text-muted")}
         >
           <p className={cn("whitespace-pre-wrap break-words", bad && "text-danger")}>{message}</p>
+          {status?.markdown && <button type="button" className="text-sm text-accent underline" onClick={() => downloadStewardReply(status.markdown!, "管家完整回复")}>下载完整回复（.md）</button>}
           {next && <p className="mt-1 text-xs text-muted">{next}</p>}
         </div>
       )}

@@ -5,6 +5,8 @@ import { Image, type ImageSourcePropType, Pressable, StyleSheet, View } from 're
 
 import { Text } from '@/components/text';
 import { Markdown } from '@/components/markdown';
+import { shareStewardMarkdown } from '@/lib/file-actions';
+import { presentStewardReply, stewardTurnStatus } from '../../../frontend/lib/steward/format';
 import type { Attachment } from '@/lib/attachments';
 import type { ReactionKind } from '@/lib/reactions';
 import { formatMessageTime } from '@/lib/relative-time';
@@ -26,6 +28,7 @@ const TOOL_MARKS: Record<string, string> = { running: '…', done: '✓', error:
 
 type Props = {
   row: Row;
+  steward?: boolean;
   /** Where an attached image is loaded from (it needs the bearer token); left out, images show as file chips. */
   attachmentSource?: (attachmentId: string) => ImageSourcePropType | undefined;
   reaction?: ReactionKind | null;
@@ -86,7 +89,33 @@ function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) 
   );
 }
 
-export function TranscriptRow({ row, attachmentSource, reaction = null, onReact, disabled = false }: Props) {
+function StewardReply({ content, live = false }: { content: string; live?: boolean }) {
+  const styles = useStyles(createStyles);
+  const [sharing, setSharing] = useState(false);
+  const [note, setNote] = useState('');
+  const { text, markdown } = presentStewardReply(content);
+  async function share() {
+    if (markdown === null || sharing) return;
+    setSharing(true);
+    setNote('');
+    try {
+      if (await shareStewardMarkdown(markdown) === 'unavailable') setNote('此设备无法打开文件分享菜单。');
+    } catch {
+      setNote('完整回复还未导出，您可以再试一次。');
+    } finally {
+      setSharing(false);
+    }
+  }
+  return <>
+    {live ? <Text style={styles.assistantText}>{text}</Text> : <Markdown text={text} />}
+    {!live && markdown !== null && <Pressable accessibilityRole="button" disabled={sharing} onPress={share}>
+      <Text style={styles.exportLink}>保存或分享完整回复（.md）</Text>
+    </Pressable>}
+    {note ? <Text accessibilityRole="alert" style={styles.muted}>{note}</Text> : null}
+  </>;
+}
+
+export function TranscriptRow({ row, steward = false, attachmentSource, reaction = null, onReact, disabled = false }: Props) {
   const styles = useStyles(createStyles);
   const theme = useTheme();
   const { getUserBubbleColor } = useUserProfile();
@@ -114,7 +143,7 @@ export function TranscriptRow({ row, attachmentSource, reaction = null, onReact,
       const showReactions = Boolean(onReact || reaction);
       return (
         <View style={[styles.bubble, styles.assistant]}>
-          <Markdown text={row.text} />
+          {steward ? <StewardReply content={row.text} /> : <Markdown text={row.text} />}
           {row.incomplete ? <Text style={styles.muted}>(stopped before it finished)</Text> : null}
           {row.text ? (
             <View style={styles.assistantFooter}>
@@ -168,7 +197,7 @@ export function TranscriptRow({ row, attachmentSource, reaction = null, onReact,
     case 'typing':
       return (
         <View style={[styles.bubble, styles.assistant]}>
-          <Text style={styles.assistantText}>{row.text}</Text>
+          {steward ? <StewardReply content={row.text} live /> : <Text style={styles.assistantText}>{row.text}</Text>}
         </View>
       );
     case 'tool':
@@ -187,6 +216,7 @@ export function TranscriptRow({ row, attachmentSource, reaction = null, onReact,
         </View>
       );
     case 'turn_end':
+      if (steward) return <View style={styles.assistant}><StewardReply content={stewardTurnStatus(row.status, row.error)} /></View>;
       return (
         <Text style={styles.line}>
           {row.status === 'failed' ? `The answer failed${row.error ? `: ${row.error}` : '.'}` : row.status === 'cancelled' ? 'Stopped.' : 'The answer was interrupted.'}
@@ -226,6 +256,7 @@ const createStyles = (p: Palette) =>
     assistant: { alignSelf: 'stretch', paddingHorizontal: 4, paddingVertical: 4 },
     userText: { color: p.text, fontSize: 16, lineHeight: 22 },
     assistantText: { color: p.text, fontSize: 16, lineHeight: 22 },
+    exportLink: { color: p.accentText, fontSize: 14, paddingVertical: 8, textDecorationLine: 'underline' },
     files: { gap: 6, marginBottom: 6 },
     thumb: { width: 180, height: 180, borderRadius: radius.field, backgroundColor: p.surface },
     fileChip: { color: p.text, fontSize: 13, backgroundColor: p.surface, borderRadius: radius.field, paddingHorizontal: 8, paddingVertical: 4, overflow: 'hidden' },

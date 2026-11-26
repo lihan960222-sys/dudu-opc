@@ -20,6 +20,7 @@ export type Thread = {
   session_state: string;
   /** The agent this conversation was started from, or null (none, or since deleted). */
   agent_id?: number | null;
+  is_steward_chat?: boolean;
   workspace_path?: string | null;
   last_seq: number;
   archived_at: string | null;

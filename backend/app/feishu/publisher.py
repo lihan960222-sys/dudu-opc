@@ -162,14 +162,12 @@ class Publisher:
                 raise ValueError('工作群根消息尚未确认')
             url = API + '/im/v1/messages/' + quote(root[0],safe='') + '/reply'
             data['reply_in_thread'] = True
-        if private and kind == "text" and len(body["text"]) > steward_reply.LIMIT:
+        if private and kind == "text":
             # Both messages use this row's verified destination and authorization.
             # Persist the attachment receipt before sending the summary; a retry
             # can resume after that point even if the original process exited.
-            self.db.execute("""create table if not exists steward_reply_files(
-                outgoing text primary key, remote text not null)""")
             sent = self.db.execute("select remote from steward_reply_files where outgoing=?", (row["id"],)).fetchone()
-            if not sent:
+            if len(body["text"]) > steward_reply.LIMIT and not sent:
                 with TemporaryDirectory() as temp:
                     path = Path(temp) / "完整回复.md"
                     path.write_bytes(body["text"].encode("utf-8"))
@@ -180,7 +178,6 @@ class Publisher:
                 with self.db:
                     self.db.execute("insert or replace into steward_reply_files values(?,?)",
                                     (row["id"], reply["data"]["message_id"]))
-        if private and kind == "text":
-            data["content"] = json.dumps({"text":steward_reply.preview(body["text"])}, ensure_ascii=False)
+            data["content"] = json.dumps({"text":steward_reply.preview(body["text"], attached=bool(sent))}, ensure_ascii=False)
         result = checked(self.http.post(url,params=params,json=data,headers=self.headers(role)))
         return result['data']['message_id']

@@ -142,7 +142,7 @@ async def register_report(worker,row,turn):
         if registered.rowcount and root.status not in ('completed','cancelled','failed'):
             # An acknowledgement is a receipt, not a request for owner input.
             assignees = '、'.join(dict.fromkeys(names))
-            enqueue(worker.db,None,'steward',{'text':f'已交给 {assignees}，有结果我在这里回复。',
+            enqueue(worker.db,None,'steward',{'text':f'老板，给 {assignees} 的派工已登记。有结果我在这条消息下向您汇报。',
                                              'reply_to':row['message']})
         worker.db.execute("update inbox set state='done' where app=? and event=?",key)
     return True
@@ -199,15 +199,16 @@ async def publish_reports(worker):
                                            (row['app'], row['event'], request_id))
                 if notice.rowcount:
                     origin = settings.PUBLIC_ORIGIN or 'http://127.0.0.1:8000'
-                    text = f'有一份招人申请需要你决定。请在这段管家会话里打开招人卡片。\n{origin}/chat?thread={thread_id}'
+                    text = f'老板，这份招人申请需要您决定。您可以在管家会话里看申请，批准或拒绝都可以。\n{origin}/chat?thread={thread_id}'
                     enqueue(worker.db, None, 'steward', {'text': text, 'reply_to': row['message']})
             if job.status=='needs_input' and job.question and signature(job.question)!=row['question']:
                 enqueue(worker.db,None,'steward',{'text':job.question,'reply_to':row['message']})
                 worker.db.execute('update direct_team_reports set question=? where job=?',(signature(job.question),job.id))
             elif job.status in ('completed','failed','cancelled'):
-                report=job.result if job.status=='completed' else job.outcome_detail
+                from app.services.steward_reply import turn_status
+                report=job.result if job.status=='completed' else turn_status(job.status, job.outcome_detail)
                 if not report:
-                    report='团队任务已结束。可在管家会话中查看派工记录。'
+                    report=turn_status(job.status)
                 worker.db.execute('update direct_team_reports set finished=1 where job=?',(job.id,))
                 worker.direct_final(row,'done',report)
                 if dispatches[job.id]:

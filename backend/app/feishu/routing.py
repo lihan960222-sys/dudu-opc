@@ -17,6 +17,7 @@ def journal(path):
         state text default 'pending', remote text, error text, created real default (unixepoch()));
     create table if not exists assignment_outbox(
         outgoing text not null, job integer not null, primary key(outgoing,job));
+    create table if not exists steward_reply_files(outgoing text primary key, remote text not null);
     create table if not exists owner_dm_sources(
         app text, event text, message text, owner text not null, tenant text not null, chat text,
         primary key(app,event), unique(app,message));

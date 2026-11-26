@@ -151,7 +151,7 @@ async def test_assignment_receipt_cannot_forward_invented_approval(tmp_path, ses
         for _ in range(2):
             assert await register_report(worker, row, {'result':'你得去他的会话批准，否则会超时。'})
         bodies = [json.loads(r[0]) for r in channel.execute('select body from outbox')]
-        assert bodies == [{'text':'已交给 Jensen，有结果我在这里回复。','reply_to':'om_test'}]
+        assert bodies == [{'text':'老板，给 Jensen 的派工已登记。有结果我在这条消息下向您汇报。','reply_to':'om_test'}]
 
 
 @pytest.mark.asyncio

@@ -66,6 +66,7 @@ class ThreadResponse(BaseModel):
     # The computer this conversation's turns run their tools in (its agent's),
     # or null when they run on this machine.
     kind: str = "chat"
+    is_steward_chat: bool = False
     room_id: int | None = None
     job_id: int | None = None
     # The conversation this one was branched from, if any.

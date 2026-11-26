@@ -42,6 +42,7 @@ jobs:
               - 'mobile/**'
               # The phone's colors are checked against these tokens (mobile/src/tests/theme-drift.test.ts).
               - 'frontend/app/globals.css'
+              - 'frontend/lib/steward/**'
               - '.github/workflows/ci.yml'
             desktop:
               - 'desktop/**'

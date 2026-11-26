@@ -78,11 +78,19 @@ def get_runtime() -> ThreadRuntime:
 async def _with_computers(rt: ThreadRuntime, threads: list) -> list[ThreadResponse]:
     """Threads as responses, each with the computer its agent has (if any)."""
     from app.routers.computers import summary
+    from app.services.steward_reply import is_owner_chat
+    from app.team.service import team_for
 
     computers = await rt.computers.for_agents(sorted({t.agent_id for t in threads if t.agent_id is not None}))
+    lead_id = None
+    if any(t.kind == "chat" and t.agent_id is not None for t in threads):
+        async with rt.session() as db:
+            team = await team_for(db, rt.owner_id)
+            lead_id = team.lead_agent_id if team else None
     out = []
     for thread in threads:
         response = ThreadResponse.model_validate(thread)
+        response.is_steward_chat = is_owner_chat(thread, lead_id)
         computer = computers.get(thread.agent_id) if thread.agent_id is not None else None
         if computer is not None:
             response = response.model_copy(update={"computer": summary(rt.computers, computer)})

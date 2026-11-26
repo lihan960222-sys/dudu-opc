@@ -326,6 +326,7 @@ export function ChatView({ threadId = null, seq }: Props) {
                   {dividerLabel ? <DateDivider label={dividerLabel} /> : null}
                   <TranscriptRow
                     row={item}
+                    steward={thread?.is_steward_chat === true}
                     attachmentSource={attachmentSource}
                     reaction={reactions[item.key] ?? null}
                     onReact={canReply ? (r) => void handleReact(item.key, r) : undefined}

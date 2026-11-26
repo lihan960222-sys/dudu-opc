@@ -836,6 +836,7 @@ export type Thread = {
   policy_model_unavailable?: boolean;
   id: number;
   kind?: string;
+  is_steward_chat?: boolean;
   // Present once the backend supports named agents; null for a plain chat.
   agent_id?: number | null;
   title: string | null;

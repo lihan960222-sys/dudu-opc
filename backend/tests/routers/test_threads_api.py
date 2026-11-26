@@ -151,6 +151,41 @@ async def test_a_thread_is_created_listed_and_read(api, owner):
     assert detail["turns"] == [] and detail["active_turn_id"] is None
 
 
+async def test_steward_format_belongs_only_to_the_owners_direct_lead_chat(api, sessions, owner):
+    from app.services import agent_store
+    async with sessions() as db:
+        lead = await agent_store.create_agent(db, owner_id=owner, name="Lead", make_lead=True)
+        staff = await agent_store.create_agent(db, owner_id=owner, name="Staff")
+        lead_chat = await store.create_thread(db, owner_id=owner, provider="claude", agent_id=lead.id)
+        staff_chat = await store.create_thread(db, owner_id=owner, provider="claude", agent_id=staff.id)
+        internal = await store.create_thread(db, owner_id=owner, provider="claude", agent_id=lead.id, kind="feature")
+    for thread, expected in ((lead_chat, True), (staff_chat, False), (internal, False)):
+        detail = (await api.get(f"/api/v1/threads/{thread.id}")).json()
+        assert detail["is_steward_chat"] is expected
+    listed = (await api.get("/api/v1/threads")).json()
+    assert {t["id"] for t in listed if t["is_steward_chat"]} == {lead_chat.id}
+
+
+async def test_steward_voice_is_in_every_engine_prompt_and_absent_from_employee_prompts(rt, sessions, owner, monkeypatch):
+    from app.services import agent_store, steward_reply
+    from app.services.provider_adapter import TurnOutcome
+    captured = []
+
+    async def reply(ctx, sink, gate):
+        captured.append((ctx.prompt, ctx.instructions, ctx.codex_prompt.instructions))
+        return TurnOutcome("succeeded", result="ok")
+
+    monkeypatch.setattr(rt.adapters["claude"], "run_turn", reply)
+    async with sessions() as db:
+        lead = await agent_store.create_agent(db, owner_id=owner, name="Lead", make_lead=True)
+        employee = await agent_store.create_agent(db, owner_id=owner, name="Employee")
+    for agent, expected in ((lead, True), (employee, False)):
+        thread = await rt.create_thread(agent_id=agent.id)
+        await rt.send_turn(thread.id, "hello")
+        await wait_until(lambda: thread.id not in rt._runs)
+        assert all((steward_reply.INSTRUCTIONS in (part or "")) == expected for part in captured[-1])
+
+
 async def test_provider_defaults_to_claude_and_an_unknown_one_is_a_422(api):
     assert (await create(api))["provider"] == "claude"
     bad = await api.post("/api/v1/threads", json={"provider": "does-not-exist"})

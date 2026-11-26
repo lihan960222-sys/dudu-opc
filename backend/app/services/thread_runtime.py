@@ -807,11 +807,15 @@ class ThreadRuntime:
         if consult and (not internal or approval_mode != "plan" or attachment_ids or skills):
             raise ProviderUnavailable("A project consultation only accepts its assigned internal question.")
         strict_lead = settings.STEWARD_STRICT_OWNER == self.owner_id and thread.agent_id is not None and not (thread.kind == "feature" or consult)
-        if strict_lead:
+        steward_chat = False
+        if strict_lead or (thread.kind == "chat" and thread.agent_id is not None):
+            from app.services.steward_reply import is_owner_chat
             from app.team import service as team_service
             async with self.session() as db:
                 team = await team_service.team_for(db, self.owner_id)
-            if team is None or team.lead_agent_id != thread.agent_id:
+            lead_id = team.lead_agent_id if team else None
+            steward_chat = is_owner_chat(thread, lead_id)
+            if strict_lead and lead_id != thread.agent_id:
                 raise ProviderUnavailable("Start specialist work from its scoped steward task.")
         adapter = self.adapters.get(thread.provider)
         if adapter is None:
@@ -1143,7 +1147,7 @@ class ThreadRuntime:
                         return False
                     return await feature_tasks.bind_native_session(db, self.owner_id, thread.id, turn.id, turn.owner_token, state)
             ctx.bind_native_session = bind_native_session
-        if strict_lead and thread.kind == "chat":
+        if steward_chat:
             from app.services.steward_reply import INSTRUCTIONS
             ctx.instructions = _with_brief(ctx.instructions, INSTRUCTIONS)
             ctx.codex_prompt.instructions = _with_brief(ctx.codex_prompt.instructions, INSTRUCTIONS)

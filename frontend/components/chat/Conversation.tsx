@@ -241,6 +241,7 @@ export function Conversation({
                   node = <UserMessage key={item.key} item={item} threadId={threadId} onBranch={onBranch} onQuote={quote(item)} />;
                   break;
                 case "assistant": {
+                  if (loading) break;
                   const canReplyToMessage = !item.incomplete && isLatestAssistantMessage(item.key, transcript.items);
                   node = (
                     <AssistantMessage
@@ -279,7 +280,8 @@ export function Conversation({
                   );
                   break;
                 case "turn_end":
-                  node = <TurnEnd key={item.key} item={item} usage={usage.get(item.key)} />;
+                  if (loading) break;
+                  node = <TurnEnd key={item.key} item={item} usage={usage.get(item.key)} steward={steward} />;
                   break;
                 case "session_reset":
                   node = <SessionReset key={item.key} item={item} />;
@@ -306,7 +308,7 @@ export function Conversation({
               return node;
             })}
 
-          {transcript.typing !== null && transcript.typing !== "" && <AssistantMessage steward={steward} text={transcript.typing} speaker={agent?.name} portrait={speaker} live />}
+          {!loading && transcript.typing !== null && transcript.typing !== "" && <AssistantMessage steward={steward} text={transcript.typing} speaker={agent?.name} portrait={speaker} live />}
 
           {transcript.runningTurnId !== null && (working || waitingOnYou) && (
             <WorkingStatus key={transcript.runningTurnId} phase={workingPhase(transcript.items)} turnId={transcript.runningTurnId} />

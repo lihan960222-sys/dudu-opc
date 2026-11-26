@@ -120,7 +120,7 @@ class Worker:
                         if source.get("agent_id") == agent]
             hint = (f"要整理{contacts[0]}的单聊，发「让{name}整理我和{contacts[0]}的聊天记录」。"
                     if len(contacts) == 1 else "")
-            self.respond(row, "done", f"你想让{name}重试哪件事？{hint}也可以告诉我具体任务。")
+            self.respond(row, "done", f"老板，您希望我请{name}重试哪件事？{hint}")
             return
         tracking = re.fullmatch(r"(?:你)?(?:看一下|看看|怎么样了|进度如何|什么进度|现在什么情况|进度|状态)[？?。！! ]*",text.strip())
         short_retry = re.fullmatch(r"(?:现在)?(?:再)?(?:试试看|试一下|试试|重试)[吧。！!？? ]*",text.strip())
@@ -154,7 +154,7 @@ class Worker:
                         self.respond(row,"done",reply)
                     return
             if short_retry and not self.reference(msg):
-                self.respond(row,"done","要重试哪项工作？请引用原任务，或告诉我经办人和要做的事。")
+                self.respond(row,"done","老板，我还没对上原来的任务。您指的是哪一项？引用原消息或告诉我任务号都可以。")
                 return
         if await history.answer(self,row,msg,text):
             return
@@ -297,7 +297,7 @@ class Worker:
             return
         files = [(i,p,self.pub.download(task,source,p)) for i,p in enumerate(items) if 'key' in p]
         if not self.cfg.get('isolated_runner_enabled'):
-            self.respond(row,'held',f'任务 #{task} 已保存，收到 {len(files)} 个附件。执行环境尚未启用。',task)
+            self.respond(row,'held',f'老板，任务 #{task} 和 {len(files)} 个附件已保存。执行环境尚未启用，我还没开始办。',task)
             return
         async with AsyncSessionLocal() as session:
             model, workspace = await resolve_workspace(session,self.cfg,task,cfg)
@@ -390,7 +390,12 @@ class Worker:
         with self.db:
             from .routing import bind_outgoing
             packets = [enqueue(self.db,task,role,{'text':f"任务 #{task} 本轮状态：{turn['status']}。已登记 {len(artifacts)} 个公开产物。{public}"})]
-            final = enqueue(self.db,task,'steward',{'text':f"任务 #{task}：{summary}{''.join(issues)}"})
+            if turn['status'] == 'succeeded':
+                report = f"老板，任务 #{task} 的进展如下。\n{summary}{''.join(issues)}"
+            else:
+                from app.services.steward_reply import turn_status
+                report = turn_status(turn['status'], turn.get('error') or turn.get('result')) + f"\n任务 #{task}"
+            final = enqueue(self.db,task,'steward',{'text':report})
             packets.append(final)
             self.bind_final(row,final)
             timing.finished(self.db,row,turn)
@@ -505,7 +510,7 @@ class Worker:
         items = parts(msg['message_type'], json.loads(msg['content']))
         resources = [part for part in items if 'key' in part]
         if len(resources) > 8 or (not text.strip() and not resources):
-            self.respond(row,'held','请发送文字或最多 8 个附件。')
+            self.respond(row,'held','老板，这条消息我还没能受理。我可以接收文字，或一次最多 8 个附件。')
             return
         thread = thread or self.cfg['steward_thread']
         if self.db.execute("select 1 from inbox where state in ('direct_running','direct_submitting')").fetchone():
@@ -555,8 +560,12 @@ class Worker:
                     with self.db:
                         timing.finished(self.db,row,turn)
                     if not await register_report(self,row,turn):
-                        self.direct_final(row,'done' if turn['status']=='succeeded' else 'held',
-                                     turn.get('result') or turn.get('error') or '本轮已结束，请在本机查看详情。')
+                        from app.services.steward_reply import turn_status
+                        succeeded = turn['status'] == 'succeeded'
+                        message = (turn.get('result') if succeeded else
+                                   turn_status(turn['status'], turn.get('error') or turn.get('result')))
+                        self.direct_final(row,'done' if succeeded else 'held',
+                                          message or turn_status(turn['status']))
             except (httpx.HTTPError, SQLAlchemyError):
                 continue
         for row in self.db.execute("select * from inbox where state in ('received','bound','submitting','running','suggestion_deciding','direct_submitting') and not exists (select 1 from retry where retry.id=inbox.app||'|'||inbox.event and retry.after>unixepoch()) order by rowid").fetchall():
@@ -591,7 +600,7 @@ class Worker:
                                         (row['app']+'|'+row['event'],))
                     continue
                 state = 'verify' if latest['state']=='verify' else 'held'
-                feedback=f'当前步骤需要核对（{reason}）。原消息已保存。'
+                feedback=f'老板，我还没核实这一步的结果（{reason}）。您的原消息已保存。'
                 if isinstance(exc,httpx.HTTPStatusError) and exc.request.url.path.endswith('/attachments'):
                     try:
                         code=exc.response.json().get('detail',{}).get('error_code')
@@ -600,7 +609,7 @@ class Worker:
                     reason_cn = {'transcription_unavailable':'本机语音转写或音频校验工具尚不可用',
                                  'transcription_failed':'本机转写未成功','unsupported_type':'后端暂不能读取这一文件格式',
                                  'too_large':'附件超过后端接收上限'}.get(code,'后端尚不能处理这个附件')
-                    feedback=f'已收到附件，原件保存在本机。{reason_cn}（{reason}），本轮未开始。'
+                    feedback=f'老板，我已收到附件，原件保存在本机。{reason_cn}（{reason}），本轮未开始。'
                 if state=='held' and self.db.execute('select 1 from direct_notices where app=? and event=?',(row['app'],row['event'])).fetchone():
                     self.direct_final(latest,state,feedback)
                 else:

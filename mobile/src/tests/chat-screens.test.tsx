@@ -30,6 +30,8 @@ jest.mock('@/lib/auth-context', () => ({
 }));
 jest.mock('@/lib/use-api', () => ({ useApi: () => mockApi }));
 jest.mock('@/lib/use-thread', () => ({ useThread: () => mockThreadState }));
+const mockShareMarkdown = jest.fn();
+jest.mock('@/lib/file-actions', () => ({ shareStewardMarkdown: (text: string) => mockShareMarkdown(text) }));
 
 const thread = (id: number, title: string | null) => ({
   id,
@@ -62,6 +64,43 @@ beforeEach(() => {
 });
 
 describe('Conversations', () => {
+  it.each([999, 1000, 1001])('honors the exact %i-character boundary for the steward', async (length) => {
+    const first = '老板，我还没有收到派工回执。';
+    const body = first + '𠮷'.repeat(length - Array.from(first).length);
+    mockThreadState.thread = { ...thread(3, 'Steward'), is_steward_chat: true };
+    mockThreadState.transcript = { ...emptyTranscript(), items: [
+      { kind: 'assistant', key: 'e-5', turnId: 2, text: body, incomplete: false },
+    ] };
+    mockShareMarkdown.mockResolvedValue('shared');
+    await render(<Thread />);
+    if (length <= 1000) {
+      expect(await screen.findByText(body)).toBeTruthy();
+      expect(screen.queryByRole('button', { name: '保存或分享完整回复（.md）' })).toBeNull();
+    } else {
+      expect(screen.queryByText(body)).toBeNull();
+      expect(await screen.findByText(first + '\n详见完整回复。')).toBeTruthy();
+      await fireEvent.press(screen.getByRole('button', { name: '保存或分享完整回复（.md）' }));
+      expect(mockShareMarkdown).toHaveBeenCalledWith(body);
+    }
+  });
+
+  it('leaves a long specialist answer intact and displays a brief steward status with the full original error', async () => {
+    const raw = '错误日志。' + '𠮷'.repeat(1001);
+    mockThreadState.thread = { ...thread(3, 'Specialist'), is_steward_chat: false };
+    mockThreadState.transcript = { ...emptyTranscript(), items: [
+      { kind: 'assistant', key: 'e-5', turnId: 2, text: raw, incomplete: false },
+    ] };
+    const view = await render(<Thread />);
+    expect(await screen.findByText(raw)).toBeTruthy();
+    mockThreadState.thread = { ...thread(3, 'Steward'), is_steward_chat: true };
+    mockThreadState.transcript = { ...emptyTranscript(), items: [
+      { kind: 'turn_end', status: 'failed', key: 'e-6', turnId: 2, error: raw },
+    ] };
+    await view.rerender(<Thread />);
+    expect(screen.queryByText(raw)).toBeNull();
+    await fireEvent.press(await screen.findByRole('button', { name: '保存或分享完整回复（.md）' }));
+    expect(mockShareMarkdown).toHaveBeenCalledWith('老板，这次我没办完。\n\n运行记录：\n' + raw);
+  });
   it('lists the conversations and opens one', async () => {
     mockApi.listThreads.mockResolvedValue([thread(3, 'Plan the week'), thread(4, null)]);
     await render(<Conversations />);

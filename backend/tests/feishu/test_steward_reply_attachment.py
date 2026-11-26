@@ -9,7 +9,7 @@ from app.feishu.routing import enqueue, journal
 
 def test_long_reply_uploads_complete_markdown_once_and_resumes_summary(tmp_path, monkeypatch):
     db = journal(tmp_path / "channel.sqlite3")
-    body = "已处理，详细结果如下。\n" + "证据与来源。\n" * 60
+    body = "已处理，详细结果如下。\n" + "证据与来源。\n" * 180
     row_id = enqueue(db, None, "steward", {"text":body, "reply_to":"om_owner"})
     row = db.execute("select * from outbox where id=?", (row_id,)).fetchone()
     pub = Publisher({"steward":{}}, db, tmp_path)
@@ -34,7 +34,7 @@ def test_long_reply_uploads_complete_markdown_once_and_resumes_summary(tmp_path,
         assert pub.deliver(row) == "om_text"
     assert [s["msg_type"] for s in sends] == ["file","text","text"]
     assert sends[1]["uuid"] == sends[2]["uuid"] == row_id
-    assert len(json.loads(sends[-1]["content"])["text"]) <= 200
+    assert json.loads(sends[-1]["content"])["text"] == "已处理，详细结果如下。\n详见完整回复。"
     assert len(files) == 1 and not files[0].exists()
     db.close()
 
@@ -42,4 +42,85 @@ def test_long_reply_uploads_complete_markdown_once_and_resumes_summary(tmp_path,
 @pytest.mark.parametrize("detail", ["\n1. 第一步。\n2. ", " 1. 第一步。 2. ", "：1. 第一步。2. "])
 def test_preview_preserves_status_and_omits_numbered_details(detail):
     from app.services.steward_reply import preview
-    assert preview("**尚未写入**。我会继续跟进。" + detail + "细节"*120) == "尚未写入。我会继续跟进。\n详见完整回复。"
+    assert preview("**尚未写入**。我会继续跟进。" + detail + "细节"*510) == "尚未写入。我会继续跟进。\n详见完整回复。"
+
+
+def test_steward_owns_failures_and_retains_the_original_error():
+    from app.services import steward_reply
+    detail = "尚未派工。\n原文：\n> 你必须确认权限。\n```sh\nexit 7\n```"
+    text = steward_reply.turn_status("failed", detail)
+    assert text.startswith("老板，这次我没办完。") and text.endswith(detail)
+    assert "已交给" not in text and "自动重试" not in text
+    assert steward_reply.preview(text) == text
+    assert steward_reply.turn_status("cancelled") == "老板，这次办理已经停止。"
+    assert "尚未核实" in steward_reply.turn_status("interrupted")
+
+
+def test_steward_instructions_explain_the_limit_and_require_evidence_before_reporting():
+    from app.services.steward_reply import INSTRUCTIONS
+    for phrase in ("1000", "Markdown", "老板", "您", "催促", "承担", "回执", "授权"):
+        assert phrase in INSTRUCTIONS
+
+
+@pytest.mark.parametrize("length", [999, 1000, 1001])
+@pytest.mark.parametrize("reply_to", [None, "om_original"])
+def test_owner_text_boundary_counts_chinese_and_non_bmp_characters(tmp_path, monkeypatch, length, reply_to):
+    opening = "你必须确认范围。"
+    body = opening + "𠮷" * (length - len(opening))
+    db = journal(tmp_path / "gateway.db")
+    payload = {"text": body}
+    if reply_to:
+        payload["reply_to"] = reply_to
+    identity = {"open_id": "owner"}
+    row_id = enqueue(db, None, "steward", payload)
+    row = db.execute("select * from outbox where id=?", (row_id,)).fetchone()
+    pub = Publisher({"steward": identity}, db, tmp_path)
+    pub.http.close()
+    sent, files = [], []
+
+    def upload(role, path, kind):
+        assert role == identity and path.name == "完整回复.md" and kind == "file"
+        files.append(path.read_bytes())
+        return "uk_file"
+
+    def handle(req):
+        sent.append(json.loads(req.content))
+        assert req.url.path.endswith("/im/v1/messages" + ("/om_original/reply" if reply_to else ""))
+        return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_sent"}})
+
+    monkeypatch.setattr(pub, "upload", upload)
+    monkeypatch.setattr(pub, "headers", lambda role: {})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as pub.http:
+        assert pub.deliver(row) == "om_sent"
+    db.close()
+    text = json.loads(sent[-1]["content"])["text"]
+    if length <= 1000:
+        assert [message["msg_type"] for message in sent] == ["text"]
+        assert text == body.replace("你必须", "请您") and not files
+    else:
+        assert [message["msg_type"] for message in sent] == ["file", "text"]
+        assert files == [body.encode("utf-8")]
+        assert text == "请您确认范围。\n详见完整回复。"
+
+
+def test_retry_finishes_an_attachment_sent_before_the_limit_change(tmp_path, monkeypatch):
+    db = journal(tmp_path / "gateway.db")
+    body = "老板，我还在等回执。\n" + "详情" * 200
+    row_id = enqueue(db, None, "steward", {"text": body, "reply_to": "om_original"})
+    db.execute("create table if not exists steward_reply_files(outgoing text primary key, remote text not null)")
+    db.execute("insert into steward_reply_files values(?,?)", (row_id, "om_older_attachment"))
+    row = db.execute("select * from outbox where id=?", (row_id,)).fetchone()
+    pub = Publisher({"steward": {}}, db, tmp_path)
+    pub.http.close()
+    sent = []
+
+    def handle(req):
+        sent.append(json.loads(req.content))
+        return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_text"}})
+
+    monkeypatch.setattr(pub, "headers", lambda role: {})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as pub.http:
+        assert pub.deliver(row) == "om_text"
+    db.close()
+    assert [item["msg_type"] for item in sent] == ["text"]
+    assert json.loads(sent[0]["content"])["text"] == "老板，我还在等回执。\n详见完整回复。"
