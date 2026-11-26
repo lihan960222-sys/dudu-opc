@@ -556,6 +556,7 @@ async def start_turn(
     person_id: int | None = None,
     person_label: str | None = None,
     internal: bool = False,
+    use_employee_role: bool = False,
 ) -> Turn:
     """Start the thread's next turn and store its `turn.started` event.
 
@@ -608,6 +609,8 @@ async def start_turn(
     if thread.title is None:
         thread.title = make_title(prompt_text) or None
     started = {"prompt_text": prompt_text}
+    if use_employee_role and not internal and origin == "person" and thread.kind == "chat":
+        started["use_employee_role"] = True
     if assignment_source:
         started["assignment_source"] = assignment_source
     if internal:

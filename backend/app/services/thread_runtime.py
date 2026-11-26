@@ -1017,6 +1017,7 @@ class ThreadRuntime:
                     direct_event_key=direct_event_key, direct_attachment_ids=attachment_ids, direct_skills=skills,
                     assignment_source=assignment_source, attachments=submitted_attachments or None,
                     origin="harness" if recovery_job is not None else team_origin, internal=internal,
+                    use_employee_role=(not internal and approval_mode is None and configuration_allowed and person_is_owner),
                     person_id=person_id,
                     person_label=person_label,
                 )

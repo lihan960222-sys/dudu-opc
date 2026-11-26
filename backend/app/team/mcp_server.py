@@ -33,6 +33,7 @@ OPERATION = {'oneOf': [
 
 
 PROJECT_FIELDS = {
+    'read_only': {'type':'boolean','description':'Set true when the person requests a read-only project task. The employee cannot edit files or run a host command in that task.'},
     'project': string(160), 'task_title': string(200), 'task_id': {'type':'integer', 'minimum':1},
     'assignment_intent': {'enum':['continue','independent'],
                           'description':'Continue the referenced card, or create a separate task for explicitly independent work.'},

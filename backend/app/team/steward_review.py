@@ -5,12 +5,85 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.db.models import Agent, AgentJob, Approval, Thread, Turn, WorkItem
+from app.db.models import Agent, AgentJob, Approval, DirectTurnReceipt, Event, FeishuLeadChat, Person, Thread, Turn, WorkItem
 from app.db.models.feature import FeatureSession
 from app.db.transactions import begin_write
 from app.services import thread_store
 from app.services.feature_files import FeatureFiles
 from app.team import service
+
+
+async def _owner_channel_request(db, owner, thread, turn):
+    """A device's anonymous chat is not a gateway-authenticated owner DM."""
+    from contextlib import closing
+    import json
+    import sqlite3
+
+    from app.feishu.lead_chat import signature
+    from app.feishu.submissions import event_key
+    from app.services.feature_tasks import direct_input_hash
+    from app.team.feishu_assignment import configuration
+
+    receipt = await db.scalar(select(DirectTurnReceipt).where(DirectTurnReceipt.owner_id==owner,
+        DirectTurnReceipt.turn_id==turn.id, DirectTurnReceipt.thread_id==thread.id))
+    binding = await db.get(FeishuLeadChat, thread.id) if receipt else None
+    if not binding:
+        return False
+    try:
+        cfg = configuration()
+        if not cfg or cfg["owner_id"]!=owner or cfg["steward"]["agent_id"]!=thread.agent_id:
+            return False
+        who = cfg["steward"]
+        if binding.channel != signature(owner,who["app_id"],who["tenant_key"],who["open_id"],
+                                        cfg.get("project",""),cfg["steward_thread"]):
+            return False
+        path = Path(cfg["_access_config_path"]).parent / cfg["state_dir"] / "channel.sqlite3"
+        with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro", uri=True, timeout=1)) as journal:
+            journal.row_factory = sqlite3.Row
+            rows = journal.execute("""select r.app,r.event,r.body from direct_requests r
+                join owner_dm_sources s using(app,event)
+                where r.app=? and r.thread=? and s.owner=? and s.tenant=?
+                  and json_extract(r.body,'$.direct_event_key')=?""",
+                (who["app_id"],thread.id,who["open_id"],who["tenant_key"],receipt.event_key)).fetchall()
+        if len(rows)!=1 or event_key(rows[0])!=receipt.event_key:
+            return False
+        body = json.loads(rows[0]["body"])
+        source = {key:body[key] for key in ("owner_text","reply_to_turn_id","reference_event_key","reference_task_id")
+                  if body.get(key) is not None}
+        return receipt.input_sha256 == direct_input_hash(body["prompt_text"], body.get("attachment_ids"), body.get("skills"), source)
+    except (OSError, KeyError, ValueError, TypeError, sqlite3.Error):
+        return False
+
+
+async def direct_project_mode(db, owner, worker, source_turn_id, requester_mode):
+    """Use the employee's saved project grant only for a directly verified owner dispatch."""
+    from app.services import agent_store, employee_runtime
+    from app.services.routine_service import effective_approval_mode
+
+    own = agent_store.employee_mode(owner, worker.approval_mode)
+    common = effective_approval_mode(own, requester_mode)
+    if (common == own or requester_mode != "ask" or own != "accept_edits" or owner!=settings.STEWARD_STRICT_OWNER
+            or worker.owner_id!=owner or not worker.role_path or not employee_runtime.native_enabled(owner, worker.id)):
+        return common
+    turn = await db.get(Turn, source_turn_id)
+    if not turn or turn.origin!="person":
+        return common
+    thread = await db.get(Thread, turn.thread_id)
+    team = await service.team_for(db,owner)
+    if (not team or worker.archived_at or worker.team_id!=team.id
+            or worker.manager_agent_id not in (None,team.lead_agent_id)
+            or not thread or thread.owner_id!=owner or thread.agent_id!=team.lead_agent_id
+            or thread.kind!="chat" or thread.job_id or thread.room_id or thread.archived_at):
+        return common
+    started = await db.scalar(select(Event.data).where(Event.turn_id==turn.id, Event.type=="turn.started"))
+    if not started or started.get("use_employee_role") is not True or started.get("internal") or started.get("team_generated"):
+        return common
+    if turn.person_id is not None:
+        speaker = await db.get(Person, turn.person_id)
+        verified = bool(speaker and speaker.role=="owner" and speaker.status=="active")
+    else:
+        verified = await _owner_channel_request(db, owner, thread, turn)
+    return own if verified else common
 
 
 async def delegated_mode(db, parent, caller, child, requester_mode):
