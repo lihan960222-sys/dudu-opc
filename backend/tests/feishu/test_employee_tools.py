@@ -109,6 +109,18 @@ async def test_create_document_recovers_written_body_after_lost_reply_without_a_
     assert (await call("feishu_create_document",args))["confirmed"]
     assert sum(r.method=="POST" for r in calls)==2
 
+
+async def test_new_document_can_have_an_empty_editor_paragraph_but_not_extra_content(run):
+    call, calls, settings = run
+    cloud = settings["test_cloud"]
+    cloud["children"] = [{"block_type": 2, "text": {"elements": [{"text_run": {"content": ""}}]}}]
+    args = {"title": "摘要", "body": "已整理"}
+    assert (await call("feishu_create_document", args))["confirmed"]
+    cloud["children"].append({"block_type": 27, "image": {}})
+    with pytest.raises(ValueError, match="正文"):
+        await call("feishu_create_document", args)
+    assert sum(r.method == "POST" for r in calls) == 2
+
 @pytest.mark.asyncio
 async def test_employee_read_checks_contact_and_requires_every_page(run,monkeypatch):
     call,_,_=run

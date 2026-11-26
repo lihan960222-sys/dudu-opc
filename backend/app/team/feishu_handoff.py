@@ -10,10 +10,10 @@ from app.db.models import AgentJob, AgentJobEvent
 from app.db.transactions import begin_write
 from app.feishu import owner_oauth
 from app.team import service
+from app.team.feishu_assignment import DELIVERY_STAGES, WRITE_TOOLS, recorded_assignment
 
 
-WRITE_TOOLS = frozenset({"feishu_create_document", "feishu_edit_document", "feishu_delete_document", "feishu_publish_knowledge"})
-STAGES = ("feishu_tool_started", "feishu_delivered", "feishu_superseded", "feishu_tool_failed", "feishu_handoff_reconciled")
+STAGES = (*DELIVERY_STAGES, "feishu_handoff_reconciled")
 
 
 @dataclass
@@ -109,8 +109,7 @@ async def reserve(db, rt, run, scope, name, operation):
     for previous in states:
         if not (previous.pending or previous.uncertain or (previous.confirmed and previous.tool == name)):
             continue
-        source = await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id == previous.job_id,
-                                 AgentJobEvent.kind == "feishu_assignment").order_by(AgentJobEvent.id).limit(1)) or {}
+        source = await recorded_assignment(db, previous.job_id) or {}
         if source.get("event_key"):
             from app.team.feishu_assignment import for_job
             try:

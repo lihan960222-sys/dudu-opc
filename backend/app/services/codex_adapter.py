@@ -57,6 +57,7 @@ from app.core.logging import get_logger
 from app.services import cli_probe, composio_bridge, community_mcp_bridge, local_claude_runner, memory_bridge
 from app.services.local_approval_broker import MAX_REVIEWABLE_INPUT_CHARS
 from app.services.local_claude_stream import summarize_tool
+from app.services.workspaces import inside_workspace
 from app.services.provider_adapter import (
     ALLOW,
     LOST,
@@ -208,19 +209,6 @@ def _computer_kind(tool: str) -> str:
 def _clip(message: str) -> str:
     message = (message or "").strip()
     return message if len(message) <= MAX_ERROR_CHARS else message[:MAX_ERROR_CHARS] + "…"
-
-
-def _inside(path: str, root: Path | None) -> bool:
-    if root is None or not isinstance(path, str) or not path:
-        return False
-    try:
-        candidate = Path(path)
-        if not candidate.is_absolute():
-            candidate = root / candidate
-        candidate.resolve().relative_to(root.resolve())
-        return True
-    except (ValueError, OSError):
-        return False
 
 
 def _command_text(params: dict) -> str:
@@ -1640,7 +1628,7 @@ class _CodexTurn:
                 self.mode == "accept_edits"
                 and changes
                 and not params.get("grantRoot")
-                and all(_inside(c["path"], self.workspace) for c in changes)
+                and all(inside_workspace(c["path"], self.workspace) for c in changes)
             ):
                 self.rpc.respond(rid, payload(True))
                 return

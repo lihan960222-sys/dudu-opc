@@ -16,6 +16,19 @@ def canonical_workspace(root: str = "") -> Path:
     return (base / "workspace").resolve()
 
 
+def inside_workspace(path: str, root: Path | None) -> bool:
+    if root is None or not isinstance(path, str) or not path:
+        return False
+    try:
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        candidate.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def require_workspace(path: Path) -> Path:
     # Existing conversations must never silently recreate or switch folders.
     if not path.is_dir() or not os.access(path, os.R_OK | os.W_OK | os.X_OK):

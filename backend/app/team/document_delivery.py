@@ -12,12 +12,10 @@ from app.db.transactions import begin_write
 from app.feishu.document_access import DOC_PATH, urls
 from app.services.feature_tasks import assignment_current
 from app.team import fence, service
-from app.team.feishu_assignment import for_job, required_tool
+from app.team.feishu_assignment import DELIVERY_STAGES as STAGES, PUBLISH, WRITE_TOOLS as WRITES
+from app.team.feishu_assignment import for_job, recorded_assignment, required_tool
 
 
-PUBLISH = "feishu_publish_knowledge"
-WRITES = (PUBLISH, "feishu_create_document", "feishu_edit_document", "feishu_delete_document")
-STAGES = ("feishu_tool_started", "feishu_delivered", "feishu_superseded", "feishu_tool_failed")
 MISSING = "我还没取得这次飞书交付的有效回执。"
 
 
@@ -31,8 +29,7 @@ class Evidence:
 
 
 async def requirement(db, job):
-    pin = await db.scalar(select(AgentJobEvent.detail).where(
-        AgentJobEvent.job_id==job.id, AgentJobEvent.kind=="feishu_assignment").order_by(AgentJobEvent.id).limit(1))
+    pin = await recorded_assignment(db, job.id)
     if not pin:
         return None, {}
     tool = required_tool(pin)

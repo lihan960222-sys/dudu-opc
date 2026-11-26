@@ -12,6 +12,7 @@ from app.db.models import AgentJob, Turn
 from app.feishu import employee_tools, knowledge_document, owner_oauth, workspace_access
 from app.feishu.publisher import PlatformError
 from app.team import service
+from app.team.feishu_assignment import PUBLISH, WRITE_ACTIONS
 
 
 @dataclass
@@ -263,10 +264,9 @@ async def execute(rt, run, name, args):
     if action in ("read","employee") and name in ("feishu_read_history","feishu_read_message") and result.get("source_complete"):
         receipt = {"messages_read": result["total"]}
         logical_tool="feishu_read_history"
-    if (action in ("update","restructure","employee") and name == "feishu_publish_knowledge" or
-            action == "delete_document" and name == "feishu_delete_document" or
-            action=="edit_document" and name=="feishu_edit_document" or
-            action == "create_document" and name == "feishu_create_document") and result.get("confirmed"):
+    # Older employee assignments can publish knowledge without an explicit delivery action.
+    expected_write = PUBLISH if action == "employee" else WRITE_ACTIONS.get(action)
+    if name == expected_write and result.get("confirmed"):
         receipt = {"deleted":True} if action=="delete_document" else {"url": result["url"]}
         if result.get("message"):
             receipt["message"] = result["message"]

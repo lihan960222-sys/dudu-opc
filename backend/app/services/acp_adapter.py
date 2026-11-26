@@ -38,6 +38,7 @@ from app.core.logging import get_logger
 from app.services import local_claude_runner
 from app.services.local_approval_broker import MAX_REVIEWABLE_INPUT_CHARS
 from app.services import memory_bridge
+from app.services.workspaces import inside_workspace
 from app.services.provider_adapter import (
     ALLOW,
     LOST,
@@ -97,19 +98,6 @@ def resolve_command(command: str) -> list[str] | None:
 def _clip(message: str) -> str:
     message = (message or "").strip()
     return message if len(message) <= MAX_ERROR_CHARS else message[:MAX_ERROR_CHARS] + "…"
-
-
-def _inside(path, root: Path | None) -> bool:
-    if root is None or not isinstance(path, str) or not path:
-        return False
-    try:
-        candidate = Path(path)
-        if not candidate.is_absolute():
-            candidate = root / candidate
-        candidate.resolve().relative_to(root.resolve())
-        return True
-    except (ValueError, OSError):
-        return False
 
 
 def _text_of(content) -> str:
@@ -735,7 +723,7 @@ class _AcpTurn:
             self.mode == "accept_edits"
             and kind == "edit"
             and locations
-            and all(_inside(path, self.workspace) for path in locations)
+            and all(inside_workspace(path, self.workspace) for path in locations)
             and allow_id is not None
         ):
             self.rpc.respond(rid, payload(True))

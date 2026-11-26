@@ -10,6 +10,18 @@ from app.db.models import AgentJobEvent, DirectTurnReceipt
 from app.feishu import workspace_access
 
 
+PUBLISH = "feishu_publish_knowledge"
+WRITE_ACTIONS = {
+    "create_document": "feishu_create_document",
+    "edit_document": "feishu_edit_document",
+    "delete_document": "feishu_delete_document",
+    "update": PUBLISH,
+    "restructure": PUBLISH,
+}
+WRITE_TOOLS = frozenset(WRITE_ACTIONS.values())
+DELIVERY_STAGES = ("feishu_tool_started", "feishu_delivered", "feishu_superseded", "feishu_tool_failed")
+
+
 def configuration():
     path = os.getenv("FEISHU_CONFIG")
     if not path and os.getenv("LOCALAPPDATA"):
@@ -69,9 +81,14 @@ async def resolve(db, owner, lead, thread, turn, employee, *, delivery=None, ori
             "employee":employee,"contact":contact,"action":"employee"}
 
 
-async def for_job(db, job_id):
-    pin = await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id==job_id,
+async def recorded_assignment(db, job_id):
+    """Read the job's original dispatch record; gateway authorization is checked separately."""
+    return await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id==job_id,
                            AgentJobEvent.kind=="feishu_assignment").order_by(AgentJobEvent.id).limit(1))
+
+
+async def for_job(db, job_id):
+    pin = await recorded_assignment(db, job_id)
     if pin and pin.get("event_key"):
         cfg = configuration()
         original = gateway_pin(cfg,pin["event_key"]) if cfg else None
@@ -85,10 +102,12 @@ def required_tool(assignment):
     """Use the same delivery requirement when exposing, executing and verifying a tool."""
     if not isinstance(assignment.get("action"),str):
         return assignment.get("expected_tool")
-    return {"read_document":"feishu_read_document", "edit_document":"feishu_edit_document", "delete_document":"feishu_delete_document",
-            "read": "feishu_read_history", "update": "feishu_publish_knowledge",
-            "restructure": "feishu_publish_knowledge", "create_document": "feishu_create_document"}.get(
-                assignment.get("action"), assignment.get("expected_tool"))
+    action = assignment["action"]
+    if action == "read_document":
+        return "feishu_read_document"
+    if action == "read":
+        return "feishu_read_history"
+    return WRITE_ACTIONS.get(action, assignment.get("expected_tool"))
 
 
 def document_employees(cfg):

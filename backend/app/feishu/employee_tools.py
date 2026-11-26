@@ -33,6 +33,21 @@ async def staff_name(cfg,employee):
         return agent.name
 
 
+def _document_body(client, headers, doc):
+    from . import knowledge_revision
+
+    blocks = knowledge_revision.root_blocks(client, headers, doc)
+    # The editor can leave an empty paragraph after the authored content.
+    while blocks:
+        block = blocks[-1]
+        if (block.get("block_type") != 2 or block.get("children") or
+                any("text_run" not in el or el["text_run"].get("content")
+                    for el in block.get("text", {}).get("elements", []))):
+            break
+        blocks.pop()
+    return blocks
+
+
 def create_document(cfg,employee,identity,db,client,invocation_id,title,body):
     from . import knowledge_revision
     if not isinstance(title,str) or not 1<=len(title.strip())<=200 or not isinstance(body,str):
@@ -70,14 +85,8 @@ def create_document(cfg,employee,identity,db,client,invocation_id,title,body):
             raise ValueError("前一次建档结果待核对，请检查目标文件夹。")
         doc,confirmed=prior[1],bool(prior[2])
     document_access.verify_destination(client,headers,destination["folder_token"],doc,title)
-    actual=knowledge_revision.root_blocks(client,headers,doc)
-    if not children:
-        for block in actual:
-            elements=block.get("text",{}).get("elements",[])
-            if (block.get("block_type")!=2 or block.get("children") or
-                    any("text_run" not in el or el["text_run"].get("content") for el in elements)):
-                raise ValueError("云端正文已有内容，已保留当前内容。")
-    if not knowledge_revision.matches(actual,children):
+    actual=_document_body(client,headers,doc)
+    if len(actual)!=len(children) or not knowledge_revision.matches(actual,children):
         if actual or confirmed:
             raise ValueError("云端正文与原稿不符，已保留当前内容。")
         reply=checked(client.post(API+f"/docx/v1/documents/{doc}/blocks/{doc}/children",headers=headers(),
@@ -85,7 +94,8 @@ def create_document(cfg,employee,identity,db,client,invocation_id,title,body):
         blocks=reply["data"]["children"]
         if len(blocks)!=len(children) or any(not block.get("block_id") for block in blocks):
             raise ValueError("飞书未确认正文写入。")
-        if not knowledge_revision.matches(knowledge_revision.root_blocks(client,headers,doc),children):
+        actual=_document_body(client,headers,doc)
+        if len(actual)!=len(children) or not knowledge_revision.matches(actual,children):
             raise ValueError("飞书读回的正文与原稿不符。")
         document_access.verify_destination(client,headers,destination["folder_token"],doc,title)
     with db:

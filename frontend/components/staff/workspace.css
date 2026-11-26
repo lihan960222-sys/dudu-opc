@@ -24,6 +24,7 @@
 }
 .opc-workspace-more { margin-top: auto; }
 .opc-workspace-content { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.opc-workspace-content:has(> .opc-chat) { overflow: clip; }
 .opc-workspace-content > :is(.opc-chat,.opc-chat-gate) { height: 100%; }
 .opc-history-button {
   display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 4px 8px;
