@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 from uuid import uuid5, NAMESPACE_URL
 
-from . import documents, history, workspace_access
+from . import documents, history, knowledge_citations, workspace_access
 from .publisher import API, PlatformError, checked
 
 
@@ -61,7 +61,7 @@ def collect(client, auth, source, cutoff, *, start=None, count=None, keyword=Non
         tokens.add(token)
 
 
-def entry(item, chat):
+def entry(item, chat, *, legacy_match=False):
     value = history.excerpt(item)
     kind = item.get("msg_type")
     if kind not in ("text", "post"):
@@ -70,9 +70,13 @@ def entry(item, chat):
                 "问题" if any(c in value for c in "？?") else
                 "安排与决定" if any(w in value for w in ("计划","需要","决定","确认")) else "交流记录")
     day = datetime.fromtimestamp(int(item["create_time"])/1000).strftime("%Y-%m-%d")
-    link = "https://applink.feishu.cn/client/chat/open?openChatId="+quote(chat,safe="")+"&messageId="+quote(item["message_id"],safe="")
-    return {"block_type":2,"text":{"elements":[{"text_run":{"content":f"{category} · {day}　{value}　"}},
-              {"text_run":{"content":"原消息","text_element_style":{"link":{"url":link}}}}]}}
+    if legacy_match:
+        # Reconcile only an entry already recorded in the old journal. Never publish this legacy URL.
+        link = knowledge_citations.BASE+"?openChatId="+quote(chat,safe="")+"&messageId="+quote(item["message_id"],safe="")
+        source = {"text_run":{"content":"原消息","text_element_style":{"link":{"url":link}}}}
+    else:
+        source = knowledge_citations.element(1, item["message_id"], item, chat)
+    return {"block_type":2,"text":{"elements":[{"text_run":{"content":f"{category} · {day}　{value}　"}}, source]}}
 
 
 def binding_key(app,employee,alias,source,dest,title):
@@ -231,7 +235,7 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
             actual=knowledge_revision.root_blocks(client,folder_auth,doc)
             if not knowledge_revision.matches(actual,plan):
                 raise ValueError("飞书正文与本次整理稿不符，无法确认交付。")
-            sources=weekly_knowledge.source_ids(actual[:len(plan)],source["chat_id"])
+            sources=weekly_knowledge.source_ids(actual[:len(plan)],source["chat_id"],records=records)
             if not set(records)<=sources:
                 raise ValueError("飞书正文未覆盖本次读取的来源消息。")
         folder=verify_target(doc)
@@ -294,6 +298,9 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
     from .knowledge_revision import block_signature, root_blocks
     remote=root_blocks(client,lambda:auth(documents.SCOPES),created)
     signatures={json.dumps(block_signature(block)) for block in remote}
-    if any(json.dumps(block_signature(entry(item,source["chat_id"]))) not in signatures for item in records.values()):
-        raise ValueError("飞书正文与原消息核对不一致，尚未完成。")
+    for mid, item in records.items():
+        if mid in known and json.dumps(block_signature(entry(item,source["chat_id"],legacy_match=True))) in signatures:
+            continue
+        if json.dumps(block_signature(entry(item,source["chat_id"]))) not in signatures:
+            raise ValueError("飞书正文与原消息核对不一致，尚未完成。")
     return f"二狗查完了与{alias}的全部可见历史，共 {len(records)} 条。这次新增整理 {len(set(records)-known)} 条。\n《{title}》{dest['tenant_origin']}/docx/{created}",len(records)

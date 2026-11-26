@@ -1,9 +1,9 @@
 """Versioned topic summaries of an employee's authorized Feishu conversation."""
 import hashlib
 import json
-from urllib.parse import quote
 from uuid import NAMESPACE_URL, uuid5
 
+from . import knowledge_citations
 from .private_summary import model_result
 from .publisher import API, checked
 
@@ -13,12 +13,11 @@ TOPICS={"type":"object","properties":{"topics":{"type":"array","items":{
     "additionalProperties":False}}},"required":["topics"],"additionalProperties":False}
 
 
-def text_block(kind, text, sources=(), chat=""):
+def text_block(kind, text, sources=(), chat="", records=None):
     tags={"text":2,"heading1":3,"heading2":4}
     elements=[{"text_run":{"content":text}}]
     for n,mid in enumerate(sources,1):
-        url="https://applink.feishu.cn/client/chat/open?openChatId="+quote(chat,safe="")+"&messageId="+quote(mid,safe="")
-        elements.append({"text_run":{"content":f"　来源{n}","text_element_style":{"link":{"url":url}}}})
+        elements.append(knowledge_citations.element(n, mid, records[mid], chat))
     return {"block_type":tags[kind],kind:{"elements":elements}}
 
 
@@ -43,7 +42,7 @@ def employee_blocks(topics, records, chat):
         covered.update(sources)
         notes = sections.setdefault(title.strip(), [])
         for offset in range(0, len(sources), 32):
-            notes.append(text_block("text", summary.strip() if not offset else "更多来源", sources[offset:offset+32], chat))
+            notes.append(text_block("text", summary.strip() if not offset else "更多来源", sources[offset:offset+32], chat, records))
     if covered != set(records):
         raise ValueError("整理稿尚未覆盖本次所有消息，请补齐来源后重试。")
     for title, notes in sections.items():
@@ -87,7 +86,7 @@ async def summarize(records,profile,authorized,chat,instructions=""):
                 raise ValueError("模型返回的主题或来源无效，文档未更新。")
             covered.update(indices)
             sources=list(dict.fromkeys(batch[n-1][0] for n in indices))
-            sections.setdefault(name,[]).append(text_block("text",note,sources,chat))
+            sections.setdefault(name,[]).append(text_block("text",note,sources,chat,records))
         if covered!=set(range(1,len(batch)+1)):
             raise ValueError("部分消息没有归入主题，文档未更新。")
     blocks=[text_block("heading1","知识综述"),text_block("text",f"本版涵盖 {len(records)} 条当前可见消息，按主题整理。")]
@@ -100,7 +99,7 @@ def block_signature(block):
     kind={2:"text",3:"heading1",4:"heading2",5:"heading3"}.get(block.get("block_type"))
     if not kind:
         return None
-    return (kind,[(run.get("content"),run.get("text_element_style",{}).get("link",{}).get("url"))
+    return (kind,[(run.get("content"),knowledge_citations.decoded_link(run.get("text_element_style",{}).get("link",{}).get("url")))
                   for el in block.get(kind,{}).get("elements",[]) for run in [el.get("text_run",{})]])
 
 
@@ -118,7 +117,8 @@ def removable(block):
         if set(el)!={"text_run"}:
             return False
         style=el["text_run"].get("text_element_style",{})
-        if any(v for k,v in style.items() if k!="link"):
+        archived = knowledge_citations.archived_ids(el["text_run"])
+        if any(v for k,v in style.items() if k!="link" and not (k=="italic" and archived)):
             return False
     return True
 
