@@ -128,6 +128,10 @@ async def execute(cfg,employee_id,name,arguments,*,owner_id,journal_db,client,al
     identity=employee_config(cfg,employee_id)
     if not identity.get("_employee_oauth"):
         raise ValueError("员工飞书应用尚未绑定。")
+    retry_scope=(assignment or {}).get("_retry_resource")
+    if retry_scope and name not in {"feishu_list_sources","feishu_read_history","feishu_read_message",
+                                    "feishu_read_document","feishu_publish_knowledge"}:
+        raise ValueError("此续办只准读取原来源和更新原知识库。")
     if name=="feishu_delete_document":
         from .document_delete import delete_owned
         return delete_owned(cfg, employee_id, identity, journal_db, client, assignment)
@@ -161,6 +165,12 @@ async def execute(cfg,employee_id,name,arguments,*,owner_id,journal_db,client,al
                  and alias==contact}
         return policy,sources
     policy,sources=scoped()
+    def verify_retry_source(bound):
+        if retry_scope:
+            from .unpublished_retry import verify_outbound
+            dest,title=knowledge_document.target(cfg,employee_id,contact)
+            verify_outbound(assignment,cfg,employee_id,contact,bound.get(contact),dest,title,identity)
+    verify_retry_source(sources)
     def known_document():
         dest,title=knowledge_document.target(cfg,employee_id,contact)
         key=knowledge_document.binding_key(cfg["steward"]["app_id"],employee_id,contact,sources[contact],dest,title)
@@ -251,6 +261,7 @@ async def execute(cfg,employee_id,name,arguments,*,owner_id,journal_db,client,al
         raise ValueError("起始位置须为非负整数，每页可取 1 至 10 条。")
     def headers():
         current,bound=scoped()
+        verify_retry_source(bound)
         if bound.get(contact)!=source or not workspace_access.permits_model(current, profile, assignment):
             raise ValueError("该员工的飞书读取授权已变更。")
         return history.headers(identity,history.SCOPES)

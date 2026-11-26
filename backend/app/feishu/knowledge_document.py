@@ -95,9 +95,11 @@ def inspect_document(client,auth,doc):
         raise ValueError("无法确认原知识库文档的身份。")
     return meta
 
-def resolve_document(db,client,auth,key,dest,title):
+def resolve_document(db,client,auth,key,dest,title,*,expected_document=None):
     saved=db.execute("select document from knowledge_documents where binding=?",(key,)).fetchone()
     previous=saved[0] if saved else None
+    if expected_document is not None and previous!=expected_document:
+        raise ValueError("原工单登记的知识库文档已变更。")
     if saved and not previous:
         raise ValueError("创建文档的结果待核对，暂不重复创建。")
     if previous:
@@ -161,7 +163,11 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
     cfg = history.source_config(worker.cfg,source)
     if not cfg.get("_employee_oauth") or cfg["steward"]["app_id"] != source["oauth_app"]:
         raise ValueError("当前飞书授权与员工身份不匹配。")
+    retry_scope=(assignment or {}).get("_retry_resource")
     def auth(scopes):
+        if retry_scope:
+            from .unpublished_retry import verify_outbound
+            verify_outbound(assignment,worker.cfg,employee,alias,source,dest,title,cfg)
         if (workspace_access.settings_for(worker.cfg)["history_sources"].get(alias)!=source or
                 target(worker.cfg,employee,alias)!=(dest,title)):
             raise ValueError("联系人或目标文件夹已变更，请重新发起整理。")
@@ -207,7 +213,13 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
     if draft_blocks is not None:
         from . import owner_oauth
         auth(documents.SCOPES | owner_oauth.ACTIONS["folder"])
-    created=weekly["document"] if weekly else resolve_document(db,client,lambda:auth(documents.SCOPES),key,dest,title)
+    options={}
+    if retry_scope:
+        saved=db.execute("select document from knowledge_documents where binding=?",(key,)).fetchone()
+        if not saved or saved[0]!=assignment.get("_retry_document") or not await assignment["_retry_authorized"]():
+            raise ValueError("原工单的文档或授权已变更，已停止发布。")
+        options["expected_document"]=saved[0]
+    created=weekly["document"] if weekly else resolve_document(db,client,lambda:auth(documents.SCOPES),key,dest,title,**options)
     if draft_blocks is not None:
         verify_target(created)
     layout_key=key
@@ -217,6 +229,10 @@ async def publish(worker,row,review,source,cutoff,*,read_only=False,revise=False
             "select 1 from knowledge_revisions where binding=? or binding like ? limit 1",(key,layout_key+"/%")).fetchone()):
         from .knowledge_revision import revise_document
         async def authorized():
+            if retry_scope:
+                registered=db.execute("select document from knowledge_documents where binding=?",(layout_key,)).fetchone()
+                if not registered or registered[0]!=created or not await assignment["_retry_authorized"]():
+                    return False
             if weekly and not await assignment["_weekly_authorized"]():
                 return False
             settings=workspace_access.settings_for(worker.cfg)

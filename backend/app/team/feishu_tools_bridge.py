@@ -140,6 +140,12 @@ async def grant(db, owner, run, team):
         proof = await for_job(db, job.id)
         if not proof or proof.get("employee") != run.agent_id:
             return None
+        from app.feishu import unpublished_retry
+        if (job.origin_ref or "").startswith(unpublished_retry.KEY_PREFIX):
+            employee = await service.member(db, owner, run.agent_id, team_id=team.id)
+            proof=await unpublished_retry.tool_proof(db,cfg,employee,job,proof,getattr(run.ctx,"model_vendor",None))
+            if not proof:
+                return None
         proof = {**proof, "runtime_vendor": getattr(run.ctx, "model_vendor", None) or "unconfirmed"}
         if run.ctx.approval_mode == "plan":
             proof["read_only"] = True
@@ -176,7 +182,7 @@ async def record_delivery(rt, job_id, run, name, logical_tool, action, operation
         current = (job.status == "running" and job.assignee_turn_id == run.turn_id
                    and await assignment_current(db, job, lock=True))
         stage = "feishu_delivered" if current else "feishu_superseded"
-        event(db, job, stage, {"employee":run.agent_id,"action":action,"result":receipt,
+        event(db, job, stage, {"employee":run.agent_id,"turn_id":run.turn_id,"action":action,"result":receipt,
             "tool":logical_tool,"invoked_tool":name,"operation":operation,"epoch":job.assignment_epoch})
         await db.commit()
     if not current:
@@ -206,6 +212,15 @@ async def execute(rt, run, name, args):
                 team = await service.team_for(db, rt.owner_id)
                 return bool(await grant(db, rt.owner_id, run, team))
         proof = {**proof, "_weekly_authorized":weekly_live}
+    if proof.get("_retry_resource"):
+        async def retry_live():
+            async with rt.session() as db:
+                team=await service.team_for(db,rt.owner_id)
+                current=await grant(db,rt.owner_id,run,team)
+                return bool(current and current.job.id==job_id and name in current.tools
+                            and current.assignment.get("_retry_resource")==proof["_retry_resource"]
+                            and current.assignment.get("_retry_document")==proof["_retry_document"])
+        proof={**proof,"_retry_authorized":retry_live}
     if name == "feishu_create_document":
         if (not isinstance(args,dict) or set(args)-{"title","body"}
                 or "body" in args and proof.get("body")

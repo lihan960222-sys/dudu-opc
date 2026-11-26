@@ -412,12 +412,18 @@ def main():
     cli.add_argument("--task",type=int,required=True)
     cli.add_argument("--apply",action="store_true",help="显式登记一次续办。默认仅核对。")
     cli.add_argument("--require-published-document",action="store_true",help="要求经办员工本轮取得飞书知识库发布回执。")
+    cli.add_argument("--retry-unpublished-turn",type=int,help="在同一员工会话续办已核实只读过来源的上一轮。")
     args=cli.parse_args()
     try:
         cfg=configuration()
         require(cfg and Path(cfg["_access_config_path"]).resolve().parent==settings.SQLITE_FILE.resolve().parent)
-        print(json.dumps(asyncio.run(recover(AsyncSessionLocal,cfg,args.turn,args.task,apply=args.apply,
-                                            require_document=args.require_published_document))))
+        if args.retry_unpublished_turn is not None:
+            from .unpublished_retry import retry
+            require(args.require_published_document)
+            operation=retry(AsyncSessionLocal,cfg,args.turn,args.task,args.retry_unpublished_turn,apply=args.apply)
+        else:
+            operation=recover(AsyncSessionLocal,cfg,args.turn,args.task,apply=args.apply,require_document=args.require_published_document)
+        print(json.dumps(asyncio.run(operation)))
     except (ValueError,OSError,sqlite3.Error):
         cli.exit(2,"原来信、工单或授权条件不满足，未启动新的续办。\n")
 
