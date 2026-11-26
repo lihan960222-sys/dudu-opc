@@ -1,5 +1,4 @@
 """Only a recorded, rejected employee handoff may be resumed by its local operator."""
-import asyncio
 import json
 from contextlib import closing
 from types import SimpleNamespace
@@ -58,7 +57,7 @@ async def setup_case(sessions,owner,tmp_path,monkeypatch):
     (tmp_path/"channel").mkdir()
     monkeypatch.setattr(feishu_assignment,"configuration",lambda:cfg)
     async with sessions() as db:
-        lead=await agent_store.create_agent(db,owner_id=owner,name="Supervisor",provider="codex",make_lead=True)
+        lead=await agent_store.create_agent(db,owner_id=owner,name="Supervisor",provider="codex",model="synthetic",make_lead=True)
         child=await agent_store.create_agent(db,owner_id=owner,name="Archivist",provider="codex")
         await service.change_member(db,owner,child.id)
         lead.delegation_enabled=True
@@ -70,7 +69,7 @@ async def setup_case(sessions,owner,tmp_path,monkeypatch):
                                               workspace_path=str(tmp_path))
         cfg["steward_thread"]=chat.id
         db.add(FeishuLeadChat(thread_id=chat.id,channel=recovery.signature(owner,"test-app","tenant","test-owner","default",chat.id),
-                              selection="selection",project="default",isolated=False))
+                              selection=recovery.signature("codex",lead.model),model=lead.model,project="default",isolated=False))
         await db.commit()
         result=await feature_tasks.route(db,owner_id=owner,agent_id=child.id,project="other-project",event_key="prior",
             title="Synthetic card",text="Synthetic assignment",intent="independent")
@@ -169,8 +168,20 @@ async def test_operator_registers_once_binds_separate_system_turn_and_original_r
         return TurnOutcome("succeeded",result="系统续办已核对")
     engine.handlers[thread]=run
     monkeypatch.setattr(session,"AsyncSessionLocal",sessions)
+    from app import main
+    from app.core.scheduler_lock import SchedulerLock
+    from app.services import thread_runtime
+    async def idle():
+        return None
+    monkeypatch.setattr(thread_runtime,"runtime",rt)
+    monkeypatch.setattr(main.routine_service.scheduler,"recover",idle)
+    monkeypatch.setattr(main.routine_service.scheduler,"tick",idle)
+    monkeypatch.setattr(rt.rooms,"tick",idle)
+    monkeypatch.setattr(rt.notices,"tick",idle)
+    monkeypatch.setattr(rt.team_jobs,"dispatch_queued",idle)
+    background=main._GuardedRoutines(SimpleNamespace(state=SimpleNamespace()),SchedulerLock("sqlite"))
     try:
-        await rt.team_jobs._resume(registered["root"])
+        await background.tick()
         from tests.services.thread_harness import wait_until
         async def first_result():
             async with sessions() as db:
@@ -218,7 +229,7 @@ async def test_operator_registers_once_binds_separate_system_turn_and_original_r
         await rt.shutdown()
 
 
-@pytest.mark.parametrize("change",["identity","digest","new_owner_request","prior_side_effect","epoch","employee"])
+@pytest.mark.parametrize("change",["identity","digest","new_owner_request","prior_side_effect","epoch","employee","lead_model"])
 async def test_rejects_stale_or_untrusted_before_registering(setup_case,sessions,change):
     cfg,thread,turn,task,employee,_=setup_case
     if change=="identity":
@@ -231,12 +242,14 @@ async def test_rejects_stale_or_untrusted_before_registering(setup_case,sessions
             new=await thread_store.start_turn(db,thread,"newer owner instruction")
             await thread_store.finish_turn(db,new.id,new.owner_token,status="succeeded")
     else:
-        from app.db.models import WorkItem, FeatureScope
+        from app.db.models import Agent, WorkItem, FeatureScope
         async with sessions() as db:
             if change=="epoch":
                 (await db.get(FeatureScope,task)).assignment_epoch=2
             elif change=="employee":
                 (await db.get(WorkItem,task)).agent_id=cfg["steward"]["agent_id"]
+            elif change=="lead_model":
+                (await db.get(Agent,cfg["steward"]["agent_id"])).model="other-model"
             else:
                 await thread_store._add_event(db,thread,"tool.started",{"name":"Bash","call_id":"unknown","input":{}},turn)
             await db.commit()
@@ -282,4 +295,4 @@ async def test_recovery_success_depends_on_current_child_and_its_publication(set
         assert root.status==("completed" if child_state=="confirmed" else "failed")
         assert "全部办好了" not in (root.result or "") and "模型自报" not in (root.result or "")
         if child_state=="confirmed":
-            assert "/docx/Test" in root.result and "4" in root.result
+            assert "/docx/Test" in root.result and "4" in root.result and "Archivist" in root.result

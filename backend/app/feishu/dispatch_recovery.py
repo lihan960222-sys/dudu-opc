@@ -152,6 +152,10 @@ async def validate(db, cfg, turn_id, task, *, expected_epoch=None, root_id=None)
     binding = await db.get(FeishuLeadChat,thread.id)
     require(binding and binding.channel==signature(owner,who["app_id"],who["tenant_key"],who["open_id"],
                                                  cfg.get("project",""),cfg["steward_thread"]))
+    from app.services import role_workspace
+    current_model=role_workspace.load(Path(lead.role_path),lead.model).model if lead.role_path else lead.model
+    require(binding.selection==signature(lead.provider,current_model) and binding.model==current_model,
+            "管家的模型已更换，请从当前会话重新确认。")
     newer = await db.scalar(select(Event.id).where(Event.thread_id==thread.id, Event.turn_id>turn_id,
         Event.type=="turn.started", Event.data["internal"].as_boolean().is_not(True)).limit(1))
     require(not newer,"同一管家会话已有新的老板来信。")
@@ -282,11 +286,13 @@ async def confirmed_result(db, root):
     children=list(await db.scalars(select(AgentJob).where(AgentJob.parent_id==root.id)))
     require(len(children)==1, "大嘴未能为这次来信完成派工。")
     child=children[0]
-    require(child.owner_id==root.owner_id and child.kind=="job" and child.mode=="work" and child.reply=="resume"
+    employee=await db.get(Agent,child.assignee_agent_id)
+    require(child.owner_id==root.owner_id and child.root_id==root.id and child.kind=="job" and child.mode=="work" and child.reply=="resume"
             and child.origin_kind=="person" and child.requester_thread_id==root.requester_thread_id
             and child.requester_turn_id==root.requester_turn_id and child.requester_agent_id==root.requester_agent_id
             and child.assignee_agent_id==proof["employee"] and child.task_id==proof["task"]
-            and child.assignment_epoch==proof["epoch"] and await feature_tasks.assignment_current(db,child),
+            and child.assignment_epoch==proof["epoch"] and employee and employee.owner_id==root.owner_id
+            and not employee.archived_at and await feature_tasks.assignment_current(db,child),
             "工单或经办人已变化，未发送原派工结果。")
     require(child.status=="completed","员工本次派工尚未成功交付。")
     owner_source=await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id==child.id,AgentJobEvent.kind=="owner_request"))
@@ -316,7 +322,7 @@ async def confirmed_result(db, root):
             AgentJobEvent.kind.in_(("feishu_read_verified","feishu_delivered","feishu_superseded","feishu_tool_failed")))
             .order_by(AgentJobEvent.id.desc()).limit(1))
         require(later_failure not in ("feishu_superseded","feishu_tool_failed"),"后续飞书文档核对未通过。")
-        return f"工单 #{child.task_id} 已由经办员工发布，飞书已确认文档，本次核对了 {count} 条来源消息。\n{url}"
+        return f"老板，{employee.name}已发布工单 #{child.task_id} 的知识库。我核对了飞书回执，这份文档整理了 {count} 条来源消息。\n{url}"
     return child.result or "员工已取得本轮飞书工具回执。"
 
 
