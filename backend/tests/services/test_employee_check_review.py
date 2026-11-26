@@ -164,7 +164,7 @@ async def test_real_dispatch_and_gate_bind_one_review_to_one_unchanged_check(ses
     ctx=SimpleNamespace(approval_mode="accept_edits",project_runtime=project,workspace=frame.root,aborted=False,
         team=policy.TurnTeam(lead.team_id,staff.id,False,False,feature_consult=True,strict_hierarchy=True))
     run=SimpleNamespace(thread_id=feature.id,turn_id=worker.id,agent_id=staff.id,owner_token=worker.owner_token,
-                        ctx=ctx,recovery_call=None,approval_timeout=60)
+                        ctx=ctx,recovery_call=None,recovery_followup=None,approval_timeout=60)
     gate=ThreadApprovalGate(rt,run)
     args={"argv":["cmd.exe","/d","/c","verify.cmd"],"cwd":"tests"}
     name="mcp__team__run_project_command"
