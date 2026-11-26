@@ -51,6 +51,9 @@ def validate_configured_location(folder: Path) -> None:
                                     "attachments", "engine-processes", "auth-limits"))]
     private.extend(Path(v) for v in (settings.ATTACHMENTS_DIR, settings.DECISION_LOG_DIR,
                                       settings.ENGINE_PROCESS_DIR, settings.AUTH_LIMITS_DIR) if v)
+    configured_store = os.environ.get("SUPARAGENT_EMPLOYEE_RUNTIME_ROOT", "").strip()
+    if configured_store and Path(configured_store).is_absolute():
+        private.append(Path(configured_store))
     validate_location(folder, private)
 
 

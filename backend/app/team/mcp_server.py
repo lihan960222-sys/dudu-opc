@@ -115,8 +115,12 @@ OPTIONAL = {'raise_escalation'}
 
 
 class Server:
-    def __init__(self, mailbox, escalations=False, project_consult=False, feishu_tools=(), employee_only=False):
+    def __init__(self, mailbox, escalations=False, project_consult=False, feishu_tools=(), employee_only=False,
+                 feishu_only=False):
         self.mailbox = Path(mailbox)
+        if feishu_only:
+            self.tools = [tool for tool in FEISHU_TOOLS if tool["name"] in feishu_tools]
+            return
         self.tools = [t for t in TOOLS if escalations or t['name'] not in OPTIONAL]
 
         if project_consult:
@@ -183,9 +187,11 @@ def main():
     parser.add_argument('--escalations', action='store_true')
     parser.add_argument('--project-consult', action='store_true')
     parser.add_argument('--employee-only', action='store_true')
+    parser.add_argument('--feishu-only', action='store_true')
     parser.add_argument('--employee-tool', action='append', choices=[t['name'] for t in FEISHU_TOOLS], default=[])
     arguments = parser.parse_args()
-    server = Server(arguments.mailbox, arguments.escalations, arguments.project_consult, arguments.employee_tool, arguments.employee_only)
+    server = Server(arguments.mailbox, arguments.escalations, arguments.project_consult, arguments.employee_tool,
+                    arguments.employee_only, arguments.feishu_only)
     for line in sys.stdin:
         try:
             if len(line) > 100000:

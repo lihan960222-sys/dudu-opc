@@ -2,15 +2,21 @@
 import { translateNow, useT } from "@/lib/use-i18n";
 
 import { useEffect, useRef, useState } from "react";
-import { api, ApiError, type CodexLoginOperation } from "@/lib/api";
+import { api, ApiError, type CodexLoginOperation, type CodexSignInActions } from "@/lib/api";
 import { EngineSignOut } from "./EngineSignOut";
 import { Button } from "@/components/ui/Button";
 import { Banner } from "@/components/ui/Banner";
 
 
-export function CodexEngineSetup({ onChanged, signedIn }: { onChanged: () => void; signedIn: boolean | null }) {
+const globalAccount: CodexSignInActions = {
+  start: api.startCodexLogin, poll: api.codexLoginStatus, cancel: api.cancelCodexLogin, signOut: api.logoutCodexEngine,
+};
+
+export function CodexEngineSetup({ onChanged, signedIn, account = globalAccount, initialFlow }: {
+  onChanged: () => void; signedIn: boolean | null; account?: CodexSignInActions; initialFlow?: CodexLoginOperation;
+}) {
   const t = useT();
-  const [flow, setFlow] = useState<CodexLoginOperation | null>(null);
+  const [flow, setFlow] = useState<CodexLoginOperation | null>(initialFlow ?? null);
   const [busy, setBusy] = useState(false);
   const [signOutPending, setSignOutPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -25,7 +31,7 @@ export function CodexEngineSetup({ onChanged, signedIn }: { onChanged: () => voi
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
-        const status = await api.codexLoginStatus(flowId);
+        const status = await account.poll(flowId);
         if (cancelled) return;
         setFlow(status);
         if (status.phase !== "running") { changed.current(); return; }
@@ -38,7 +44,7 @@ export function CodexEngineSetup({ onChanged, signedIn }: { onChanged: () => voi
     };
     timer = setTimeout(() => void poll(), 500);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [flowId, flowPhase]);
+  }, [flowId, flowPhase, account]);
 
   const act = async (work: () => Promise<void>) => {
     setBusy(true); setError(null);
@@ -48,10 +54,10 @@ export function CodexEngineSetup({ onChanged, signedIn }: { onChanged: () => voi
   };
   const running = flow?.phase === "running";
   return <div className="space-y-2">
-    <Button disabled={busy || running || signOutPending} onClick={() => void act(async () => setFlow(await api.startCodexLogin()))}>{t("settingsPage.signInToCodex")}</Button>
-    {signedIn && <EngineSignOut label="Codex" disabled={busy || running} onSignOut={api.logoutCodexEngine} onChanged={onChanged} onPendingChange={setSignOutPending} />}
+    {(!signedIn || account.signOut) && <Button type="button" disabled={busy || running || signOutPending} onClick={() => void act(async () => setFlow(await account.start()))}>{t("settingsPage.signInToCodex")}</Button>}
+    {signedIn && account.signOut && <EngineSignOut label="Codex" disabled={busy || running} onSignOut={account.signOut} onChanged={onChanged} onPendingChange={setSignOutPending} />}
     {running && <Button className="ml-2" disabled={busy} onClick={() => void act(async () => {
-      await api.cancelCodexLogin(flow.id); setFlow(null); changed.current();
+      await account.cancel(flow.id); setFlow(null); changed.current();
     })}>{t("settingsPage.cancelSignIn")}</Button>}
     {running && !flow.user_code && <p role="status" className="text-xs text-muted">{t("settingsPage.preparingADeviceCode")}</p>}
     {running && flow.authorization_url === "https://auth.openai.com/codex/device" && flow.user_code && <div className="space-y-2 text-sm">

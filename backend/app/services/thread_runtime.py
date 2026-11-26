@@ -531,6 +531,7 @@ class ThreadRuntime:
     hub: ThreadHub = default_hub
     adapters: dict[str, ProviderAdapter] = field(default_factory=default_adapters)
     codex_login: CodexLogin = field(default_factory=CodexLogin)
+    employee_codex_logins: dict[tuple[str, int], CodexLogin] = field(default_factory=dict)
     claude_login: ClaudeLogin = field(default_factory=ClaudeLogin)
     # Account changes and turn admission reserve before their first await.
     _account_changing: bool = False
@@ -877,6 +878,8 @@ class ThreadRuntime:
                     project_runtime = await feature_tasks.project_runtime_for(db, self.owner_id, agent, thread, approval_mode)
                 except (OSError, ValueError) as exc:
                     raise ProviderUnavailable(str(exc)) from None
+                if weekly and (chosen_skills or attached):
+                    raise ProviderUnavailable("每周知识库只接受已登记的飞书来源。")
                 if weekly and (not project_runtime or project_runtime.writable or thread.provider != "codex"):
                     raise ProviderUnavailable("每周知识库需要能禁用命令与其他工具的员工专用会话。")
         if thread.kind=="feature" and agent is not None and self.owner_id==settings.STEWARD_STRICT_OWNER:
@@ -1195,10 +1198,11 @@ class ThreadRuntime:
                 ctx.team = TurnTeam(team.id, agent.id, False, False, origin=team_origin,
                     configuration_allowed=False, strict_hierarchy=True, feature_consult=True,
                     delegation_enabled=agent.delegation_enabled and not weekly, feishu_tools=feishu.tools if feishu else (),
-                    scheduled_knowledge=bool(weekly and feishu and feishu.assignment.get("weekly")))
-                ctx.codex_prompt.instructions = _with_brief(ctx.codex_prompt.instructions,
-                    "Use employee_capabilities to discover your currently granted tools and local text skills. "
-                    "Use enable_local_skill to read the exact selected skill and follow its returned instructions.")
+                    scheduled_knowledge=bool(weekly))
+                if not weekly:
+                    ctx.codex_prompt.instructions = _with_brief(ctx.codex_prompt.instructions,
+                        "Use employee_capabilities to discover your currently granted tools and local text skills. "
+                        "Use enable_local_skill to read the exact selected skill and follow its returned instructions.")
                 if feishu:
                     from app.team.feishu_assignment import required_tool
                     delivery = required_tool(feishu.assignment)
@@ -1226,7 +1230,7 @@ class ThreadRuntime:
                             "Decide how to group the material and write your own draft, citing observed message IDs. "
                             "Submit topics to feishu_publish_knowledge only when the requested outcome includes writing. "
                             "Compare the returned remote verification to the owner's goal before reporting.")
-                if agent.delegation_enabled:
+                if ctx.team.delegation_enabled:
                     ctx.codex_prompt.instructions = _with_brief(ctx.codex_prompt.instructions,
                         "During a direct steward assignment, propose_direct_report requests a read-only subordinate for steward review. "
                         "For a bounded question, list_agents lists specialists assigned to this project. "
@@ -2107,6 +2111,8 @@ class ThreadRuntime:
         its own turns at once, instead of leaving them for the lease to expire."""
         self._closing = True
         await self.codex_login.close()
+        await asyncio.gather(*(login.close() for login in self.employee_codex_logins.values()))
+        self.employee_codex_logins.clear()
         await self.claude_login.close()
         self.capture.close()
         await self.team_jobs.close()

@@ -19,6 +19,7 @@ from app.core import tenant_paths
 from app.db.models.team import TeamSetupRequest
 from app.db.transactions import begin_write
 from app.routers.agents import _agent_or_404, _restricted, get_runtime, _check_engine
+from app.routers.employee_codex_login import router as employee_codex_login_router
 from app.routers.feishu_access import router as feishu_access_router
 from app.routers.weekly_knowledge import router as weekly_knowledge_router
 from app.routers.feishu_owner_oauth import owner_browser
@@ -37,6 +38,7 @@ def local_owner(request: Request):
 
 
 router = APIRouter(prefix="/staff", dependencies=[Depends(require_local_access), Depends(local_owner)])
+router.include_router(employee_codex_login_router)
 router.include_router(feishu_access_router)
 router.include_router(weekly_knowledge_router)
 

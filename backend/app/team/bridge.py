@@ -56,6 +56,8 @@ class TeamBridge:
             extra.append('--project-consult')
         if getattr(self.run.ctx.team, 'feature_consult', False) and not self.run.ctx.team.delegation_enabled:
             extra.append('--employee-only')
+        if getattr(self.run.ctx.team, 'scheduled_knowledge', False):
+            extra.append('--feishu-only')
         for tool in getattr(self.run.ctx.team, 'feishu_tools', ()):
             extra.extend(['--employee-tool', tool])
         if getattr(sys, 'frozen', False):

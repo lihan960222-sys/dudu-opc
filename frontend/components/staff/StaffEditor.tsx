@@ -13,6 +13,7 @@ import { StaffModelFields } from "./ProfileControls";
 import { directoryMode, directoryModes } from "@/lib/directory-mode";
 import { TeamWorkspaceAccess } from "./TeamWorkspaceAccess";
 import { DeepSeekKey } from "./DeepSeekKey";
+import { EmployeeOpenAI } from "./EmployeeOpenAI";
 import { employeeModelProfile } from "@/lib/engine-selection";
 import { FeishuAccess } from "./FeishuAccess";
 import { useSession } from "../AuthGate";
@@ -56,6 +57,8 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
   const [effort,setEffort] = useState<string | null>(agent?.effort ?? null);
   const [vendor, setVendor] = useState<string | null>(agent?.model_vendor ?? null);
   const profile = employeeModelProfile(provider, vendor, model, effort);
+  const savedVendor = agent && employeeModelProfile(agent.provider, agent.model_vendor ?? null,
+    agent.model, agent.effort ?? null).model_vendor;
   const engine = engines.find(item => item.id === provider);
   const gapLabels: Record<string, string> = {project_workspace:"项目目录隔离", tools:"终端与文件工具",
     approvals:"工具审批", mcp:"MCP 工具", resume:"会话续办"};
@@ -349,6 +352,9 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
               {agent && ownsHost && profile.model_vendor === "deepseek" && (
                 <DeepSeekKey employee={isLead ? undefined : agent.id} />
               )}
+              {agent && ownsHost && !isLead && provider === "codex" && profile.model_vendor === "openai"
+                && agent.provider === "codex" && savedVendor === "openai"
+                && <EmployeeOpenAI key={agent.id} employee={agent.id} name={agent.name} />}
               {!agent && (
                 <label className="dp-field">
                   <span>
@@ -392,7 +398,7 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
             </>
           ) : tab === "tools" && agent ? (
             <>
-              <StaffCapabilities employee={agent.id} />
+              <StaffCapabilities key={agent.id} employee={agent.id} />
               {agent && (member || isLead) && ownsHost && (
                 <section className="dp-cap-section">
                   <button type="button" className="dp-cap-toggle" aria-expanded={showFeishu}

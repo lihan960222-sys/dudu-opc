@@ -659,6 +659,23 @@ export type CodexLoginOperation = {
   error?: string;
 };
 
+export type CodexSignInActions = {
+  start: () => Promise<CodexLoginOperation>;
+  poll: (id: string) => Promise<CodexLoginOperation>;
+  cancel: (id: string) => Promise<void>;
+  signOut?: () => Promise<void>;
+};
+
+export function employeeOpenAIAccount(employee: number) {
+  const path = `/staff/${employee}/openai`;
+  return {
+    status: () => request<{signed_in: boolean; login?: CodexLoginOperation}>(path),
+    start: () => request<CodexLoginOperation>(`${path}/login`, {method: "POST"}),
+    poll: (id: string) => request<CodexLoginOperation>(`${path}/login/${encodeURIComponent(id)}`),
+    cancel: (id: string) => request<void>(`${path}/login/${encodeURIComponent(id)}`, {method: "DELETE"}),
+  };
+}
+
 export type ClaudeLoginOperation = Omit<CodexLoginOperation, "user_code"> & { code_sent?: boolean };
 
 export type VersionInfo = {

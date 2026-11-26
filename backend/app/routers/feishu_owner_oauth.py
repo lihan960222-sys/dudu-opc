@@ -34,7 +34,7 @@ def owner_browser(request: Request):
             or not isinstance(principal.session_id,int) or principal.session_id <= 0
             or principal.tenant_id is not None
             or (principal.role != "owner" and not (principal.role is None and principal.person_id is None))):
-        raise HTTPException(403, "只有本机工作区的老板可以管理飞书授权。")
+        raise HTTPException(403, "只有本机工作区的老板可以管理此项授权。")
     return principal
 
 

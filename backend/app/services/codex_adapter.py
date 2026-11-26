@@ -323,7 +323,7 @@ async def employee_codex_status(runtime, model_vendor: str) -> ProviderStatus:
     except OSError as exc:
         return ProviderStatus(False, installed=True, error=f"无法读取员工专属 Codex 登录文件：{exc.strerror}")
     return ProviderStatus(ready, installed=True, signed_in=None if ready else False, error=None if ready else
-                          f"请为员工 #{runtime.employee_id} 登录独立 Codex 配置目录 {runtime.profile}。")
+                          f"请打开员工 #{runtime.employee_id} 的档案，在“基本信息”中选择“管理 OpenAI 登录”。")
 
 
 class CodexAdapter:

@@ -24,17 +24,20 @@ export function StaffCapabilities({ employee }: { employee: number }) {
   const [state, setState] = useState<{ skills: SkillSummary[]; catalog: Catalog } | null>(null);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
-  useEffect(() => {
-    let active = true;
+  function refresh() {
     setState(null);
     setError("");
+    setAttempt(value => value + 1);
+  }
+  useEffect(() => {
+    let active = true;
     Promise.all([api.listSkills(employee), request<Catalog>(`/agents/${employee}/skills/catalog/available`)]).then(
       ([skills, catalog]) => { if (active) setState({ skills, catalog }); },
       (e) => { if (active) setError(String(e)); },
     );
     return () => { active = false; };
   }, [employee, attempt]);
-  if (error) return <div role="alert">能力清单读取失败。 <button type="button" className="dp-link" onClick={() => setAttempt(attempt + 1)}>重新读取</button></div>;
+  if (error) return <div role="alert">能力清单读取失败。 <button type="button" className="dp-link" onClick={refresh}>重新读取</button></div>;
   if (!state) return <small role="status">正在读取能力清单…</small>;
   const available = state.catalog.available.filter(s => !s.enabled && !s.conflict);
   const projectSkills = state.catalog.project_skills ?? [];
@@ -46,7 +49,7 @@ export function StaffCapabilities({ employee }: { employee: number }) {
       <small>{!weekly.enabled ? (weekly.blocked_reason ?? "已停用")
         : !weekly.dispatch_enabled ? "已登记，等待启动每周派工" : "下次派工 " + new Date(weekly.next_due).toLocaleString("zh-CN")}</small>
       {weekly.enabled && <button type="button" className="dp-link" onClick={async () => {
-        try { await request(`/staff/weekly-knowledge/${employee}`, {method:"DELETE"}); setAttempt(x => x + 1); }
+        try { await request(`/staff/weekly-knowledge/${employee}`, {method:"DELETE"}); refresh(); }
         catch (e) { setError(String(e)); }
       }}>停用周计划</button>}
     </section>}
