@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.background import run_every
+from app.core.history_maintenance import HistoryMaintenanceMiddleware, pending as history_reset_pending
 from app.core.tenant_jobs import for_each, per_tenant
 from app.db import tenant_schema
 from app.core.config import settings
@@ -32,6 +33,9 @@ THREAD_SWEEP_INTERVAL_SECONDS = 15
 async def _steward_scan():
     from app.services import steward_suggestions
     while True:
+        if history_reset_pending():
+            await asyncio.sleep(5)
+            continue
         try:
             async with thread_runtime.session() as db:
                 delay = await steward_suggestions.scan(db, settings.STEWARD_STRICT_OWNER)
@@ -234,6 +238,7 @@ app = FastAPI(lifespan=lifespan)
 # Owner sign-in, paired devices, Host/Origin allowlist and CSRF (docs/AUTH.md).
 # Innermost: under the desktop profile LaunchAuthMiddleware has already demanded
 # the launch token, and this one then steps aside.
+app.add_middleware(HistoryMaintenanceMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(DesktopAccountMiddleware)
 

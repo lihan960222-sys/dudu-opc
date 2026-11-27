@@ -566,6 +566,10 @@ async def start_turn(
     ThreadBusy if a turn is already running (the database refuses a second one),
     ThreadNotFound if the thread does not exist."""
     await begin_write(db)
+    from app.core.history_maintenance import pending as history_reset_pending
+    if history_reset_pending():
+        await db.rollback()
+        raise ThreadBusy(thread_id)
     thread = (
         await db.execute(select(Thread).where(Thread.id == thread_id).with_for_update())
     ).scalar_one_or_none()

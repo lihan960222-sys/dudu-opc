@@ -69,6 +69,12 @@ namespace Dudu {
             if(Active > 0) throw new TimeoutException("Dudu worker processes are still stopping.");
         }
         public int Run(string executable, string arguments, string cwd, EventWaitHandle stop) {
+            return RunManaged(executable, arguments, cwd, stop, null, null, null);
+        }
+        public bool MaintenanceRequested { get; private set; }
+        public int RunManaged(string executable, string arguments, string cwd, EventWaitHandle stop,
+                              string marker, Func<bool> prepare, Action started) {
+            MaintenanceRequested = false;
             if (stop.WaitOne(0)) return 0;
             Quiet();
             var start = new Startup { size = Marshal.SizeOf(typeof(Startup)), flags = 1, show = 0 };
@@ -79,8 +85,18 @@ namespace Dudu {
                 try {
                     Check(AssignProcessToJobObject(job,child.process));
                     Check(ResumeThread(child.thread) != 0xffffffff);
+                    if (started != null) started();
                 } catch { TerminateProcess(child.process,1); throw; }
-                uint done = WaitForMultipleObjects(2,new[]{stop.SafeWaitHandle.DangerousGetHandle(),child.process},false,Infinite);
+                var handles = new[]{stop.SafeWaitHandle.DangerousGetHandle(),child.process};
+                uint done;
+                do {
+                    done = WaitForMultipleObjects(2,handles,false,prepare == null ? Infinite : 1000u);
+                    if (done == 258 && System.IO.File.Exists(marker) && prepare()) {
+                        Stop();
+                        MaintenanceRequested = true;
+                        return 0;
+                    }
+                } while (done == 258);
                 if(done == 0) { Stop(); return 0; }
                 Check(done == 1);
                 uint code; Check(GetExitCodeProcess(child.process,out code));

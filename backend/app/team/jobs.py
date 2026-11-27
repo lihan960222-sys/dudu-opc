@@ -75,6 +75,9 @@ class Jobs:
         stopped = ()
         async with self.rt.session() as db:
             await begin_write(db)
+            from app.core.history_maintenance import pending as history_reset_pending
+            if history_reset_pending():
+                raise service.TeamError("maintenance", "工作台正在清理历史记录，请稍后派工。")
             team = await service.team_for(db, self.rt.owner_id, lock=True)
             if team is None or run.ctx.team is None or team.id != run.ctx.team.team_id:
                 raise service.TeamError('no_team', 'This turn has no team.')

@@ -49,7 +49,9 @@ try {
         }
         $exitCode = $group.Run($python,'-m app.server migrate',$backend,$stop)
         if ($exitCode -eq 0) {
-            $exitCode = $group.Run($python,"-m app.server --host 127.0.0.1 --port $Port",$backend,$stop)
+            . (Join-Path $PSScriptRoot 'steward-history-reset.ps1')
+            $env:DUDU_HISTORY_RESET_LAUNCHER = '1'
+            $exitCode = Invoke-StewardWebLoop $scope $python $backend $stop
         }
     }
     exit $exitCode

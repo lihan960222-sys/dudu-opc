@@ -22,6 +22,7 @@ from app.db.transactions import begin_write
 from app.routers.agents import _agent_or_404, _restricted, get_runtime, _check_engine
 from app.routers.employee_codex_login import router as employee_codex_login_router
 from app.routers.shared_library import router as shared_library_router
+from app.routers.history_reset import router as history_reset_router
 from app.routers.feishu_access import router as feishu_access_router
 from app.routers.weekly_knowledge import router as weekly_knowledge_router
 from app.routers.feishu_owner_oauth import owner_browser, signed_in_owner_browser
@@ -44,6 +45,7 @@ router.include_router(employee_codex_login_router)
 router.include_router(feishu_access_router)
 router.include_router(weekly_knowledge_router)
 router.include_router(shared_library_router)
+router.include_router(history_reset_router)
 
 
 class StaffingGrant(BaseModel):

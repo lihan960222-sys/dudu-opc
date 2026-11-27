@@ -19,6 +19,7 @@ import type { TeamSetupPlan } from "@/lib/transcript";
 import { TeamSetupCard } from "../chat/TeamCards";
 import { StaffEditor } from "./StaffEditor";
 import { SharedLibraryReviews } from "./SharedLibrary";
+import { HistoryReset } from "./HistoryReset";
 import { useSession } from "../AuthGate";
 import { canManageProjectTerminal } from "@/lib/directory-mode";
 import { ReportingBoard } from "./ReportingBoard";
@@ -805,6 +806,7 @@ export function Workbench({ page, onChanged }: { page: ManagementSection; onChan
                 </div>
               ))}
               </section>
+              {canManageProjectTerminal(session) && <HistoryReset />}
               </div>
             </>
           )}

@@ -263,3 +263,8 @@
 #workbench .dp-cap-catalog summary{cursor:pointer}
 #workbench .dp-profiletabs{overflow-x:auto}
 #workbench .dp-profiletabs button{white-space:nowrap}
+#workbench .dp-history-reset {min-width:0;align-self:start}
+#workbench .dp-history-reset p {margin:8px 0 12px;color:var(--sub);line-height:1.55}
+#workbench .dp-history-reset .dp-error {color:var(--danger)}
+#workbench .dp-history-confirm {border:1px solid var(--line);border-radius:12px;padding:14px}
+#workbench .dp-button.danger {color:var(--danger);border-color:currentColor}
