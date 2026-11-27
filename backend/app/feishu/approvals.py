@@ -159,6 +159,17 @@ def _card_display(approval, label, detail):
             action = ("强制结束" if stop[2] else "结束") + f"进程，进程号 {stop[1]}"
         else:
             action = "申请运行终端命令（预览）"
+            if len(cmd) > 150 or "\n" in cmd:
+                operations = [label for pattern, label in (
+                    (r"\bGet-(?:Process|CimInstance)\b", "查询正在运行的程序"),
+                    (r"\bStart-Process\b", "启动程序"),
+                    (r"\.MainWindow(?:Title|Handle)\b", "检查窗口"),
+                    (r"\bSelect-String\b", "搜索文字"),
+                    (r"\.CloseMainWindow\(", "请求关闭窗口"),
+                    (r"\bStop-Process\b", "结束进程"),
+                ) if re.search(pattern, cmd, re.I)]
+                action = ("这一次会批准整段脚本。可辨认的操作包括" + "、".join(operations)
+                          if operations else "这一次会批准整段脚本，目前无法可靠概括其具体操作。")
         first_line = cmd.splitlines()[0]
         snippet = first_line[:100]
         if len(snippet) < len(cmd):
@@ -194,7 +205,7 @@ def _card_display(approval, label, detail):
         purpose = "所属任务：" + (brief if len(brief) <= 120 else brief[:120] + "…") + "\n员工没有单独说明这一步的用途。"
     else:
         purpose = "员工没有单独说明这一步的用途。"
-    return {"title":label, "summary":f"{summary}\n{purpose}",
+    return {"title":label, "summary":f"{purpose}\n{summary}",
             "details":detail if tool == "feature_files.write_text" else json.dumps(args, ensure_ascii=False, indent=2)}
 
 
