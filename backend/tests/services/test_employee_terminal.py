@@ -14,6 +14,27 @@ def project_context(root):
               consult_only=False, aborted=False, turn_id=6)
 
 
+def test_new_employee_runs_use_native_tools_and_keep_external_integrations(tmp_path):
+    from app.services import codex_adapter
+    from app.team.bridge import TeamBridge
+
+    ctx = project_context(tmp_path)
+    from dataclasses import replace
+    ctx.team = replace(ctx.team, feishu_tools=("feishu_create_document",))
+    bridge = TeamBridge(NS(), NS(ctx=ctx, turn_id=ctx.turn_id))
+    try:
+        flags = bridge.launch.args
+        assert set(flags).isdisjoint({"--project-command", "--project-edit", "--project-read",
+                                      "--local-inspection", "--project-create", "--peer-files"})
+        catalog = set(codex_adapter.feature_team_tools(ctx))
+        assert {"run_project_command", "create_project_text", "replace_project_text", "list_project_files",
+                "read_project_text", "inspect_local_path"}.isdisjoint(catalog)
+        assert {"employee_capabilities", "feishu_create_document", "read_task_reference",
+                "download_task_reference", "deliver_project_file", "use_project_release"} <= catalog
+    finally:
+        bridge.folder.rmdir()
+
+
 def test_reviewed_commands_require_an_employee_work_order(tmp_path):
     ctx = project_context(tmp_path)
     assert employee_terminal.available(ctx)

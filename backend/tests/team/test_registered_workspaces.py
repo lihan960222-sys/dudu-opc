@@ -107,15 +107,16 @@ async def test_read_only_native_turn_discovers_and_inspects_permitted_colleague(
     args = {"agent_id": target.id, "path": "result.md"}
     try:
         tools = {"list_peer_files", "read_peer_text"}
-        assert tools <= set(feature_team_tools(ctx))
+        assert tools.isdisjoint(feature_team_tools(ctx))
         launch = bridge.launch
         list_tools = subprocess.run([launch.command, *launch.args], env={**os.environ, **launch.env},
             input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n",
             text=True, capture_output=True, check=True, timeout=15)
         listed = {t["name"] for t in json.loads(list_tools.stdout)["result"]["tools"]}
         assert listed == set(feature_team_tools(ctx))
-        assert {"list_project_files","read_project_text"} <= listed
-        assert "replace_project_text" not in listed
+        assert {"list_project_files", "read_project_text", "replace_project_text", "run_project_command",
+                "create_project_text", "inspect_local_path", *tools}.isdisjoint(listed)
+        assert "read_task_reference" in listed
         assert all(policy.automatic("mcp__team__" + tool, "plan", team_ctx, args)[0] == "allowed" for tool in tools)
         from tests.services.test_codex_adapter import _turn
         engine = _turn("plan", project_runtime=project, workspace=project.root, feature_workspace=str(project.root),
@@ -125,15 +126,16 @@ async def test_read_only_native_turn_discovers_and_inspects_permitted_colleague(
         engine.gate = SimpleNamespace(open=AsyncMock(return_value=None))
         cases = {**dict.fromkeys(tools,args),"list_project_files":{"limit":2},"read_project_text":{"path":"fixture.md"}}
         for request_id, (tool, call_args) in enumerate(cases.items(), start=7):
-            await engine._item_started({"id": tool, "type": "mcpToolCall", "server": "team", "tool": tool, "arguments": call_args})
             await engine._server_request({"id": request_id, "method": "mcpServer/elicitation/request", "params": {
                 "serverName": "team", "message": f'run tool "{tool}"',
                 "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": call_args}}})
-            assert engine.gate.open.await_args.kwargs["tool"] == "mcp__team__" + tool
+            engine.rpc.respond.assert_called_with(request_id, {"action": "decline"})
+        engine.gate.open.assert_not_awaited()
         assert not engine.breach and engine.tools and not engine.project.writable
         caps = await bridge.execute("employee_capabilities", {})
         assert caps["read_only_peers"] == [{"id": target.id, "name": target.name, "role_path": target.role_path}]
-        assert tools <= set(caps["granted_tools"])
+        assert tools.isdisjoint(caps["granted_tools"])
+        # Historical calls retain their original file scope and exact-approval rules.
         own_root = Path(reader.role_path)
         (own_root / "fixture.md").write_text("owned evidence", encoding="utf-8")
         from app.services.thread_runtime import ActiveRun, ThreadApprovalGate
@@ -168,7 +170,8 @@ async def test_read_only_native_turn_discovers_and_inspects_permitted_colleague(
                                                    {"name": "b-tests", "folder": True}], "truncated": True}
         listed_receipt = emitted.await_args.args[1]["file_receipts"][0]
         assert listed_receipt["count"] == 2 and listed_receipt["truncated"] is True
-        schemas = {tool["name"]: tool["inputSchema"] for tool in json.loads(list_tools.stdout)["result"]["tools"]}
+        from app.team.mcp_server import PEER_FILES
+        schemas = {tool["name"]: tool["inputSchema"] for tool in PEER_FILES}
         assert set(schemas["list_peer_files"]["properties"]) == {"agent_id", "path", "limit", "folders_only"}
         assert set(schemas["list_peer_files"]["required"]) == {"agent_id", "path"}
         assert set(schemas["read_peer_text"]["properties"]) == {"agent_id", "path"}
@@ -235,6 +238,11 @@ async def test_employee_finds_recent_host_logs_through_its_readonly_tool(session
     vendor = tmp_path / "AppData" / "Vendor"
     logs = vendor / "session" / "logs"
     logs.mkdir(parents=True)
+    # The application log fixture is outside the service's private temporary folder.
+    import tempfile
+    service_temp = tmp_path / "private-temp"
+    service_temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(service_temp))
     logfile = logs / "session.log"
     logfile.write_text("private contents", encoding="utf8")
     monkeypatch.setenv("LOCALAPPDATA", str(vendor.parent))
@@ -257,7 +265,7 @@ async def test_employee_finds_recent_host_logs_through_its_readonly_tool(session
     bridge = TeamBridge(SimpleNamespace(session=sessions, owner_id=owner),run)
     try:
         args = {"operation":"find", "path":str(vendor), "pattern":"*.log", "limit":1}
-        assert "inspect_local_path" in feature_team_tools(ctx)
+        assert "inspect_local_path" not in feature_team_tools(ctx)
         assert tool_policy.automatic("mcp__team__inspect_local_path","plan",run,args)[0] == "allowed"
         result = await bridge.execute("inspect_local_path", args)
         assert result["scan_complete"] and result["entries"][0]["path"] == str(logfile)

@@ -66,19 +66,9 @@ class TeamBridge:
             extra.append('--employee-only')
         if getattr(self.run.ctx.team, 'scheduled_knowledge', False):
             extra.append('--feishu-only')
-        from app.services import employee_terminal
-        flags = {'run_project_command':'--project-command','read_project_text':'--project-read',
-                 'replace_project_text':'--project-edit'}
-        allowed = employee_terminal.allowed_tools(self.run.ctx)
-        if "list_project_files" in allowed and self.run.ctx.project_runtime.writable and self.run.ctx.approval_mode != "plan":
-            extra.append("--project-release")
-        extra.extend(flag for name, flag in flags.items() if name in allowed)
-        if "inspect_local_path" in allowed:
-            extra.append("--local-inspection")
-        if "create_project_text" in allowed:
-            extra.append("--project-create")
-        if "list_peer_files" in allowed:
-            extra.append("--peer-files")
+        from app.services.employee_resources import project_integrations
+        for tool in project_integrations(self.run.ctx):
+            extra.extend(["--project-integration", tool])
         for tool in getattr(self.run.ctx.team, 'feishu_tools', ()):
             extra.extend(['--employee-tool', tool])
         if getattr(sys, 'frozen', False):
@@ -321,12 +311,9 @@ class TeamBridge:
                     if connector_tools is None and run.ctx.composio_launch is not None:
                         connector_tools = [item["name"] for item in composio_tools.mcp_tools(run.ctx.composio_apps or {})]
                     peers = []
-                    peer_tools = set()
                     if project and "list_peer_files" in employee_terminal.allowed_tools(run.ctx, live=True):
                         team = await service.team_for(db, rt.owner_id)
                         peers = list((await team_workspaces.turn_peers(db, team, project)).values())
-                        if peers:
-                            peer_tools.update(employee_terminal.PEER_READ_TOOLS)
                     elif not project and getattr(run.ctx, "peer_workspaces", None):
                         from app.services.feature_files import FeatureFiles
                         files = FeatureFiles(Path(run.ctx.feature_workspace), False, run.ctx.peer_workspaces)
@@ -346,7 +333,7 @@ class TeamBridge:
                                                    if t["name"] in feishu_tools},
                             "project_skills":[s for s in agent_skills.project_skill_catalog(project.root, caller.id) if s["enabled"]] if project else [],
                             "granted_tools":sorted(
-                        feishu_tools|peer_tools|set(run.ctx.community_tools)|set(connector_tools or []))}
+                        feishu_tools|set(run.ctx.community_tools)|set(connector_tools or []))}
                 management.strict(args,{"template_id","name"})
                 try:
                     template = args.get("template_id")

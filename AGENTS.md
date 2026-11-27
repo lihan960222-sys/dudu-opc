@@ -5,6 +5,12 @@
 - 每项独立改动单独提交。提交说明写清用户能看到的变化、修改原因，以及已验证的范围。每次上线前先提交并核对版本号。
 - 交付时给出提交号和发布分支的历史链接，分别说明本地提交、推送和实际部署的状态。
 
+## 员工派工与执行
+
+- 大嘴转交老板的目标、限制和验收条件。可以补充已核实的背景，具体怎么做由员工决定。
+- 员工在已启用的本机 Codex 项目内使用原生终端和编辑器。Dudu 传递工单、状态、业务答复和原生审批结果。飞书等外部服务使用员工自己的连接。
+- 修改员工工具或审批时，验收要检查员工实际收到的工具清单和指令，并检查审批决定是否回到发起请求的调用。仅验证某条原生路径成功，不足以排除并行的旧执行入口。
+
 ## Test workflow
 
 - For a narrow change, run the smallest tests that cover the changed behavior first. Find test commands in the relevant package and CI workflow; avoid running the entire backend suite as the default local check.

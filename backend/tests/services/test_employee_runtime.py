@@ -263,7 +263,7 @@ def test_workstation_profiles_keep_host_and_project_writes_separate(tmp_path, mo
     assert employee_runtime.native_enabled(project.owner_id, 8)
     assert not employee_runtime.native_enabled("another owner", 8)
     fs = tomllib.loads("fs=" + project._filesystem())["fs"]
-    assert fs[":root"] == "read" and fs[str(project.root)] == "read"
+    assert fs[":root"] == "read" and fs[str(project.root)] == fs[str(project.task_dir)] == "write"
     assert fs[str(pinned)] == "read" and fs[str(foreign)] == "deny"
     assert fs[str(settings.SQLITE_FILE.parent)] == "deny"
     assert fs[str(project.scratch)] == "write"
@@ -274,6 +274,7 @@ def test_workstation_profiles_keep_host_and_project_writes_separate(tmp_path, mo
     assert reviewed[str(project.root / "AGENTS.md")] == reviewed[str(project.root / "任务")] == "read"
     assert "write" not in tomllib.loads("fs=" + project._filesystem(check=True))["fs"].values()
     reader = replace(project, writable=False)
+    assert tomllib.loads("fs=" + reader._filesystem())["fs"][str(reader.root)] == "read"
     assert reader.reviewed_permission_name != project.reviewed_permission_name
     assert not any(reader.reviewed_permission_name in opt for opt in reader.cli_options())
     assert not any("network.enabled=true" in opt for opt in project.cli_options())

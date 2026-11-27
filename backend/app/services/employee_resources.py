@@ -26,6 +26,16 @@ def tool_names(reviewed, ctx):
     return (READ,)
 
 
+def project_integrations(ctx):
+    """Only explicitly granted integrations are added beside native Codex project tools."""
+    from app.services import employee_terminal
+    reviewed = employee_terminal.allowed_tools(ctx)
+    names = tool_names(reviewed, ctx)
+    if DELIVER in names:
+        return (*names, "use_project_release")
+    return names
+
+
 def model_result(value):
     """Redact only on the model-facing copy, leaving local files and digests intact."""
     if isinstance(value, dict):

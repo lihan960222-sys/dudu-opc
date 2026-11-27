@@ -133,12 +133,8 @@ def feature_team_tools(ctx):
     feishu = getattr(team, "feishu_tools", ())
     if getattr(ctx, "scheduled_knowledge", False):
         return tuple(feishu)
-    from app.services import employee_terminal
-    reviewed = employee_terminal.allowed_tools(ctx)
-    from app.services.employee_resources import tool_names
-    employee = ("employee_capabilities","enable_local_skill",*feishu,*reviewed,*tool_names(reviewed, ctx))
-    if "list_project_files" in reviewed and ctx.project_runtime.writable and ctx.approval_mode != "plan":
-        employee += ("use_project_release",)
+    from app.services.employee_resources import project_integrations
+    employee = ("employee_capabilities", "enable_local_skill", *feishu, *project_integrations(ctx))
     if team and not team.delegation_enabled:
         return employee
     return ("list_agents", "propose_direct_report", "delegate", "answer_job_question", "ask_agent", *employee)
@@ -724,7 +720,7 @@ class _CodexTurn:
             # app still gates every attached MCP call; native tools stay read-only/denied.
             self.policy = CodexPolicy('untrusted', 'read-only', 'readOnly', 'user')
         if self.project:
-            approval = "untrusted" if self.mode == "ask" and not getattr(self.project, "local_workstation", False) else "on-request"
+            approval = "untrusted" if self.mode == "ask" else "on-request"
             self.policy = CodexPolicy(approval, "", "", "user")
         elif self.feature:
             self.policy = CodexPolicy("untrusted", "read-only", "readOnly", "user")
@@ -918,29 +914,11 @@ class _CodexTurn:
                 return self._failed("Could not confirm scoped task tools.", "codex_error")
             if not self.project or not self.tools:
                 common["environments"] = []
-            if self.project and "list_project_files" in feature_team_tools(self.ctx):
-                note = ("For ordinary project inspections use team.list_project_files first and team.read_project_text "
-                        "for existing text. They use the assigned project directory and return read receipts.")
-                instructions = f"{instructions}\n\n{note}" if instructions else note
-            if self.project and "run_project_command" in feature_team_tools(self.ctx):
-                note = ("For other work, use the native terminal and editor within the named project permissions. "
-                        "If a project check needs review, use team.run_project_command with its complete argv and relative cwd. "
-                        "An unchanged check recorded by your assigning steward can run read-only. Other operations need an individual review.")
-                instructions = f"{instructions}\n\n{note}" if instructions else note
-            if self.project and getattr(self.project, "local_workstation", False):
-                note = ("Use team.inspect_local_path for local diagnostics, including application logs under AppData. "
-                        "To find recent files or logs, use its find operation with a filename glob and the narrowest "
-                        "relevant folder. Results are newest first. Check scan_complete before claiming full coverage. "
-                        "Run local programs by absolute path within your current permissions. Use TEMP for intermediate files. "
-                        "Use team.create_project_text and team.replace_project_text for assigned project edits. "
-                        "Ask for review before destructive work or work outside the project. Never print, transmit or include credentials in logs or deliverables.")
-                instructions = f"{instructions}\n\n{note}" if instructions else note
-            if self.project and "list_peer_files" in feature_team_tools(self.ctx):
-                note = ("For a colleague's project, use team.employee_capabilities for the registered name, ID and "
-                        "folder. Use team.list_peer_files and team.read_peer_text with that ID and a relative path. "
-                        "For N folder names use folders_only=true and limit=N. Return up to N verified names and "
-                        "finish even when truncated is true. Check the total only if the owner asks for it. "
-                        "These tools are read-only and return inspection receipts.")
+            if self.project and not self.scheduled_knowledge:
+                note = ("Use the native Codex shell and editor in this project for local work. "
+                        "For a colleague's directory, look up its registered path in team.employee_capabilities. "
+                        "When requesting approval explain in the owner's language what you want to do, "
+                        "what it affects and why the task needs it.")
                 instructions = f"{instructions}\n\n{note}" if instructions else note
         launch = self.ctx.memory_launch
         if self.computer is not None:
@@ -977,9 +955,6 @@ class _CodexTurn:
                 "command": team_launch.command, "args": list(team_launch.args), "env": dict(team_launch.env),
                 "default_tools_approval_mode": "prompt",
             }
-            if self.project and "run_project_command" in feature_team_tools(self.ctx):
-                from app.team.mcp_server import MAILBOX_TIMEOUT_SECONDS
-                common["config"]["mcp_servers"]["team"]["tool_timeout_sec"] = MAILBOX_TIMEOUT_SECONDS
         if self.ctx.composio_launch is not None:
             app_launch = self.ctx.composio_launch
             levels = self.ctx.composio_apps or {}
@@ -1784,32 +1759,12 @@ class _CodexTurn:
                     self.rpc.respond(rid, payload(False))
                     return
                 name, tool_input = found
-                from app.team.mcp_server import PROJECT_COMMAND
                 if (name not in _team_approval_tools(self.ctx, feature=bool(self.feature)) or
                         (self.feature and name == "ask_agent" and tool_input.get("mode") != "consult")):
                     self.rpc.respond(rid, payload(False))
                     return
                 tool, approval_kind = "mcp__team__" + name, "other"
                 summary = summarize_tool(tool, tool_input)
-                if name in ('list_project_files','read_project_text','create_project_text','replace_project_text'):
-                    if not project or name not in feature_team_tools(self.ctx):
-                        self.rpc.respond(rid, payload(False))
-                        return
-                    operation = {'list_project_files':'列出', 'read_project_text':'读取', 'replace_project_text':'修改', 'create_project_text':'新建'}[name]
-                    summary = f"{operation}岗位文件 {str(tool_input.get('path',''))[:150]}"
-                    approval_kind = 'file_write' if name in ('create_project_text','replace_project_text') else 'other'
-                if name == PROJECT_COMMAND['name']:
-                    from app.services import employee_terminal
-                    import subprocess
-                    try:
-                        if not employee_terminal.available(self.ctx) or not project:
-                            raise ValueError("Not an employee command")
-                        argv, _cwd, relative = employee_terminal.checked_command(project, tool_input)
-                    except (OSError, ValueError):
-                        self.rpc.respond(rid, payload(False))
-                        return
-                    approval_kind = 'command'
-                    summary = f"{relative}  {subprocess.list2cmdline(argv)}"[:200]
             elif browser_call:
                 found = self._computer_call(server, text, meta)
                 if found is None:

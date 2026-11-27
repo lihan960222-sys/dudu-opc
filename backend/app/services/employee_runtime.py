@@ -486,9 +486,6 @@ class ProjectRuntime:
               **{str(path): "read" for path in self.readable_roots if not check}, str(_default_service_root()): "deny",
               str(self.profile.parents[3]): "deny", str(_service_root()): "deny"}
         if self.local_workstation:
-            # A general subprocess can unlink any writable file. Normal project edits
-            # go through scoped file tools. Only an explicitly reviewed command may write.
-            fs[str(self.root)] = "write" if reviewed and self.writable else "read"
             if not check:
                 fs[":root"] = "read"
                 private = self.private_read_roots() + self.application_data_roots()
@@ -498,7 +495,7 @@ class ProjectRuntime:
                 fs.update({str(p): "deny" for p in self.peer_control_paths()})
                 fs[str(self.scratch)] = "write"
                 fs[str(self.root / "任务")] = "read"
-                if reviewed and self.writable:
+                if self.writable:
                     fs[str(self.task_dir)] = "write"
                 for name in ("AGENTS.md", "MEMORY.md", "memory", "skills", ".agents", ".codex", ".git"):
                     fs[str(self.root / name)] = "read"

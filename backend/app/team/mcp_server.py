@@ -166,10 +166,13 @@ SHARED_RELEASE = {"name": "publish_shared_release",
                   "inputSchema": schema({**RELEASE_ID, **RELEASE_SOURCE}, (*RELEASE_ID, "kind", "url"))}
 
 
+PROJECT_INTEGRATIONS = (PUBLIC_READ, PUBLIC_DOWNLOAD, DELIVER_FILE, PROJECT_RELEASE)
+
+
 class Server:
     def __init__(self, mailbox, escalations=False, project_consult=False, feishu_tools=(), employee_only=False,
                  feishu_only=False, project_command=False, project_read=False, project_edit=False, peer_files=False,
-                 steward=False, project_create=False, project_release=False, local_inspection=False):
+                 steward=False, project_create=False, project_release=False, local_inspection=False, project_integrations=()):
         self.mailbox = Path(mailbox)
         if feishu_only:
             self.tools = [tool for tool in FEISHU_TOOLS if tool["name"] in feishu_tools]
@@ -202,6 +205,7 @@ class Server:
         if employee_only:
             self.tools = []
         if project_consult or employee_only:
+            self.tools.extend(t for t in PROJECT_INTEGRATIONS if t["name"] in project_integrations)
             if local_inspection:
                 self.tools.extend(t for t in PROJECT_FILES if t['name']=='inspect_local_path')
             if project_release:
@@ -269,6 +273,7 @@ def main():
     parser.add_argument('--project-consult', action='store_true')
     parser.add_argument('--employee-only', action='store_true')
     parser.add_argument('--feishu-only', action='store_true')
+    parser.add_argument('--project-integration', action='append', choices=[t["name"] for t in PROJECT_INTEGRATIONS], default=[])
     parser.add_argument('--project-command', action='store_true')
     parser.add_argument('--project-read', action='store_true')
     parser.add_argument('--project-edit', action='store_true')
@@ -282,7 +287,7 @@ def main():
     server = Server(arguments.mailbox, arguments.escalations, arguments.project_consult, arguments.employee_tool,
                     arguments.employee_only, arguments.feishu_only, arguments.project_command,
                     arguments.project_read, arguments.project_edit, arguments.peer_files, arguments.steward,
-                    arguments.project_create, arguments.project_release, arguments.local_inspection)
+                    arguments.project_create, arguments.project_release, arguments.local_inspection, arguments.project_integration)
     for line in sys.stdin:
         try:
             if len(line) > 100000:
