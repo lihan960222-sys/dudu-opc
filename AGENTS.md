@@ -1,5 +1,10 @@
 # Repository Agent Instructions
 
+## Dudu 发布记录
+
+- 每项独立改动单独提交。提交说明写清用户能看到的变化、修改原因，以及已验证的范围。每次上线前先提交并核对版本号。
+- 交付时给出提交号和发布分支的历史链接，分别说明本地提交、推送和实际部署的状态。
+
 ## Test workflow
 
 - For a narrow change, run the smallest tests that cover the changed behavior first. Find test commands in the relevant package and CI workflow; avoid running the entire backend suite as the default local check.
