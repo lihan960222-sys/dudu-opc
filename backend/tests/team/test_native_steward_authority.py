@@ -50,7 +50,8 @@ def test_native_requests_use_effective_grants_across_projects_and_protocol_shape
 
 
 @pytest.mark.asyncio
-async def test_real_pending_request_reaches_steward_once_and_rechecks_before_delivery(sessions, owner, cleanup_jobs, tmp_path, monkeypatch):
+@pytest.mark.parametrize('nested',[False,True])
+async def test_real_pending_request_reaches_steward_once_and_rechecks_before_delivery(sessions, owner, cleanup_jobs, tmp_path, monkeypatch, nested):
     from app.team.jobs import Jobs
     monkeypatch.setattr(settings,'STEWARD_STRICT_OWNER',owner)
     # Construct the journal without consulting or starting an installed engine.
@@ -74,9 +75,25 @@ async def test_real_pending_request_reaches_steward_once_and_rechecks_before_del
         job = await db.get(AgentJob,job_id)
         holder = await db.get(AgentJob,job.root_id or job.parent_id)
         holder.assignee_thread_id = holder.requester_thread_id = chat.id
-        holder.requester_turn_id, holder.status = source.id, 'waiting'
+        holder.requester_turn_id, holder.status, holder.current_turn_id = source.id, 'running', reviewer.id
         job.requester_thread_id, job.requester_turn_id = chat.id, source.id
         job.status, job.reply, job.current_turn_id, job.approval_mode = 'running','resume',turn.id,'accept_edits'
+        if nested:
+            manager = await agent_store.create_agent(db,owner_id=owner,name='Supervisor',provider='codex',approval_mode='accept_edits')
+            await service.change_member(db,owner,manager.id)
+            manager.manager_agent_id, manager.delegation_enabled, manager.delegate_project_writes = lead.id,True,True
+            staff.manager_agent_id = manager.id
+            assigned = (await feature_tasks.route(db,owner_id=owner,agent_id=manager.id,project='reports',event_key='parent-source',title='Review work',text='Check'))['task_id']
+            mchat,_ = await feature_tasks.session_for(db,owner,assigned,model='gpt-unit',workspace_path=str(tmp_path))
+            mturn = await thread_store.start_turn(db,mchat.id,'Delegate review')
+            parent = AgentJob(owner_id=owner,kind='job',mode='work',reply='resume',depth=1,origin_kind='person',
+                root_id=holder.id,parent_id=holder.id,task_id=assigned,project='reports',assignment_epoch=1,status='waiting',
+                requester_agent_id=lead.id,requester_thread_id=chat.id,requester_turn_id=source.id,assignee_agent_id=manager.id,
+                assignee_thread_id=mchat.id,assignee_turn_id=mturn.id,approval_mode='accept_edits',brief='Audit',brief_hash='test')
+            db.add(parent)
+            await db.flush()
+            job.parent_id, job.depth, job.requester_agent_id = parent.id,2,manager.id
+            job.requester_thread_id, job.requester_turn_id = mchat.id,mturn.id
         args = {'permissions':{'fileSystem':{'read':[str(tmp_path/'reports')]}},'cwd':str(tmp_path)}
         request = await thread_store.create_approval(db,thread_id=thread.id,turn_id=turn.id,request_id='native-1',
             tool='codex.request_permissions',input=args,owner_token=turn.owner_token)
@@ -94,8 +111,18 @@ async def test_real_pending_request_reaches_steward_once_and_rechecks_before_del
     jobs = Jobs(rt)
     await jobs.reconcile()
     async with sessions() as db:
+        from sqlalchemy import select
+        from app.db.models import AgentJobInbox
+        inbox = list(await db.scalars(select(AgentJobInbox).where(AgentJobInbox.kind=='review:'+request.id)))
+        assert len(inbox)==1 and inbox[0].holder_id==holder.id
+        assert request.id in await jobs._resume_text(db,await db.get(AgentJob,holder.id),inbox)
         details = await steward_review.preview(db,owner,await db.get(AgentJob,job.id),await thread_store.get_approval(db,request.id))
         assert details and details['owner_request'] == 'Check the reports folder' and details['delegated_scope']
+        if nested:
+            live_manager = await db.get(type(manager),manager.id)
+            live_manager.delegate_project_writes = False
+            assert not await steward_review.preview(db,owner,await db.get(AgentJob,job.id),await thread_store.get_approval(db,request.id))
+            await db.rollback()
     decision = {**details,'decision':'allow','reason':'The requested report inspection needs these files.'}
     with pytest.raises(service.TeamError,match='no longer pending'):
         await steward_review.decide(rt,lead_run,{**decision,'request_digest':'another'},native=True)
@@ -106,6 +133,8 @@ async def test_real_pending_request_reaches_steward_once_and_rechecks_before_del
         approved = await thread_store.get_approval(db,request.id)
         live = await db.get(AgentJob,job.id)
         assert await steward_review.recheck_native_decision(db,live,target,approved) == (True,None)
+        assert not await steward_review.history(db,live,authority_profile=details['authority_profile'])
+        assert await thread_store.mark_allow_delivered(db,request.id,turn.owner_token)
         assert (await steward_review.history(db,live,authority_profile=details['authority_profile']))[0]['reason'] == decision['reason']
         assert not await steward_review.history(db,live,authority_profile='grant-has-changed')
         live.approval_mode = 'plan'

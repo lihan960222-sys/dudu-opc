@@ -22,7 +22,8 @@ async def assignment_current(db, job, *, lock=False):
         return False
     if job.depth > 1 and job.parent_id:
         parent = await db.get(AgentJob, job.parent_id)
-        if not parent or parent.outcome == "reassigned" or not await assignment_current(db, parent):
+        if (not parent or parent.owner_id != job.owner_id or parent.depth != job.depth-1
+                or parent.outcome == "reassigned" or not await assignment_current(db, parent, lock=lock)):
             return False
     if job.mode == "consult":
         return row.agent_id == job.requester_agent_id

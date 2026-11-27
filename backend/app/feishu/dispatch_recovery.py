@@ -322,23 +322,35 @@ async def checked_child(db,root,proof):
 async def followup_scope(db, root, inbox_ids, *, require_pending=False):
     child,_=await checked_child(db,root,await proof_for(db,root))
     inbox=list(await db.scalars(select(AgentJobInbox).where(AgentJobInbox.id.in_(inbox_ids),
-        AgentJobInbox.owner_id==root.owner_id,AgentJobInbox.holder_id==root.id,AgentJobInbox.job_id==child.id)))
+        AgentJobInbox.owner_id==root.owner_id,AgentJobInbox.holder_id==root.id)))
     require(len(inbox)==len(inbox_ids) and inbox)
-    question=any(item.kind=="needs_input" for item in inbox) and child.status=="needs_input" and bool(child.question)
+    question=any(item.job_id==child.id and item.kind=="needs_input" for item in inbox) and child.status=="needs_input" and bool(child.question)
     from app.team import steward_review
     approvals=[]
+    nested=[]
     for item in inbox:
+        require(item.job_id==child.id or item.kind.startswith('review:'))
         if item.kind.startswith("review:"):
             approval=await db.get(Approval,item.kind.partition(":")[2])
-            if await steward_review.preview(db,root.owner_id,child,approval):
+            target=child if item.job_id==child.id else await db.get(AgentJob,item.job_id)
+            details=await steward_review.preview(db,root.owner_id,target,approval) if target else None
+            if details and target.id==child.id:
                 approvals.append(approval.id)
+            elif details and details.get('review_holder_id')==root.id:
+                nested.append({'job':target.id,'turn':approval.turn_id,'approval':approval.id})
     if require_pending:
-        require(question or approvals,"员工问题或审批已处理。")
-    return {"job":child.id,"turn":child.assignee_turn_id,"question":bool(question),"approvals":approvals}
+        require(question or approvals or nested,"员工问题或审批已处理。")
+    return {"job":child.id,"turn":child.assignee_turn_id,"question":bool(question),"approvals":approvals,
+            **({'nested_approvals':nested} if nested else {})}
 
 
 def permits_followup(scope, tool, args):
-    if not isinstance(args,dict) or args.get("job_id")!=scope["job"]:
+    if not isinstance(args,dict):
+        return False
+    if tool=='mcp__team__review_employee_action' and any(row=={'job':args.get('job_id'),'turn':args.get('turn_id'),
+            'approval':args.get('approval_id')} for row in scope.get('nested_approvals',())):
+        return True
+    if args.get("job_id")!=scope["job"]:
         return False
     if tool=="mcp__team__answer_job_question":
         return scope["question"] and args.get("question_turn_id")==scope["turn"]

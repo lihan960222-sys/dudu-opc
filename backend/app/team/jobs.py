@@ -922,7 +922,7 @@ class Jobs:
                           'outcome': ('paused_no_live_approval' if r.outcome == 'awaiting_native_review' and not pending.get(r.id) and not r.current_turn_id else r.outcome), 'question_turn_id':r.assignee_turn_id if r.question else None, 'question': fence.text(r.question or '', 2000) or None,
                           'result': fence.text(r.result or '') if r.status in TERMINAL and r.requester_turn_id != run.turn_id else None} for r in rows if r.requester_turn_id != run.turn_id]}
 
-    async def _deliver_to_holder(self, db, job, kind):
+    async def _deliver_to_holder(self, db, job, kind, *, review_holder_id=None):
         """Queue a settled result or question for the row that handed this job
         out, when that row is still waiting to hear. Renews the wake budget."""
         if job.reply != 'resume' or job.parent_id is None:
@@ -946,6 +946,12 @@ class Jobs:
             elif (not holder.task_id or job.project != holder.project or job.root_id != holder.root_id
                   or job.depth != holder.depth + 1):
                 raise service.TeamError('invalid_parent', 'The report belongs to a different assignment.')
+            if review_holder_id is not None:
+                if not kind.startswith('review:') or review_holder_id != job.root_id:
+                    raise service.TeamError('invalid_parent','Invalid destination for the native request.')
+                holder = await db.get(AgentJob,review_holder_id,with_for_update=True)
+                if not holder or holder.owner_id!=job.owner_id or holder.kind!='root' or holder.assignee_agent_id!=team.lead_agent_id:
+                    return
             existing = select(AgentJobInbox.id).where(AgentJobInbox.job_id == job.id,
                 AgentJobInbox.holder_id == holder.id, AgentJobInbox.kind == kind)
             if kind == 'needs_input':
@@ -1259,8 +1265,9 @@ class Jobs:
                         for approval in rows:
                             kind = 'review:' + approval.id
                             if not await db.scalar(select(AgentJobInbox.id).where(AgentJobInbox.job_id==job.id, AgentJobInbox.kind==kind).limit(1)):
-                                if await steward_review.preview(db,self.rt.owner_id,live,approval):
-                                    await self._deliver_to_holder(db,live,kind)
+                                review = await steward_review.preview(db,self.rt.owner_id,live,approval)
+                                if review:
+                                    await self._deliver_to_holder(db,live,kind,review_holder_id=review.get('review_holder_id'))
                         await db.commit()
         async with self.rt.session() as db:
             stuck = list((await db.execute(select(AgentJob).where(AgentJob.owner_id == self.rt.owner_id, AgentJob.reply != 'wait', AgentJob.status == 'running',
@@ -1425,7 +1432,7 @@ class Jobs:
                         await db.rollback()
                         await self.settle(job_id,"failed","refused",detail=str(exc))
                         return
-                    if scope["question"] or scope["approvals"]:
+                    if scope["question"] or scope["approvals"] or scope.get('nested_approvals'):
                         recovery_followup=(row.id,ids)
                     else:
                         for item in items:
@@ -1537,6 +1544,14 @@ class Jobs:
             if teammate is None or teammate.archived_at is not None or teammate.team_id != (await db.get(Agent, holder.assignee_agent_id)).team_id:
                 reports.append({'job_id': job.id, 'teammate': name, 'status': job.status, 'outcome': job.outcome, 'result': None, 'withheld': 'The teammate is no longer on your team.'})
                 continue
+            if item.kind.startswith('review:'):
+                from app.team import steward_review
+                approval = await db.get(Approval,item.kind.split(':',1)[1])
+                details = await steward_review.preview(db,self.rt.owner_id,job,approval)
+                if details and holder.id == (details.get('review_holder_id') or job.parent_id):
+                    details['previous_decisions'] = await steward_review.history(db,job,authority_profile=details.get('authority_profile'))
+                    reviews.append(details)
+                continue
             if job.task_id and job.depth > 1 and job.mode == 'work' and teammate.manager_agent_id != holder.assignee_agent_id:
                 reports.append({'job_id': job.id, 'status': job.status, 'result': None,
                                 'withheld': 'The employee now reports to a different supervisor.'})
@@ -1552,13 +1567,6 @@ class Jobs:
                 if proposal:
                     reports.append({'job_id':job.id,'teammate':name,'hiring_proposal':proposal,
                                     'action':'Review with review_direct_report; escalate when uncertain.'})
-            elif item.kind.startswith('review:'):
-                from app.team import steward_review
-                approval = await db.get(Approval,item.kind.split(':',1)[1])
-                details = await steward_review.preview(db,self.rt.owner_id,job,approval)
-                if details:
-                    details['previous_decisions'] = await steward_review.history(db,job,authority_profile=details.get('authority_profile'))
-                    reviews.append(details)
             elif item.kind == 'needs_input':
                 questions.append({'job_id': job.id, 'teammate': name, 'question': fence.text(job.question or '', 2000),
                                   'question_turn_id':job.assignee_turn_id,

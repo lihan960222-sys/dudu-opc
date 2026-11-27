@@ -52,6 +52,11 @@ def test_supervisor_followup_is_limited_to_the_current_question_or_approval():
     bound={"job":22,"turn":33,"question":True,"approvals":["specific"]}
     assert recovery.permits_followup(bound,"mcp__team__answer_job_question",{"job_id":22,"question_turn_id":33,"answer":"known"})
     assert recovery.permits_followup(bound,"mcp__team__review_employee_write",{"job_id":22,"turn_id":33,"approval_id":"specific"})
+    nested = {**bound,"nested_approvals":[{"job":24,"turn":35,"approval":"descendant"}]}
+    exact = {"job_id":24,"turn_id":35,"approval_id":"descendant"}
+    assert recovery.permits_followup(nested,"mcp__team__review_employee_action",exact)
+    assert not recovery.permits_followup(nested,"mcp__team__review_employee_write",exact)
+    assert not recovery.permits_followup(nested,"mcp__team__review_employee_action",{**exact,"job_id":23})
     for name,values in (("answer_job_question",{"job_id":23,"question_turn_id":33}),
                         ("review_employee_write",{"job_id":22,"turn_id":33,"approval_id":"another"}),
                         ("delegate",{"agent_ids":[22]}),("feishu_edit_document",{})):

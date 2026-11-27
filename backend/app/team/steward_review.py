@@ -180,6 +180,29 @@ async def protect_active_scope(db, agent, *, shared_folders=False):
             current = await db.get(Agent, current.manager_agent_id)
 
 
+async def _review_root(db, job, team):
+    """Walk actual handoffs, never trust a child-supplied root reference or employee number."""
+    cursor = job
+    seen = set()
+    while cursor.parent_id and cursor.id not in seen:
+        seen.add(cursor.id)
+        parent = await db.get(AgentJob, cursor.parent_id, with_for_update=True)
+        if (not parent or parent.owner_id != job.owner_id or parent.origin_kind != 'person'
+                or parent.status not in ('running','needs_input','waiting','resume')
+                or parent.assignee_agent_id != cursor.requester_agent_id or parent.assignee_thread_id != cursor.requester_thread_id):
+            return None
+        if parent.kind == 'root':
+            if (parent.id == job.root_id and not parent.parent_id and parent.requester_agent_id == team.lead_agent_id
+                    and parent.assignee_agent_id == team.lead_agent_id and parent.requester_thread_id == parent.assignee_thread_id):
+                return parent
+            return None
+        if (parent.kind != 'job' or parent.mode != 'work' or not parent.task_id or parent.project != job.project
+                or cursor.depth != parent.depth+1 or parent.root_id != job.root_id):
+            return None
+        cursor = parent
+    return None
+
+
 async def preview(db, owner, job, approval):
     from app.services import employee_native_review
     from app.services.feature_tasks import assignment_current, project_runtime_for
@@ -192,17 +215,24 @@ async def preview(db, owner, job, approval):
             or approval.turn_id != job.current_turn_id or approval.turn_id != job.assignee_turn_id
             or not await assignment_current(db, job, lock=True)):
         return None
+    native = approval.tool in employee_native_review.TOOLS
     team = await service.team_for(db, owner, lock=True)
+    if not team or not team.lead_agent_id:
+        return None
+    root_job = await _review_root(db,job,team) if native else None
+    if native and not root_job:
+        return None
+    origin = root_job or job
     worker = await db.get(Agent, job.assignee_agent_id, with_for_update=True)
-    lead = await db.get(Agent, job.requester_agent_id, with_for_update=True)
+    lead = await db.get(Agent, origin.requester_agent_id, with_for_update=True)
     if (not team or not worker or not lead or lead.id != team.lead_agent_id or lead.id == worker.id
             or any(a.team_id != team.id or a.owner_id != owner or a.archived_at for a in (worker,lead))
-            or worker.manager_agent_id not in (None, lead.id)
+            or (not native and worker.manager_agent_id not in (None, lead.id))
             or not lead.delegation_enabled or not worker.role_path):
         return None
     thread = await db.get(Thread, approval.thread_id)
-    parent = await db.get(Thread, job.requester_thread_id)
-    original = await db.get(Turn, job.requester_turn_id)
+    parent = await db.get(Thread, origin.requester_thread_id)
+    original = await db.get(Turn, origin.requester_turn_id)
     card = await db.get(WorkItem, job.task_id)
     binding = await db.get(FeatureSession, approval.thread_id)
     if (not parent or parent.owner_id != owner or parent.agent_id != lead.id or parent.kind != 'chat'
@@ -214,15 +244,12 @@ async def preview(db, owner, job, approval):
         return None
     binding_ids = {'job_id':job.id, 'approval_id':approval.id, 'turn_id':approval.turn_id, 'task_id':card.id,
                    'assignment_epoch':job.assignment_epoch, 'employee_id':worker.id}
-    if approval.tool in employee_native_review.TOOLS:
+    if native:
         if (not (thread.provider_state or {}).get('employee_project') or worker.approval_mode not in NATIVE_DELEGATED_MODES
                 or await effective_job_mode(db, job) not in NATIVE_DELEGATED_MODES):
             return None
         # A worker's briefing or another agent's recollection cannot originate a native grant.
-        root_job = await db.get(AgentJob, job.root_id) if job.root_id else None
         source = original
-        if root_job and root_job.kind == 'root' and root_job.owner_id == owner and root_job.requester_thread_id == parent.id:
-            source = await db.get(Turn, root_job.requester_turn_id)
         if not source or source.thread_id != parent.id or source.origin != 'person':
             return None
         if source.person_id is None:
@@ -244,6 +271,7 @@ async def preview(db, owner, job, approval):
         from app.services.decision_log import redact
         from app.services.employee_approval_rules import _approval_profile
         return {**binding_ids, **details, 'owner_request':redact(context.original_text)[:4000],
+                'review_holder_id':root_job.id, 'reviewer_id':lead.id, 'reviewer_thread_id':parent.id,
                 'job_brief':redact(job.brief or '')[:2000], 'workspace':str(project.root),
                 'authority_profile':_approval_profile(project)}
     if original.person_id is not None or worker.approval_mode != 'accept_edits':
@@ -277,7 +305,7 @@ async def decide(rt, run, args, *, native=False):
         await begin_write(db)
         job = await db.get(AgentJob,args['job_id'],with_for_update=True)
         caller = await db.get(Turn,run.turn_id)
-        if (not job or job.requester_thread_id != run.thread_id or job.requester_agent_id != run.agent_id
+        if (not job or (not native and (job.requester_thread_id != run.thread_id or job.requester_agent_id != run.agent_id))
                 or not caller or caller.thread_id != run.thread_id or caller.owner_token != run.owner_token
                 or caller.person_id is not None or caller.status != 'running' or run.ctx.approval_mode == 'plan'):
             raise service.TeamError('outside_scope','Not the private dispatching steward.')
@@ -287,6 +315,11 @@ async def decide(rt, run, args, *, native=False):
         if (not details or (details.get('kind') == 'native_action') != native
                 or any(args.get(k)!=details[k] for k in keys)):
             raise service.TeamError('review_changed','The operation is outside the delegation or is no longer pending.')
+        if native:
+            holder = await db.get(AgentJob,details['review_holder_id'],with_for_update=True)
+            if (details['reviewer_id'] != run.agent_id or details['reviewer_thread_id'] != run.thread_id
+                    or holder.current_turn_id != run.turn_id):
+                raise service.TeamError('outside_scope','Only the steward handling this assignment can answer.')
         target = rt._runs.get(details['turn_id'])
         if not target or not target.ctx.feature_workspace or target.ctx.approval_mode == 'plan' or target.stop_requested or target.ctx.aborted:
             raise service.TeamError('turn_gone','The employee is no longer waiting for that operation.')
@@ -354,7 +387,7 @@ async def recheck_native_decision(db, job, run, approval):
     if not trace:
         return True, None
     team = await service.team_for(db, job.owner_id)
-    if (not team or trace.get('agent_id') != team.lead_agent_id or job.requester_agent_id != team.lead_agent_id
+    if (not team or trace.get('agent_id') != team.lead_agent_id or not await _review_root(db,job,team)
             or trace.get('job_id') != job.id or trace.get('assignment_epoch') != job.assignment_epoch
             or await effective_job_mode(db, job) not in NATIVE_DELEGATED_MODES):
         return False, None
@@ -374,7 +407,8 @@ async def history(db, job, *, authority_profile=None):
     query = query.where(WorkItem.owner_id==job.owner_id,WorkItem.agent_id==job.assignee_agent_id,FeatureScope.project==job.project,
                         FeatureSession.assignment_epoch==FeatureScope.assignment_epoch,Approval.status.in_(('allowed','denied')))
     if authority_profile:
-        query = query.where(Approval.tool.in_(employee_native_review.TOOLS), select(Event.id).where(
+        query = query.where(Approval.tool.in_(employee_native_review.TOOLS),
+            (Approval.status == 'denied') | Approval.delivered_at.is_not(None), select(Event.id).where(
             Event.turn_id==Approval.turn_id, Event.type=='approval.resolved', Event.data['approval_id'].as_string()==Approval.id,
             Event.data['authority_profile'].as_string()==authority_profile).exists())
     else:
