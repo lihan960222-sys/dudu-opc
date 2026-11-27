@@ -35,9 +35,9 @@ def initialize(db):
         db.execute("alter table approval_dm add column delivered_at real")
 
 
-def _exact_text(value, *, multiline=False):
+def _exact_text(value, *, multiline=False, limit=1200):
     from app.services.decision_log import redact
-    return (isinstance(value, str) and 0 < len(value) <= 1200
+    return (isinstance(value, str) and 0 < len(value) <= limit
             and not any(unicodedata.category(c).startswith("C") and not (multiline and c in "\r\n\t")
                         for c in value)
             and redact(value) == value)
@@ -57,6 +57,15 @@ def describe(approval, *, native=False):
     tool = approval.get("tool", "")
     args = approval.get("input") or {}
     if not isinstance(args, dict):
+        return None
+    if tool == "mcp__team__run_project_command" and set(args) == {"cwd", "argv"}:
+        argv = args["argv"]
+        if not (_exact_text(args["cwd"]) and isinstance(argv, list) and argv
+                and all(_exact_text(arg, multiline=True, limit=6000) for arg in argv)):
+            return None
+        exact = json.dumps(args, ensure_ascii=False)
+        if _exact_text(exact, limit=6000):
+            return f"在员工项目中运行命令。完整参数：{exact}"
         return None
     if native and tool == "Bash":
         cmd, cwd = args.get("command"), args.get("cwd")
@@ -123,7 +132,9 @@ _LOG_QUERY = re.compile(
 def _card_display(approval, label, detail):
     """Called only after describe() has approved the fields for this channel."""
     tool, args = approval["tool"], approval["input"]
-    if tool == "Bash":
+    if tool == "mcp__team__run_project_command":
+        summary = f"在员工项目目录 {args['cwd']} 运行 {PureWindowsPath(args['argv'][0]).name}，请展开核对具体操作。"
+    elif tool == "Bash":
         cmd, argv = args["command"], args.get("argv")
         if (isinstance(argv, list) and len(argv) == 4 and all(isinstance(a, str) for a in argv)
                 and shlex.join(argv) == cmd and PureWindowsPath(argv[0]).name.lower() in ("pwsh.exe", "powershell.exe")
