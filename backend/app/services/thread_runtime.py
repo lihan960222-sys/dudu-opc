@@ -851,6 +851,7 @@ class ThreadRuntime:
         attachment_ids: list[str] | None = None,
         feature_event_key: str | None = None,
         feature_resume_job: int | None = None,
+        team_resume_job: int | None = None,
         recovery_job: int | None = None,
         recovery_followup: tuple[int, list[int]] | None = None,
         delivery_root: int | None = None,
@@ -859,7 +860,6 @@ class ThreadRuntime:
         skills: list[str] | None = None,
         team_origin: str = "person",
         routine_run_id: int | None = None,
-        team_resume_job: int | None = None,
         configuration_allowed: bool = True,
         setup_allowed: bool = False,
         internal: bool = False,
@@ -1139,6 +1139,7 @@ class ThreadRuntime:
                     prompt_text,
                     owner_instance=self.instance_id,
                     feature_event_key=feature_event_key, feature_resume_job=feature_resume_job,
+                    team_resume_job=team_resume_job,
                     recovery_job=recovery_job, recovery_followup=recovery_followup, delivery_root=delivery_root,
                     direct_event_key=direct_event_key, direct_attachment_ids=attachment_ids, direct_skills=skills,
                     assignment_source=assignment_source, attachments=submitted_attachments or None,
@@ -1147,7 +1148,6 @@ class ThreadRuntime:
                     person_id=person_id,
                     person_label=person_label,
                 )
-                    team_resume_job=team_resume_job,
             except store.TurnAlreadyStarted as prior:
                 return prior.turn
         if role is not None:
