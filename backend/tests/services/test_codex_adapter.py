@@ -392,7 +392,9 @@ def test_turn_permission_requests_follow_native_workstation_edit_grant():
         project = SimpleNamespace(local_workstation=workstation, writable=writable)
         config = turn_config({}, None, tools, project_runtime=project, scheduled_knowledge=scheduled,
                              approval_mode=mode)
-        return config["features"]["request_permissions_tool"]
+        features = config["features"]
+        assert features["exec_permission_approvals"] is features["request_permissions_tool"]
+        return features["request_permissions_tool"]
 
     assert enabled()
     assert not enabled("ask") and not enabled("plan")
@@ -606,6 +608,35 @@ async def test_local_employee_cannot_approve_another_environments_permissions(tm
                                "params": {"environmentId": "remote", "permissions": {"network": {"enabled": True}}}})
     run.rpc.respond.assert_called_once_with(1, {"permissions": {}, "scope": "turn"})
     run.gate.open.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("kind", "hint", "written", "request_kind", "expected"), [
+    ("deny", True, True, "command", True),
+    ("deny", False, True, "command", False),
+    ("deny", True, False, "command", False),
+    ("expired", True, True, "command", False),
+    ("deny", True, True, "humanCommand", False),
+])
+async def test_steward_can_suggest_a_narrower_request_only_after_a_real_decline(
+        tmp_path, kind, hint, written, request_kind, expected):
+    from unittest.mock import AsyncMock, Mock
+    from app.services.employee_native_review import NARROW_REQUEST_HINT
+    from app.services.provider_adapter import ApprovalHandle, Decision
+
+    run = _turn("accept_edits", project_runtime=SimpleNamespace(root=tmp_path, writable=True), turn_id=1)
+    run.rpc = Mock()
+    run.rpc.respond.return_value = written
+    run.steer = AsyncMock(return_value="steered")
+    run.gate = SimpleNamespace(decide=AsyncMock(return_value=Decision(kind, NARROW_REQUEST_HINT if hint else None)))
+    run.requests[1] = "live"
+    run.permit_inputs[1] = {"kind": request_kind}
+    await run._answer(ApprovalHandle("permit", "live", "Bash"), 1, "live",
+                      lambda allow: {"decision": "accept" if allow else "decline"})
+    run.rpc.respond.assert_called_once_with(1, {"decision": "decline"})
+    if expected:
+        run.steer.assert_awaited_once_with(NARROW_REQUEST_HINT)
+    else:
+        run.steer.assert_not_awaited()
 
 
 @pytest.mark.parametrize("secret", [False, True])

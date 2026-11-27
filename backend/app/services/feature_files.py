@@ -46,6 +46,7 @@ def turn_config(current, root, writable, *, consult_only=False, peer_access=None
                 **({"project_doc_max_bytes": 0} if scheduled_knowledge else {}),
                 "features": {"shell_tool": native_tools, "unified_exec": native_tools, "view_image": native_tools,
                              "request_permissions_tool": scoped_requests,
+                             "exec_permission_approvals": scoped_requests,
                              "multi_agent": False, "apps": False, "plugins": False,
                              "hooks": False, "code_mode": False, "skill_mcp_dependency_install": False}}
     names = [t["name"] for t in TOOLS if writable or t["name"] != "write_text"]

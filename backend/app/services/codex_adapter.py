@@ -65,6 +65,7 @@ from app.services.local_claude_stream import summarize_tool
 from app.services.workspaces import inside_workspace
 from app.services.provider_adapter import (
     ALLOW,
+    DENY,
     LOST,
     Capabilities,
     EngineProbe,
@@ -932,9 +933,10 @@ class _CodexTurn:
                         "When requesting approval explain in the owner's language what you want to do, "
                         "what it affects and why the task needs it.")
                 if common["config"]["features"]["request_permissions_tool"]:
-                    note += (" Start with the existing project permissions. When several steps genuinely require "
-                             "the same additional directory access, use request_permissions for the narrowest "
-                             "scope needed for this turn. Wait for the permission result before proceeding.")
+                    note += (" Start with the project's existing permissions. For a single command requiring specific "
+                             "extra access, use with_additional_permissions and give only its required paths or network "
+                             "permission. For several steps that genuinely share that need, request the narrow scope "
+                             "through request_permissions and wait for its decision.")
                 instructions = f"{instructions}\n\n{note}" if instructions else note
         launch = self.ctx.memory_launch
         if self.computer is not None:
@@ -1914,9 +1916,19 @@ class _CodexTurn:
             except OSError:
                 logger.exception("could not write a computer permit", thread_id=self.ctx.thread_id)
                 allow = False
-        written = self.rpc.respond(rid, payload(allow))
+        reply = payload(allow)
+        written = self.rpc.respond(rid, reply)
         if self.project and decision.kind == ALLOW and hasattr(self.gate, "native_response"):
             await self.gate.native_response(handle.approval_id, bool(allow and written))
+        if (self.project and written and decision.kind == DENY and handle.tool == "Bash"
+                and reply.get("decision") in {"decline", "denied"}
+                and permit_input.get("kind") in (None, "command")
+                and permit_input.get("environmentId") in (None, "local")
+                and getattr(decision, "message", None)):
+            from app.services.employee_native_review import NARROW_REQUEST_HINT
+            if decision.message == NARROW_REQUEST_HINT:
+                outcome = await self.steer(NARROW_REQUEST_HINT)
+                logger.info("native scoped-request guidance", turn_id=self.ctx.turn_id, outcome=outcome)
 
     # -- how it ended ----------------------------------------------------------------------
 
