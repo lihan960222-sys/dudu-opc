@@ -236,6 +236,8 @@ async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
     from app.services.provider_adapter import TurnContext
     from tests.services.test_employee_runtime import employee_project
 
+    # Exercise the same named native profile and reviewer as a home workstation.
+    monkeypatch.setattr(settings, "STEWARD_STRICT_OWNER", "employee-test-owner")
     project = employee_project(tmp_path, monkeypatch)
     monkeypatch.setattr(host_exec, "noninteractive_window_station", lambda: False)
     monkeypatch.setattr(host_exec, "windows_worker_token_status", lambda: "standard")
@@ -269,7 +271,8 @@ async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
             # Resume does not accept the start-only environments field. Supplying cwd selects the local default.
             effective_environments[:] = resumed_environments if method == "thread/resume" else params.get("environments", [local_environment])
             return {"thread": {**stored_thread, "environments": list(effective_environments)}, "modelProvider": "openai", "model": params["model"],
-                "approvalPolicy": params["approvalPolicy"], "activePermissionProfile": {"id": params["permissions"]},
+                "approvalPolicy": params["approvalPolicy"], "approvalsReviewer": params["approvalsReviewer"],
+                "activePermissionProfile": {"id": params["permissions"]},
                 "cwd": str(project.root), "runtimeWorkspaceRoots": list(workspace_roots),
                 "instructionSources": [str(project.root / "AGENTS.md")]}
         if method == "thread/settings/update":
@@ -314,6 +317,8 @@ async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
         assert state["codex_thread_id"] == native
     assert sum(m == "thread/start" for m, _ in requests) == 1
     assert [p["threadId"] for m, p in requests if m == "thread/resume"] == [native, native]
+    assert all((p["approvalPolicy"], p["approvalsReviewer"]) == ("on-request", "auto_review")
+               for m, p in requests if m in {"thread/start", "thread/resume", "turn/start"})
     assert all(p["permissions"] == project.permission_name for m, p in requests if m == "turn/start")
     forged = {**state, "codex_thread_id": str(uuid4())}
     count = sum(m == "thread/read" for m, _ in requests)
@@ -544,6 +549,52 @@ def test_approve_for_me_keeps_attached_apps_on_the_app_gate():
     for launch in ("composio_launch", "team_launch", "browser", "community_launch"):
         turn = _turn("approve_for_me", **{launch: SimpleNamespace()})
         assert turn.mode == "ask" and turn.policy.reviewer == "user", launch
+
+
+def test_native_workstation_routing_is_independent_of_attached_tools(monkeypatch):
+    monkeypatch.setattr(codex_adapter, "_project_tools_allowed", lambda: True)
+    project = SimpleNamespace(writable=True, local_workstation=True)
+    for mode in ("accept_edits", "approve_for_me", "full_access"):
+        run = _turn(mode, project_runtime=project, team_launch=object(), community_launch=object())
+        assert (run.mode, run.policy.approval, run.policy.reviewer) == (mode, "on-request", "auto_review")
+    assert _turn("ask", project_runtime=project, team_launch=object()).policy.reviewer == "user"
+    project.writable = False
+    assert _turn("plan", project_runtime=project, team_launch=object()).policy.reviewer == "user"
+    monkeypatch.setattr(codex_adapter, "_project_tools_allowed", lambda: False)
+    project.writable = True
+    assert _turn("accept_edits", project_runtime=project, team_launch=object()).policy.reviewer == "user"
+
+
+async def test_project_app_permission_needs_live_matching_call_and_does_not_replay():
+    import asyncio
+    from unittest.mock import AsyncMock
+    from app.services.project_mcp_approvals import ProjectMcpApprovals
+    from app.services.provider_adapter import ApprovalHandle, Decision, ALLOW
+    from app.services.turn_clock import TurnClock
+
+    gate = AsyncMock()
+    gate.open.return_value = ApprovalHandle("receipt", "request")
+    gate.decide.return_value = Decision(ALLOW)
+    permissions = ProjectMcpApprovals(gate, TurnClock(10))
+    tool = "mcp__team__feishu_create_document"
+    args = {"title": "Meeting", "body": ""}
+    # The shim and event stream can arrive in either order. Altered arguments,
+    # a second identical request, and late requests never get this receipt.
+    altered = asyncio.create_task(permissions.claim(tool, {**args, "body": "different"}))
+    original = asyncio.create_task(permissions.claim(tool, args))
+    await asyncio.sleep(0)
+    permissions.started("item-1", tool, args, "Create a document")
+    assert await original == "receipt"
+    gate.native_response.assert_awaited_once_with("receipt", True)
+    duplicate = asyncio.create_task(permissions.claim(tool, args))
+    await asyncio.sleep(0)
+    await permissions.finished("item-1")
+    await permissions.close()
+    assert await altered is None and await duplicate is None
+    assert await permissions.claim(tool, args) is None
+    gate.open.assert_awaited_once()
+    assert gate.open.await_args.kwargs["input"] == args
+    gate.native_response.assert_awaited_with("receipt", False)
 
 
 @pytest.mark.parametrize("secret", [False, True])

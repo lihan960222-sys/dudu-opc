@@ -241,7 +241,7 @@ class Server:
         temporary.write_text(json.dumps({'name': name, 'arguments': arguments}), encoding='utf-8')
         os.replace(temporary, path)
         response = self.mailbox / f'resp-{token}.json'
-        deadline = time.monotonic() + MAILBOX_TIMEOUT_SECONDS
+        deadline = time.monotonic() + MAILBOX_TIMEOUT_SECONDS + int(os.environ.get('SUPARAGENT_MCP_APPROVAL_WAIT_SECONDS', 0))
         while time.monotonic() < deadline:
             if response.exists():
                 result = json.loads(response.read_text(encoding='utf-8'))

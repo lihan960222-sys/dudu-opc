@@ -18,7 +18,7 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
 
 
-async def consume_allowed_approval(db, turn_id, owner_token, tool, arguments, *, return_id=False):
+async def consume_allowed_approval(db, turn_id, owner_token, tool, arguments, *, return_id=False, approval_id=None):
     await begin_write(db)
     turn = await db.get(Turn, turn_id)
     from app.services.feature_tasks import turn_assignment_current
@@ -30,6 +30,8 @@ async def consume_allowed_approval(db, turn_id, owner_token, tool, arguments, *,
     query = select(Approval).where(
         Approval.turn_id == turn_id, Approval.tool == tool, Approval.status == 'allowed',
         Approval.consumed_at.is_(None), Approval.decided_at >= threshold)
+    if approval_id is not None:
+        query = query.where(Approval.id == approval_id, Approval.delivered_at.is_not(None))
     if tool in ('mcp__team__run_project_command','mcp__team__list_project_files','mcp__team__read_project_text','mcp__team__replace_project_text','mcp__team__create_project_text','mcp__team__inspect_local_path',
                 'mcp__team__read_task_reference','mcp__team__download_task_reference','mcp__team__deliver_project_file','mcp__team__use_project_release'):
         query = query.where(Approval.delivered_at.is_not(None))
@@ -118,8 +120,15 @@ class TeamBridge:
                 from app.feishu.dispatch_recovery import permits_followup
                 if not permits_followup(followup,"mcp__team__"+name,args):
                     raise service.TeamError("recovery_scope","只可处理原工单当前的问题或审批。")
+            approval_id = None
+            tool = 'mcp__team__' + name
+            if project_apps := getattr(self.run.ctx, 'project_app_approvals', None):
+                approval_id = await project_apps.claim(tool, args)
+                if approval_id is None:
+                    raise service.TeamError('not_approved', 'This project call has no active permission.')
             async with self.runtime.session() as db:
-                allowed = await consume_allowed_approval(db, self.run.turn_id, self.run.owner_token, 'mcp__team__' + name, args, return_id=True)
+                allowed = await consume_allowed_approval(db, self.run.turn_id, self.run.owner_token, tool, args,
+                                                         return_id=True, approval_id=approval_id)
             if not allowed:
                 result = {'error': 'This call has no matching, unused approval.', 'code': 'not_approved'}
             else:
@@ -398,9 +407,9 @@ class TeamBridge:
             return await rt.team_jobs.ask(run, args)
         if name == 'delegate':
             return await rt.team_jobs.delegate(run, args)
-        if name == 'review_employee_write':
+        if name in ('review_employee_write', 'review_employee_action'):
             from app.team import steward_review
-            return await steward_review.decide(rt,run,args)
+            return await steward_review.decide(rt,run,args,native=name=='review_employee_action')
         if name == 'answer_job_question':
             return await rt.team_jobs.answer_question(run, args)
         if name == 'manage_job':

@@ -71,7 +71,7 @@ class Server:
             target.write(body)
         os.replace(temporary, path)
         response = self.mailbox / f"resp-{token}.json"
-        deadline = time.monotonic() + MAX_WAIT_SECONDS
+        deadline = time.monotonic() + MAX_WAIT_SECONDS + int(os.environ.get("SUPARAGENT_MCP_APPROVAL_WAIT_SECONDS", 0))
         while time.monotonic() < deadline:
             descriptor = None
             try:

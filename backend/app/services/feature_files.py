@@ -40,7 +40,7 @@ def turn_config(current, root, writable, *, consult_only=False, peer_access=None
         # brokers may be attached below; project/user MCP commands run as the host.
         native_tools = writable and not scheduled_knowledge
         scoped_requests = (native_tools and getattr(project_runtime, "local_workstation", False)
-                           and project_runtime.writable and approval_mode in ("accept_edits", "full_access"))
+                           and project_runtime.writable and approval_mode in ("accept_edits", "full_access", "approve_for_me"))
         cached_search = not scheduled_knowledge and getattr(project_runtime, "model_vendor", None) == "openai"
         return {"mcp_servers": servers, "plugins": plugins, "web_search": "cached" if cached_search else "disabled",
                 **({"project_doc_max_bytes": 0} if scheduled_knowledge else {}),

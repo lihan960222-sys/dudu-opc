@@ -580,6 +580,15 @@ class CommunityMcpBridge:
     async def dispatch(self, name: str, arguments: dict) -> dict:
         if self.broker_aliases:
             if name == BROKER_SEARCH:
+                if project_apps := getattr(self.run.ctx, "project_app_approvals", None):
+                    from app.team.bridge import consume_allowed_approval
+                    receipt = await project_apps.claim(PREFIX + name, arguments)
+                    if receipt is None:
+                        return {"error": "This project search has no active permission.", "code": "not_approved"}
+                    async with self.runtime.session() as db:
+                        if not await consume_allowed_approval(db, self.run.turn_id, self.run.owner_token,
+                                                              PREFIX + name, arguments, approval_id=receipt):
+                            return {"error": "This project search is no longer active.", "code": "not_approved"}
                 return await self.search(arguments)
             if name == BROKER_CALL:
                 return await self.broker_call(arguments)
@@ -785,7 +794,7 @@ class CommunityMcpBridge:
                 await db.commit()
 
     async def _consume_and_call(self, session, alias: str, arguments: dict, via_broker: bool = False,
-                               *, lock_held: bool = False):
+                               *, lock_held: bool = False, approval_id: str | None = None):
         """Consume one approval, then serialize dispatch against local revocation."""
         from app.db.transactions import begin_write
         from app.team import service as team_service
@@ -808,13 +817,16 @@ class CommunityMcpBridge:
                 # A brokered call is approved on a card that carries the exact ref and arguments.
                 approval_tool = PREFIX + (BROKER_CALL if via_broker else alias)
                 approval_input = {"ref": alias, "arguments": arguments} if via_broker else arguments
-                approvals = (await db.scalars(select(Approval).where(
+                query = select(Approval).where(
                     Approval.turn_id == self.run.turn_id,
                     Approval.tool == approval_tool,
                     Approval.status == "allowed",
                     Approval.consumed_at.is_(None),
                     Approval.decided_at >= threshold,
-                ).order_by(Approval.created_at).with_for_update())).all()
+                )
+                if approval_id is not None:
+                    query = query.where(Approval.id == approval_id, Approval.delivered_at.is_not(None))
+                approvals = (await db.scalars(query.order_by(Approval.created_at).with_for_update())).all()
                 expected = community_mcp.canonical(approval_input)
                 approval = next((row for row in approvals
                                  if community_mcp.canonical(row.input) == expected), None)
@@ -948,6 +960,13 @@ class CommunityMcpBridge:
             manifest = await self._current_snapshot(alias)
             if manifest is None:
                 return {"error": "This call no longer has an active agent grant.", "code": "revoked"}
+            approval_id = None
+            if project_apps := getattr(self.run.ctx, "project_app_approvals", None):
+                name = BROKER_CALL if via_broker else alias
+                params = {"ref": alias, "arguments": arguments} if via_broker else arguments
+                approval_id = await project_apps.claim(PREFIX + name, params)
+                if approval_id is None:
+                    return {"error": "This project call has no active permission.", "code": "not_approved"}
             if item.get("kind") == "muapi":
                 async with muapi_data_api.connection_lock():
                     async with self.runtime.session() as db:
@@ -963,7 +982,7 @@ class CommunityMcpBridge:
                     client = muapi_data_api.MuapiDataApi(token)
                     try:
                         result = await self._consume_and_call(
-                            client, alias, arguments, via_broker, lock_held=True)
+                            client, alias, arguments, via_broker, lock_held=True, approval_id=approval_id)
                         if result is None:
                             return {"error": "This call no longer has an active, unused approval and grant.",
                                     "code": "not_approved"}
@@ -1037,7 +1056,7 @@ class CommunityMcpBridge:
                     await self._invalidate(alias)
                     return {"error": "The service's tool definition changed. Review and grant it again.",
                             "code": "tool_changed"}
-                result = await self._consume_and_call(session, alias, arguments, via_broker)
+                result = await self._consume_and_call(session, alias, arguments, via_broker, approval_id=approval_id)
                 if result is None:
                     return {"error": "This call no longer has an active, unused approval and grant.",
                             "code": "not_approved"}

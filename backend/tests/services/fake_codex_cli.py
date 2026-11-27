@@ -237,6 +237,7 @@ def thread_result(thread_id, params):
         policy, sandbox = "never", "dangerFullAccess"
     result = {"thread": {"id": thread_id,"status":{"type":plan.get("native_status","idle")}}, "modelProvider": params.get("modelProvider", "openai"), "model": params.get("model") or "gpt-fake", "approvalPolicy": policy, "sandbox": {"type": sandbox}}
     if plan.get("private_history"):
+        result["approvalsReviewer"] = params["approvalsReviewer"]
         result["activePermissionProfile"] = {"id": params.get("permissions")}
         result.update(cwd=params["cwd"], runtimeWorkspaceRoots=params.get("runtimeWorkspaceRoots", []),
                       instructionSources=[str(pathlib.Path(params["cwd"]) / "AGENTS.md")])

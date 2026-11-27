@@ -135,7 +135,8 @@ async def test_project_command_requires_delivered_decision_and_exact_argv(harnes
         assert await thread_store.mark_allow_delivered(db, approval_id, token)
         assert not await consume_allowed_approval(db, turn_id, token, tool, {**args,'argv':['test.exe','two']})
         assert not await consume_allowed_approval(db, turn_id, token, tool, {**args,'cwd':'other'})
-        assert await consume_allowed_approval(db, turn_id, token, tool, args)
+        assert not await consume_allowed_approval(db, turn_id, token, tool, args, approval_id='different-project-call')
+        assert await consume_allowed_approval(db, turn_id, token, tool, args, approval_id=approval_id)
         assert not await consume_allowed_approval(db, turn_id, token, tool, args)
 
 

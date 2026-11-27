@@ -208,6 +208,8 @@ class TurnContext:
     steward_deepseek: bool = False
     model_vendor: str | None = None
     project_runtime: object | None = None
+    # Only the native Codex adapter can bind approvals to live project MCP calls.
+    project_app_approvals: object | None = None
     scheduled_knowledge: bool = False
     bind_native_session: Callable[[dict], Awaitable[bool]] | None = None
     media_review_only: bool = False
