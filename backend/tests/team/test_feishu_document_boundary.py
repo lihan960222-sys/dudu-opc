@@ -62,6 +62,31 @@ async def test_cloud_document_work_does_not_require_or_inherit_an_unrelated_cont
     assert (await feishu_assignment.resolve(Session(),"owner",1,10,20,4,delivery="create_document",original="把我和联系人的沟通整理成文档"))["contact"]=="联系人"
     assert await feishu_assignment.resolve(Session(),"owner",1,10,20,5,delivery="create_document",original="写文档") is None
 
+
+async def test_owner_quote_can_disambiguate_only_a_current_employee_contact(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    cfg = {"owner_id":"owner", "steward":{"agent_id":1,"app_id":"boss"}, "roles":{"文员":{"agent_id":4,"app_id":"employee"}}}
+    grant = {"agent_id":4,"oauth_app":"employee"}
+    grants = {"甲":grant,"乙":grant}
+    monkeypatch.setattr(feishu_assignment, "configuration", lambda:cfg)
+    monkeypatch.setattr(feishu_assignment.workspace_access, "settings_for", lambda _: {"history_sources":grants})
+    monkeypatch.setattr(feishu_assignment, "gateway_pin", lambda _, key: {"employee":4,"contact":"乙"} if key=="cited" else None)
+    prior = SimpleNamespace(thread_id=10, turn_id=11)
+    db = SimpleNamespace(scalar=AsyncMock(return_value=None), get=AsyncMock(return_value=prior))
+
+    async def select_scope(text):
+        return await feishu_assignment.resolve(db,"owner",1,10,20,4,delivery="restructure",original=text,reference="cited")
+
+    assert (await select_scope("第三部分放在一起"))["contact"] == "乙"
+    assert (await select_scope("整理甲的记录"))["contact"] == "甲"
+    assert await select_scope("整理甲和乙的记录") is None
+    prior.thread_id = 99
+    assert await select_scope("第三部分放在一起") is None
+    prior.thread_id = 10
+    grants.pop("乙")
+    assert await select_scope("第三部分放在一起") is None
+
 def test_owner_choices_only_lists_employees_authorized_for_documents(monkeypatch):
     cfg = {"owner_id": "owner", "steward": {"agent_id": 1, "app_id": "lead"},
            "roles": {"二狗": {"agent_id": 4, "app_id": "employee"},

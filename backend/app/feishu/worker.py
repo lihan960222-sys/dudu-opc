@@ -95,18 +95,17 @@ class Worker:
                                  and row["state"] == "received")
         followup = self.db.execute("select command from history_continuations where app=? and event=?",
                                    (row["app"],row["event"])).fetchone()
-        if followup:
-            if not followup[0]:
-                from . import knowledge_intent
-                if await knowledge_intent.handle(self,row,msg,text):
-                    return
-                other = self.db.execute("""select 1 from knowledge_intent_candidates
-                    where app=? and event=? and decision='other'""",(row["app"],row["event"])).fetchone()
-                if not other and not lead_conversation:
-                    self.respond(row,"done","老板，我还没对上您要更新的文档。您方便引用上次的任务，或告诉我联系人和文档名吗？")
-                    return
-            else:
-                text = followup[0]
+        if followup and followup[0] and not lead_conversation:
+            text = followup[0]
+        elif followup and not lead_conversation:
+            from . import knowledge_intent
+            if await knowledge_intent.handle(self,row,msg,text):
+                return
+            other = self.db.execute("""select 1 from knowledge_intent_candidates
+                where app=? and event=? and decision='other'""",(row["app"],row["event"])).fetchone()
+            if not other:
+                self.respond(row,"done","老板，我还没对上您要更新的文档。您方便引用上次的任务，或告诉我联系人和文档名吗？")
+                return
         from . import documents,voice
         if await voice.handle(self,row,msg,text):
             return
@@ -163,6 +162,11 @@ class Worker:
             if short_retry and not self.reference(msg):
                 self.respond(row,"done","老板，我还没对上原来的任务。您指的是哪一项？引用原消息或告诉我任务号都可以。")
                 return
+        # An unnamed request about someone's messages is still an assignment.
+        # Let the steward choose a capable employee; only that employee can use the grant.
+        if lead_conversation and history.REVIEW.fullmatch(history.canonical(text)):
+            await self.route_direct(row, msg, text)
+            return
         if await history.answer(self,row,msg,text):
             return
         if tracking and self.cfg.get("steward_thread"):
@@ -172,7 +176,7 @@ class Worker:
                 self.direct_final(row, "done", "老板，我查到这些任务的进度。\n" + status)
                 return
         from . import knowledge_intent
-        if not command(text)[0] and await knowledge_intent.handle(self,row,msg,text):
+        if not lead_conversation and not command(text)[0] and await knowledge_intent.handle(self,row,msg,text):
             return
         if not self.cfg['roles'] and self.cfg.get('steward_thread'):
             await self.route_direct(row,msg,text)

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from app.db.models import AgentJobEvent, DirectTurnReceipt
+from app.db.models import AgentJob, AgentJobEvent, DirectTurnReceipt
 from app.feishu import workspace_access
 
 
@@ -47,7 +47,21 @@ def gateway_pin(cfg, key):
         return proof
 
 
-async def resolve(db, owner, lead, thread, turn, employee, *, delivery=None, original=""):
+async def referenced_contact(db, cfg, owner, thread, employee, reference, aliases):
+    prior = await db.get(DirectTurnReceipt, (owner, reference))
+    if not prior or prior.thread_id != thread:
+        return None
+    pinned = gateway_pin(cfg, reference)
+    if pinned:
+        return pinned.get("contact") if pinned.get("employee") == employee and pinned.get("contact") in aliases else None
+    records = await db.scalars(select(AgentJobEvent.detail).join(AgentJob, AgentJob.id == AgentJobEvent.job_id).where(
+        AgentJob.owner_id == owner, AgentJob.requester_thread_id == thread, AgentJob.requester_turn_id == prior.turn_id,
+        AgentJob.assignee_agent_id == employee, AgentJobEvent.kind == "feishu_assignment"))
+    contacts = {item.get("contact") for item in records if item.get("contact") in aliases}
+    return next(iter(contacts)) if len(contacts) == 1 else None
+
+
+async def resolve(db, owner, lead, thread, turn, employee, *, delivery=None, original="", reference=None):
     cfg = configuration()
     if not cfg or cfg["owner_id"] != owner or cfg["steward"]["agent_id"] != lead:
         return None
@@ -74,9 +88,14 @@ async def resolve(db, owner, lead, thread, turn, employee, *, delivery=None, ori
         if len(named)>1:
             return None
     elif contact is None:
-        if len(aliases)!=1:
+        if len(named)>1:
             return None
-        contact=aliases[0]
+        if reference:
+            contact = await referenced_contact(db, cfg, owner, thread, employee, reference, aliases)
+        elif len(aliases) == 1:
+            contact = aliases[0]
+        if contact is None:
+            return None
     return {"app":cfg["steward"]["app_id"],"event":f"employee-{turn}-{employee}",
             "employee":employee,"contact":contact,"action":"employee"}
 

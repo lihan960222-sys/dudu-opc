@@ -178,7 +178,8 @@ class Jobs:
                 source_turn = holder.requester_turn_id if holder else turn.id
                 original = context.original_text if context else (await db.get(Turn,source_turn)).prompt_text
                 pin = await feishu_assignment.resolve(db,self.rt.owner_id,caller.id,thread.id,source_turn,target,
-                                                     delivery=feishu_assignment.delivery_choice(args),original=original)
+                    delivery=feishu_assignment.delivery_choice(args), original=original,
+                    reference=context.reference_event_key if context else None)
                 if pin and (target != pin["employee"] or reply != "resume"):
                     raise service.TeamError("feishu_employee", "请把这项飞书工作派给已获该项授权的员工。")
                 if holder and args.get("rework") and not recovery_root:
