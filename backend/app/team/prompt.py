@@ -106,6 +106,8 @@ async def roster(db, team, owner_id, own_id):
         record = {"id": agent.id, "name": fence.line(agent.name), **directory.profile(agent, own_id)}
         if agent.title:
             record["title"] = fence.line(agent.title)
+        if agent.description:
+            record["responsibilities"] = fence.line(agent.description, limit=500)
         if agent.id == own_id:
             record["your_role"] = "team lead"
         if busy:
@@ -120,7 +122,12 @@ async def parts(db, *, team, agent, owner_id):
         listing = await roster(db, team, owner_id, agent.id)
         extra = SETUP + INCIDENTS + (ESCALATIONS if notices.escalations_on() else '')
         if settings.STEWARD_STRICT_OWNER == owner_id:
-            extra += (' Use delegate for employee work, including short read-only questions. Set read_only for inspections. '
+            extra += (' For an operational request, select the responsible employee by the meaning of the request '
+                      'and the current roster titles and responsibilities, even when the owner names nobody. '
+                      'Call delegate before attempting any specialist work. Keep every step and its order in '
+                      'the brief, including required observable evidence and cleanup. A running process alone '
+                      'does not establish that a window appeared. Close only a process started for the task. '
+                      'Use delegate for employee work, including short read-only questions. Set read_only for file inspections. '
                       'If the owner asks employees to check for themselves, get a report from each named assignee. '
                       'An earlier failure belongs to that assignment. Report a current blocker only when the present '
                       'assignment or a current capability check confirms it.')

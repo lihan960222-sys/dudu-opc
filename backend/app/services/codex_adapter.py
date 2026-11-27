@@ -696,6 +696,7 @@ class _CodexTurn:
         self.project = getattr(self.ctx, "project_runtime", None)
         self.scheduled_knowledge = getattr(self.ctx, "scheduled_knowledge", False)
         team = getattr(self.ctx, "team", None)
+        self.coordinator = bool(team and team.is_lead and team.strict_hierarchy and not self.project)
         self.handoff_enabled = (bool(self.feature) and not getattr(self.ctx, "consult_only", False)) or bool(
             team and team.is_lead and team.strict_hierarchy)
         self.native_history = {}
@@ -703,7 +704,7 @@ class _CodexTurn:
         self.disabled_project_skills = set()
         self.computer = self.ctx.computer
         # A computer is the agent's sandbox: its turns always have tools, and they are the computer's.
-        self.tools = bool(app_settings.get("LOCAL_TOOLS_ENABLED")) or self.computer is not None
+        self.tools = not self.coordinator and (bool(app_settings.get("LOCAL_TOOLS_ENABLED")) or self.computer is not None)
         self.mode = self.ctx.approval_mode or "ask"
         if self.project:
             # The active native filesystem profile enforces read-only projects.
@@ -1024,6 +1025,9 @@ class _CodexTurn:
             # Native subagents create separate Codex threads. Delegation here
             # belongs to the service team bridge and its employee task records.
             common.setdefault("config", {}).update({"features.multi_agent": False, "features.multi_agent_v2": False})
+        if self.coordinator:
+            common.setdefault("config", {}).setdefault("features", {}).update(shell_tool=False, unified_exec=False)
+            common["environments"] = []
         if self.deepseek_key:
             # This secret travels through the private app-server stdin, never argv, shell/MCP env,
             # rollout messages, the role prompt, the global home or the persisted provider state.
@@ -1066,7 +1070,7 @@ class _CodexTurn:
                         return self._failed("无法核实旧会话的员工目录或供应商。", "project_binding_changed",
                                             session_state="active", provider_state=self.ctx.provider_state)
                 resume_params = {"threadId": self.codex_thread, **common}
-                if self.project:
+                if self.project or self.coordinator:
                     # Unlike start, resume cannot set the thread's execution environments.
                     resume_params.pop("environments", None)
                 started = await self._call("thread/resume", resume_params)
@@ -1190,7 +1194,7 @@ class _CodexTurn:
             turn_params["model"] = self.ctx.model
         if self.ctx.effort:
             turn_params["effort"] = self.ctx.effort
-        if self.computer is not None or (self.feature and (not self.project or not self.tools)):
+        if self.coordinator or self.computer is not None or (self.feature and (not self.project or not self.tools)):
             turn_params["environments"] = []
         try:
             turn = await self._call("turn/start", turn_params)

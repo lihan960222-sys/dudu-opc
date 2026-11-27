@@ -928,6 +928,9 @@ async def test_steward_deepseek_overrides_only_its_own_session(crt,sessions,owne
     assert cfg["experimental_bearer_token"] == "test-only-credential"
     assert not cfg["requires_openai_auth"] and first["config"]["web_search"] == "disabled"
     assert first["config"]["mcp_servers"]["team"]["command"]
+    assert first["config"]["features"]["shell_tool"] is False
+    assert first["environments"] == []
+    assert codex.received("turn/start")[-1]["params"]["environments"] == []
     row = await reload(sessions,Thread,thread.id)
     assert row.provider_state["steward_deepseek"] is True
     assert "test-only-credential" not in json.dumps(row.provider_state)
