@@ -840,6 +840,7 @@ class ThreadRuntime:
         skills: list[str] | None = None,
         team_origin: str = "person",
         routine_run_id: int | None = None,
+        team_resume_job: int | None = None,
         configuration_allowed: bool = True,
         setup_allowed: bool = False,
         internal: bool = False,
@@ -1127,6 +1128,7 @@ class ThreadRuntime:
                     person_id=person_id,
                     person_label=person_label,
                 )
+                    team_resume_job=team_resume_job,
             except store.TurnAlreadyStarted as prior:
                 return prior.turn
         if role is not None:

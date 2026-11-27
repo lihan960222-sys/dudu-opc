@@ -183,7 +183,7 @@ def local_receipt(call, result):
 async def assess(db,job,turn,check):
     text=(turn.result or "").strip()
     if text.startswith("BLOCKED:"):
-        return {"state":"blocked","detail":text[8:].strip()[:500] or "员工报告阻塞，尚未交付。"}
+        return {"state":"blocked","detail":text[8:].strip() or "员工报告阻塞，尚未交付。"}
     receipts=list(await db.scalars(select(Event.data).where(Event.turn_id==turn.id,
         Event.type=="tool.completed").order_by(Event.id.desc())))
     evidence=[e for r in receipts for e in ([r["file_receipt"]] if r.get("file_receipt") else r.get("file_receipts",[]))]

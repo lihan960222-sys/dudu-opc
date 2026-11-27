@@ -105,7 +105,7 @@ class FakeEngine(Engine):
     nested = None  # set by a test: records what a blocking job's own delegate call returns
 
     async def run_turn(self, ctx, sink, gate):
-        if 'NESTED' in ctx.prompt and self.nested is not None:
+        if ctx.thread_id not in self.handlers and 'NESTED' in ctx.prompt and self.nested is not None:
             outcome = await self.nested(ctx)
             if isinstance(outcome, TurnOutcome):
                 return outcome
@@ -296,9 +296,15 @@ async def test_lead_clarifies_question_in_place(team, sessions):
         if not receipts:
             assigned = await rt.team_jobs.delegate(run, {'agent_ids':[employee.id], 'brief':'ASK about scope'})
             receipts.append(assigned['receipts'][0]['job_id'])
-        elif 'which environment?' in ctx.prompt:
-            question = json.loads(ctx.prompt.split('\n')[-1])['questions'][0]
+        elif (questions := json.loads(ctx.prompt.split('\n')[-1])['questions']):
+            question = questions[0]
             args = {'job_id':receipts[0], 'question_turn_id':question['question_turn_id'], 'answer':'staging'}
+            with pytest.raises(service.TeamError, match="progress_review"):
+                await rt.team_jobs.answer_question(run, args)
+            assert "partial work" in question["worker_report"]
+            args["progress_review"] = {"decision":"continue", "previous_turn_id":question["question_turn_id"],
+                "evidence":"which environment?", "different_action":"Use the staging environment named by the owner.",
+                "expected_result":"A staging-specific result."}
             receipts.append(await rt.team_jobs.answer_question(run, args))
             with pytest.raises(service.TeamError, match='no longer open'):
                 await rt.team_jobs.answer_question(run, args)
@@ -314,6 +320,76 @@ async def test_lead_clarifies_question_in_place(team, sessions):
         assert job.status == 'completed' and job.answer == 'staging' and job.approval_mode == 'ask'
         assert len(await turns_of(sessions, job.assignee_thread_id)) == 2
     assert receipts[1]['status'] == 'queued'
+
+
+async def test_reworded_automatic_work_stops_without_progress_but_new_owner_input_can_resume(team, sessions):
+    rt, engine, lead, employee, _ = team
+    thread = await rt.create_thread(agent_id=lead.id)
+    attempts, decisions = [], []
+    blocker = "Host did not return a usable result."
+    async def employee_run(ctx):
+        attempts.append(ctx.turn_id)
+        return TurnOutcome("succeeded", result="BLOCKED: " + "Diagnostic details. " * 80 + blocker)
+
+    async def supervisor(ctx, sink, gate):
+        run = rt._runs[ctx.turn_id]
+        if "Harness message, not from the person." in ctx.prompt:
+            report = json.loads(ctx.prompt.split("\n")[-1])["reports"][0]
+            assert blocker in report["result"]
+            if len(attempts) > 2:
+                return TurnOutcome("succeeded", result="Reported")
+            args = {"agent_ids":[employee.id], "brief":"NESTED a different title",
+                    "progress_review":{"decision":"continue", "previous_turn_id":report["worker_turn_id"],
+                        "evidence":blocker, "different_action":"Inspect the separate result channel.",
+                        "expected_result":"A delivery receipt from that channel."}}
+            reply = await rt.team_jobs.delegate(run, args)
+            decisions.append(reply.get("code", "assigned"))
+        else:
+            await rt.team_jobs.delegate(run, {"agent_ids":[employee.id],"brief":"NESTED verify the result"})
+        return TurnOutcome("succeeded", result="Reported")
+
+    engine.nested, engine.handlers[thread.id] = employee_run, supervisor
+    await rt.send_turn(thread.id, "Verify the result.")
+    await wait_until(lambda: decisions == ["assigned", "progress_stopped"])
+    await wait_until(lambda: not rt._runs)
+    assert len(attempts) == 2
+    await rt.send_turn(thread.id, "I have repaired the source. Run it now.")
+    await wait_until(lambda: len(attempts) == 3)
+    await wait_until(lambda: not rt._runs)
+
+
+async def test_repeated_clarification_delivers_blocker_without_a_third_worker_turn(team, sessions):
+    rt, engine, lead, employee, _ = team
+    thread = await rt.create_thread(agent_id=lead.id)
+    worker_turns, answers = [], []
+    async def worker(ctx):
+        worker_turns.append(ctx.turn_id)
+        return TurnOutcome("succeeded", result="BLOCKED: no source receipt\nNEEDS INPUT: Which source?")
+
+    async def manager(ctx, sink, gate):
+        run = rt._runs[ctx.turn_id]
+        if not worker_turns:
+            await rt.team_jobs.delegate(run, {"agent_ids":[employee.id], "brief":"NESTED locate the source"})
+        else:
+            wake = json.loads(ctx.prompt.split("\n")[-1])
+            if wake["questions"]:
+                question = wake["questions"][0]
+                result = await rt.team_jobs.answer_question(run, {"job_id":question["job_id"],
+                    "question_turn_id":question["question_turn_id"], "answer":"Use the secondary source.",
+                    "progress_review":{"decision":"continue", "previous_turn_id":question["question_turn_id"],
+                        "evidence":"no source receipt", "different_action":"Try the secondary source.",
+                        "expected_result":"A receipt for the source."}})
+                answers.append(result["status"])
+        return TurnOutcome("succeeded", result="Status delivered.")
+
+    engine.nested, engine.handlers[thread.id] = worker, manager
+    await rt.send_turn(thread.id, "Find the source.")
+    await wait_until(lambda: answers == ["queued", "failed"])
+    async def closed():
+        root = await root_of(sessions, thread.id)
+        return root and root.status == "completed"
+    await wait_until(closed)
+    assert len(worker_turns) == 2
 
 
 async def test_expired_business_question_cannot_restart_employee(team, sessions, monkeypatch):

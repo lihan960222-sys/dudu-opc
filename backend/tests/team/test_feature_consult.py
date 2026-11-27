@@ -381,7 +381,7 @@ async def test_steward_employee_modes_and_legacy_overlaps(sessions,owner,tmp_pat
 
 @pytest.mark.skipif(__import__("sys").platform != "win32",reason="Windows scoped Codex")
 @pytest.mark.asyncio
-async def test_missing_scoped_file_rechecks_once_and_reports_blocker(crt,sessions,owner,codex,tmp_path,monkeypatch,scoped_codex_host):
+async def test_missing_scoped_file_reports_blocker_without_unrequested_retry(crt,sessions,owner,codex,tmp_path,monkeypatch,scoped_codex_host):
     from app.core.config import settings
     from app.services.role_workspace import initialize
     from app.db.models import AgentJobEvent
@@ -401,7 +401,7 @@ async def test_missing_scoped_file_rechecks_once_and_reports_blocker(crt,session
     codex.plan({"type":"team","tool":"delegate","arguments":{"agent_ids":[employee.id],"brief":"Prepare file.",
                "project":"demo","done_when":"File delivered","completion_check":{"kind":"files",
                "files":[{"scope":"task","path":"output.md"}]}}},
-               {"type":"chat","text":"File ready."},{"type":"chat","text":"Everything verified."},
+               {"type":"chat","text":"File ready."},
                {"type":"chat","text":"File not confirmed."})
     lead_chat=await crt.create_thread(provider="codex",agent_id=boss.id)
     await crt.send_turn(lead_chat.id,"Have the specialist save output.md.")
@@ -412,8 +412,8 @@ async def test_missing_scoped_file_rechecks_once_and_reports_blocker(crt,session
     await wait_until(manager_received_report, timeout=60)
     async with sessions() as db:
         job=await db.scalar(select(AgentJob).where(AgentJob.owner_id==owner,AgentJob.kind=="job"))
-        assert (job.status,job.outcome,job.executions)==("failed","verification_blocked",2)
+        assert (job.status,job.outcome,job.executions)==("failed","verification_blocked",1)
         assert "output.md" in job.outcome_detail
         events=list(await db.scalars(select(AgentJobEvent.kind).where(AgentJobEvent.job_id==job.id)))
-        assert events.count("verification_retry")==1
-        assert events.count("completion_evidence")==2
+        assert events.count("verification_retry")==0
+        assert events.count("completion_evidence")==1

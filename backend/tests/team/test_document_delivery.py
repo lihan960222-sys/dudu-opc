@@ -1,4 +1,5 @@
 """The ordinary owner-facing final answer must agree with the employee's current receipt."""
+import json
 import pytest
 from sqlalchemy import select
 
@@ -173,8 +174,14 @@ async def test_two_knowledge_deliveries_control_automatic_redispatch(team,sessio
     async def steward(ctx,sink,gate):
         turns.append(ctx.turn_id)
         if len(turns)<=3:
+            review = {}
+            if len(turns)>1:
+                report = json.loads(ctx.prompt.split("\n")[-1])["reports"][0]
+                review = {"progress_review":{"decision":"continue","previous_turn_id":report["worker_turn_id"],
+                    "evidence":"employee report","different_action":"Compare the document against source citations.",
+                    "expected_result":"Confirmed citations in the revised report."}}
             responses.append(await rt.team_jobs.delegate(rt._runs[ctx.turn_id],
-                {"agent_ids":[employee.id],"brief":"NESTED","rework":len(turns)==2}))
+                {"agent_ids":[employee.id],"brief":"NESTED","rework":len(turns)==2,**review}))
         return TurnOutcome("succeeded",result="结束")
     engine.nested,engine.handlers[chat.id]=worker,steward
     await rt.send_turn(chat.id,"Update knowledge")

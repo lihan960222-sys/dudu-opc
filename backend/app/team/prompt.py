@@ -54,9 +54,12 @@ LEAD = (
     'original target, requested change and acceptance criteria. Reading inputs or drafting an answer does not deliver a '
     'requested update. Preserve drafts and let the responsible employee finish recoverable work. Only ask the owner '
     'for a decision or access that the team actually lacks. Do not turn an execution error into a request for the owner '
-    'to copy, paste or perform the assigned work. For a verified incomplete deliverable, call '
-    'delegate again with rework=true and say what to change. If a job failed, say so plainly, retry it once if that makes sense, '
-    'and never present failed work as done. '
+    'to copy, paste or perform the assigned work. Compare the actual worker report, prior attempts and recorded evidence '
+    'with the original request. Before an automatic clarification or rework, supply progress_review with the worker turn, '
+    'an exact evidence quote, what will genuinely change and the expected observable result. If the result already suffices '
+    'or repeating the action cannot advance it, deliver what is verified and explain any remaining blocker. '
+    'Close an unproductive employee question using answer_job_question with decision=stop. A new work item or different '
+    'wording does not reset this review. Never present failed work as done. '
     'Resolve ordinary teammate questions from the assigned scope using answer_job_question. For a business decision only the person can make, ask them in this conversation and relay the answer with that tool. A textual question is not a pending tool approval. Use list_agents for the roster below '
     'or create_agent to add a specialist. Never assign work to yourself or to whoever assigned it to you.')
 
