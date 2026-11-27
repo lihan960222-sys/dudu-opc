@@ -3,14 +3,14 @@
 import { useEffect, useState } from "react";
 import { request } from "@/lib/api";
 
-type Setting = { enabled: boolean; read_folders: string[]; outbound_network: boolean };
+type Setting = { enabled: boolean; read_folders: string[]; outbound_network: boolean; local_workstation: boolean };
 
 function entries(input: string) {
   return input.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
 }
 
-export function EmployeeProjectTerminal({ employee, folderSaved, busy }: {
-  employee: number; folderSaved: boolean; busy: boolean;
+export function EmployeeProjectTerminal({ employee, folderSaved, busy, onChanged }: {
+  employee: number; folderSaved: boolean; busy: boolean; onChanged?: () => Promise<void>;
 }) {
   const endpoint = `/staff/${employee}/project-terminal`;
   const [enabled, setEnabled] = useState<boolean | null>(null);
@@ -18,9 +18,11 @@ export function EmployeeProjectTerminal({ employee, folderSaved, busy }: {
   const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
   const [folders, setFolders] = useState("");
+  const [workstation, setWorkstation] = useState(false);
   const [network, setNetwork] = useState(false);
 
   function load(result: Setting) {
+    setWorkstation(result.local_workstation);
     setEnabled(result.enabled);
     setFolders(result.read_folders.join("\n"));
     setNetwork(result.outbound_network);
@@ -42,6 +44,7 @@ export function EmployeeProjectTerminal({ employee, folderSaved, busy }: {
       const body = saveAccess ? {enabled: next, read_folders: entries(folders), outbound_network: network} : {enabled: next};
       const result = await request<Setting>(endpoint, {method: "PUT", body: JSON.stringify(body)});
       load(result);
+      void onChanged?.();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "终端设置未能保存。");
       try { setEnabled((await request<Setting>(endpoint)).enabled); } catch { setEnabled(null); }
@@ -61,7 +64,8 @@ export function EmployeeProjectTerminal({ employee, folderSaved, busy }: {
     </label>
     <small>{saving ? "正在保存…" : !folderSaved ? "请先保存这名员工自己的工作目录。"
       : "切换后立即生效。开启后，管家派来的工单可以在此目录运行命令，读写范围沿用档案权限。模型登录在“基本资料”中管理。"}</small>
-    {enabled && <details>
+    {enabled && workstation && <small>终端可以在隔离环境中运行本机程序，临时文件保存在本工单的目录。查阅网页和下载资料使用工单授权的工具，终端不能直接联网。</small>}
+    {enabled && !workstation && <details>
       <summary>外部资料与联网范围</summary>
       <label className="dp-field"><span>可额外读取的资料或软件目录（每行一个绝对路径）</span>
         <textarea className="dp-input" value={folders} disabled={busy || saving}

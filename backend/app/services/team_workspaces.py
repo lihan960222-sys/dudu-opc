@@ -17,11 +17,15 @@ class TeamWorkspaces:
 
     def readable_by(self, employee_id, *, bound_roots=None):
         reader = self.members.get(employee_id)
+        from app.core.config import settings
+        from app.services.employee_runtime import native_enabled
+        workstation = bool(reader and reader.owner_id and reader.owner_id == settings.STEWARD_STRICT_OWNER
+                           and native_enabled(reader.owner_id, employee_id))
         if (not reader or employee_id == self.lead_id or employee_id not in self.safe_roots
-                or not reader.team_workspaces_readable):
+                or not (workstation or reader.team_workspaces_readable)):
             return {}
-        return {who: path for who, path in self.safe_roots.items() if who not in (employee_id, self.lead_id)
-                and (bound_roots is None or path in bound_roots)}
+        return {who: path for who, path in self.safe_roots.items() if who != employee_id
+                and (workstation or who != self.lead_id) and (bound_roots is None or path in bound_roots)}
 
     def profile(self, employee, viewer_id):
         if viewer_id in (self.lead_id, employee.id):

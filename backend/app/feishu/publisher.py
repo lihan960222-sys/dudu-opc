@@ -36,6 +36,10 @@ def _approval_card(body, binding, *, flat=False):
         return {"tag":"div", "text":plain(value)}
 
     choices = ["允许并记住", "仅本次", "拒绝"] if binding["offer_remember"] else ["仅本次", "拒绝"]
+    if "offer_task" in binding.keys() and binding["offer_task"]:
+        choices.insert(0, "本工单允许")
+    if body.get("review_only"):
+        choices = ["只读核对"]
     action = {"tag":"action", "actions":[{"tag":"button","text":plain(label),
               "value":{"approval":binding["approval"],"decision":label}} for label in choices]}
     view = body.get("approval_display")
@@ -44,6 +48,8 @@ def _approval_card(body, binding, *, flat=False):
     hint = "请先核对完整参数。"
     if binding["offer_remember"]:
         hint += "选择「允许并记住」后，大嘴可代批同一员工在该项目的相同操作。"
+    if "本工单允许" in choices:
+        hint += "「本工单允许」只在当前工单代批同一员工的相同操作。"
     details = paragraph(view["details"])
     panel = {"tag":"collapsible_panel", "expanded":False, "header":{"title":plain("查看完整参数")},
              "elements":[details]}
@@ -142,7 +148,7 @@ class Publisher:
         if kind == 'text':
             content = {'text':body['text']}
             if private and body.get('approval_card'):
-                binding = self.db.execute("select approval,offer_remember from approval_dm where approval=? and outgoing=?",
+                binding = self.db.execute("select approval,offer_remember,offer_task from approval_dm where approval=? and outgoing=?",
                                           (body['approval_card'], row['id'])).fetchone()
                 if not binding:
                     raise ValueError("审批请求与发送记录不匹配")

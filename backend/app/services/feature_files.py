@@ -39,7 +39,8 @@ def turn_config(current, root, writable, *, consult_only=False, peer_access=None
         # Native tools run in the verified OS sandbox. Only backend-created MCP
         # brokers may be attached below; project/user MCP commands run as the host.
         native_tools = writable and not scheduled_knowledge
-        return {"mcp_servers": servers, "plugins": plugins, "web_search": "disabled",
+        cached_search = not scheduled_knowledge and getattr(project_runtime, "model_vendor", None) == "openai"
+        return {"mcp_servers": servers, "plugins": plugins, "web_search": "cached" if cached_search else "disabled",
                 **({"project_doc_max_bytes": 0} if scheduled_knowledge else {}),
                 "features": {"shell_tool": native_tools, "unified_exec": native_tools, "view_image": native_tools,
                              "multi_agent": False, "apps": False, "plugins": False,

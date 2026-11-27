@@ -279,7 +279,8 @@ class Jobs:
                     check=prior_check
             own_mode = child.approval_mode
             from app.services.routine_service import effective_approval_mode  # routine_service imports the runtime, which imports this module
-            if (mode == 'consult' or args.get("read_only") or (earlier and earlier.approval_mode == "plan")
+            if (mode == 'consult' or args.get("read_only") or (check and check.get('kind') == 'inspection')
+                    or (earlier and earlier.approval_mode == "plan")
                     or (pin and (pin.get("read_only") or pin.get("action")=="read_document"))):
                 approval_mode = 'plan'
             elif nested:
@@ -702,7 +703,7 @@ class Jobs:
                 holder, _ = await feature_tasks.consult_scope(db,self.rt.owner_id,team,manager,turn,thread)
                 if child.manager_agent_id != manager.id or row.parent_id != holder.id or row.project != holder.project:
                     raise service.TeamError('outside_scope', 'Clarify only a direct report on this assignment.')
-            if (row.reply != 'resume' or row.status != 'needs_input' or not row.question
+            if (row.outcome == 'awaiting_native_review' or row.reply != 'resume' or row.status != 'needs_input' or not row.question
                     or row.current_turn_id is not None or row.assignee_turn_id != expected):
                 raise service.TeamError('question_changed', 'This question is no longer open. Tool approvals require their own decision.')
             if row.task_id is not None and row.mode == 'work':
@@ -718,7 +719,7 @@ class Jobs:
                 row.origin_ref = f'team-job-{row.id}-answer-{expected}'
                 db.add(FeatureMessage(owner_id=row.owner_id, event_key=row.origin_ref, agent_id=row.assignee_agent_id,
                     project=row.project, text=answer.strip(), result={'task_id':row.task_id, 'job_id':row.id}))
-            row.status, row.answer, row.question = 'queued', answer.strip(), None
+            row.status, row.answer, row.question, row.outcome = 'queued', answer.strip(), None, None
             row.assignee_turn_id = None
             if row.parent_id:
                 from app.feishu.dispatch_recovery import is_recovery
@@ -829,6 +830,104 @@ class Jobs:
         if job_id is not None:
             await self._finish_execution(job_id)
 
+    async def stale_native_decision(self, approval_id, thread_id, turn_id, employee, epoch):
+        """A late allow can request one read-only verification of the original job."""
+        from app.services.feature_tasks import assignment_current
+        from app.team.work_verification import queue_verification
+        async with self.rt.session() as db:
+            await begin_write(db)
+            row = await db.scalar(select(AgentJob).where(
+                AgentJob.owner_id == self.rt.owner_id, AgentJob.kind == "job", AgentJob.mode == "work",
+                AgentJob.assignee_thread_id == thread_id, AgentJob.assignee_turn_id == turn_id,
+                AgentJob.assignment_epoch == epoch, AgentJob.assignee_agent_id == employee
+            ).with_for_update())
+            approval = await db.get(Approval, approval_id)
+            turn = await db.get(Turn, turn_id)
+            thread = await db.get(Thread, thread_id)
+            if (not row or not row.task_id or not thread or thread.owner_id != self.rt.owner_id
+                    or thread.agent_id != employee or not (thread.provider_state or {}).get("employee_project")
+                    or not approval or (approval.thread_id, approval.turn_id) != (thread_id, turn_id)
+                    or approval.status not in ("expired", "cancelled") or approval.delivered_at is not None
+                    or not turn or turn.thread_id != thread_id or row.status not in EXECUTING
+                    or not await assignment_current(db, row, lock=True)):
+                return False
+            last = await self._last_approval(db, turn.id)
+            if not last or last.id != approval.id:
+                return False
+            original_mode = row.approval_mode
+            if row.outcome == "awaiting_native_review" and row.current_turn_id is None:
+                if not await queue_verification(db, row, turn, "原操作的审批已失效。先核对已有结果和回执。"):
+                    return False
+                row.question = row.outcome = None
+            elif row.current_turn_id != turn_id:
+                return False
+            prior = await db.scalar(select(AgentJobEvent.id).where(
+                AgentJobEvent.job_id == row.id, AgentJobEvent.kind == "stale_approval_review",
+                AgentJobEvent.detail["approval_id"].as_string() == approval_id))
+            if not prior:
+                event(db, row, "stale_approval_review", {"approval_id": approval_id, "mode": original_mode})
+            await db.commit()
+        self.kick()
+        return True
+
+    @staticmethod
+    async def _last_approval(db, turn_id):
+        return await db.scalar(select(Approval).where(Approval.turn_id == turn_id)
+                               .order_by(Approval.created_at.desc(), Approval.id.desc()).limit(1))
+
+    async def _park_stale_native(self, db, row, turn):
+        if not row.task_id or row.kind != "job" or row.mode != "work" or row.reply == "wait":
+            return False
+        # A person stopping the turn never schedules follow-up work.
+        if turn.status not in ("failed", "interrupted", "succeeded"):
+            return False
+        thread = await db.get(Thread, row.assignee_thread_id)
+        if not thread or not (thread.provider_state or {}).get("employee_project"):
+            return False
+        approval = await self._last_approval(db, turn.id)
+        if not approval or approval.status not in ("expired", "cancelled") or approval.delivered_at is not None:
+            return False
+        if turn.status == "succeeded" and not (turn.result or "").lstrip().startswith(("BLOCKED:", "NEEDS INPUT:")):
+            retired = await db.scalar(select(Event.id).where(Event.turn_id == turn.id,
+                Event.type == "approval.resolved", Event.data["approval_id"].as_string() == approval.id)
+                .order_by(Event.id.desc()).limit(1))
+            if retired and await db.scalar(select(Event.id).where(Event.turn_id == turn.id, Event.id > retired,
+                    Event.type == "tool.completed", Event.data["ok"].as_boolean().is_(True)).limit(1)):
+                return False
+        if (row.origin_ref or "").startswith(f"team-job-{row.id}-verify-"):
+            return False
+        late = await db.scalar(select(AgentJobEvent.id).where(
+            AgentJobEvent.job_id == row.id, AgentJobEvent.kind == "stale_approval_review",
+            AgentJobEvent.detail["approval_id"].as_string() == approval.id))
+        if late:
+            from app.team.work_verification import queue_verification
+            if await queue_verification(db, row, turn, "原操作的审批已失效。先核对已有结果和回执。"):
+                return True
+        row.status, row.outcome, row.current_turn_id = "needs_input", "awaiting_native_review", None
+        row.question = "原操作的审批已失效。可以在原审批卡点允许，让员工回到本工单，只读核对已有结果。"
+        event(db, row, "native_request_retired", {"approval_id": approval.id, "turn_id": turn.id})
+        await self._deliver_to_holder(db, row, "needs_input")
+        return True
+
+    async def _await_preflight_followup(self, db, row, turn, detail):
+        if not (row.origin_ref or "").startswith(f"team-job-{row.id}-verify-"):
+            return False
+        prior = await db.scalar(select(AgentJobEvent.detail).where(
+            AgentJobEvent.job_id == row.id, AgentJobEvent.kind == "stale_approval_review"
+        ).order_by(AgentJobEvent.id.desc()).limit(1))
+        if not prior:
+            return False
+        row.status, row.current_turn_id, row.outcome = "needs_input", None, "awaiting_next_step"
+        row.result = (turn.result or turn.error or "")[:12000]
+        row.question = ("原申请已过期，只读核对尚未确认交付。请根据已有结果说明下一步；"
+                        "若要补做操作，员工会提交新申请。\n" + detail)[:2000]
+        # The next explicitly requested turn remains subject to the live
+        # employee and work-order settings. No previous approval is revived.
+        row.approval_mode = prior["mode"]
+        event(db, row, "preflight_incomplete", {"turn_id": turn.id, "approval_id": prior["approval_id"]})
+        await self._deliver_to_holder(db, row, "needs_input")
+        return True
+
     async def _finish_execution(self, job_id):
         async with self.rt.session() as db:
             job = await db.get(AgentJob, job_id)
@@ -861,6 +960,18 @@ class Jobs:
                     row.restart = 'cut'
                 event(db, row, 'waiting', {'turn_status': turn.status})
                 await db.commit()
+                self.kick()
+                return
+            if ((turn.status in ("failed", "interrupted") or
+                 turn.status == "succeeded" and (turn.result or "").lstrip().startswith(("BLOCKED:", "NEEDS INPUT:")))
+                    and await self._await_preflight_followup(db, row, turn, turn.result or turn.error or "未取得核对回执。")):
+                await db.commit()
+                self.rt.hub.notify(row.requester_thread_id)
+                self.kick()
+                return
+            if await self._park_stale_native(db, row, turn):
+                await db.commit()
+                self.rt.hub.notify(row.requester_thread_id)
                 self.kick()
                 return
             if row.kind != 'root' and turn.status == 'interrupted' and replay == thread_store.BEFORE_ACCEPT and row.restarts < 1:
@@ -921,8 +1032,10 @@ class Jobs:
                         event(db,row,"completion_evidence",{**verdict,"turn_id":turn.id})
                     queued=(verdict["state"]=="missing" and check and check["kind"] in ("inspection","files")
                             and await work_verification.queue_verification(db,row,turn,verdict["detail"]))
+                    awaiting = (not queued and verdict["state"] in ("missing", "blocked")
+                                and await self._await_preflight_followup(db, row, turn, verdict["detail"]))
                     await db.commit()
-                if queued:
+                if queued or awaiting:
                     self.kick()
                     return
                 if verdict["state"] in ("missing","blocked"):
@@ -1074,7 +1187,7 @@ class Jobs:
                 eligible_at = max(eligible_at, job.last_activity_at)
             if job.status == 'queued' and (now - eligible_at).total_seconds() > settings.TEAM_DELEGATE_QUEUE_SECONDS:
                 await self.settle(job.id, 'failed', 'expired', detail='The job waited too long to start.')
-            elif job.status == 'needs_input' and job.question and (now - (job.last_activity_at or job.created_at)).total_seconds() > settings.TEAM_QUESTION_WAIT_SECONDS:
+            elif job.status == 'needs_input' and job.outcome not in ("awaiting_native_review", "awaiting_next_step") and job.question and (now - (job.last_activity_at or job.created_at)).total_seconds() > settings.TEAM_QUESTION_WAIT_SECONDS:
                 await self.settle(job.id, 'failed', 'expired', detail='The question was not answered in time.')
 
     async def promote(self):

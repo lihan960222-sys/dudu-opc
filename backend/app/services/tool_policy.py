@@ -60,6 +60,19 @@ def automatic(tool, mode, run, arguments):
         # Read-only search of the agent's own history (memory_bridge.py).
         return ('allowed', 'memory_read') if tool in ('mcp__memory__session_search', 'mcp__memory__session_read') else ('denied', 'unknown_memory_tool')
     if tool.startswith('mcp__team__'):
+        if getattr(getattr(run.ctx, "project_runtime", None), "local_workstation", False):
+            from app.services.employee_terminal import allowed_tools
+            name = tool.removeprefix("mcp__team__")
+            if name in ("create_project_text", "replace_project_text", "run_project_command", "inspect_local_path"):
+                if name not in allowed_tools(run.ctx, live=True):
+                    return "denied", "outside_project_command"
+                if name == "inspect_local_path":
+                    return "allowed", "local_inspection"
+                if name == "run_project_command":
+                    return None
+                if name == "replace_project_text" and (mode == "ask" or not str((arguments or {}).get("new", "")).strip()):
+                    return None
+                return "allowed", "own_project_edit"
         return teams.automatic(tool, mode, run.ctx.team, arguments)
     if tool.startswith('mcp__community__'):
         # Marketplace tools have unknown effects. They are never automatically

@@ -1,8 +1,8 @@
 import { request, type Agent } from "@/lib/api";
 import type { TeamSetupPlan } from "@/lib/transcript";
 
-export type TeamAgent = Agent & { is_lead: boolean; state: string; delegation_enabled: boolean; created_by_agent_id?: number | null; instructions_reviewed?: boolean };
-export type TeamState = { enabled?: boolean; team: { id: number; name: string; lead_agent_id: number | null } | null; agents: TeamAgent[]; limits: Record<string, number>; lead_ready: { ok: boolean; reason?: string | null } };
+export type TeamAgent = Agent & { project_terminal_enabled?: boolean | null; is_lead: boolean; state: string; delegation_enabled: boolean; created_by_agent_id?: number | null; instructions_reviewed?: boolean };
+export type TeamState = { local_workstation?: boolean; enabled?: boolean; team: { id: number; name: string; lead_agent_id: number | null } | null; agents: TeamAgent[]; limits: Record<string, number>; lead_ready: { ok: boolean; reason?: string | null } };
 export type SharedApproval = { id: string; thread_id: number; turn_id: number; tool: string; summary: string | null; input: Record<string, unknown>; kind: string | null; status: "pending" | "allowed" | "denied" | "expired" | "cancelled" };
 export type TeamJob = { id: number; root_id: number | null; parent_id: number | null; depth: number; kind?: string; reply?: string; requester_agent_id: number; requester_thread_id: number | null; assignee_agent_id: number; assignee_thread_id: number | null; mode: string; brief: string; status: string; created_at: string; started_at: string | null; finished_at: string | null; result?: string | null; outcome?: string | null; outcome_detail?: string | null; question?: string | null; children?: TeamJob[]; approvals?: SharedApproval[] };
 export type RoomMember = { agent_id: number; name: string; held: boolean; member_thread_id: number | null };

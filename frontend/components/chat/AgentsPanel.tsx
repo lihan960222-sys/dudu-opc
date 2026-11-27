@@ -278,6 +278,7 @@ export function AgentsPanel({
   const [roleChoice, setRoleChoice] = useState<{ id: number | null; value: boolean } | null>(null);
   const [memberChoices, setMemberChoices] = useState<Record<number, boolean>>({});
   const isLead = draft !== null && (roleChoice?.id === draft.id ? roleChoice.value : draft.id !== null && team?.team?.lead_agent_id === draft.id);
+  const workstation = team?.local_workstation === true && team.agents.find(a => a.id === draft?.id)?.project_terminal_enabled !== false;
   const roleSupported = engines.some(engine => engine.id === draft?.provider && engine.capabilities.mcp);
   useEffect(() => {
     let live = true;
@@ -339,7 +340,7 @@ export function AgentsPanel({
   const save = () => {
     if (!draft || draft.name.trim() === "") return;
     const input = toInput(draft, admin);
-    if (!toolsFor && !creationSources && admin && !isLead && ((draft.provider === "codex" && draft.team_workspaces_readable) !== (originalDraft?.team_workspaces_readable ?? false))) {
+    if (!workstation && !toolsFor && !creationSources && admin && !isLead && ((draft.provider === "codex" && draft.team_workspaces_readable) !== (originalDraft?.team_workspaces_readable ?? false))) {
       input.team_workspaces_readable = draft.provider === "codex" && draft.team_workspaces_readable;
     }
     if (toolsFor) {
@@ -980,7 +981,7 @@ export function AgentsPanel({
                       {modeInfo && <p>{t(`emp.approvalHelp.${modeInfo.value}`)}</p>}
                     </fieldset>}
                     {!toolsFor && !creationSources && admin && !isLead && draft.provider === "codex" && (
-                      <TeamWorkspaceAccess value={draft.team_workspaces_readable} disabled={busy}
+                      <TeamWorkspaceAccess workstation={workstation} value={draft.team_workspaces_readable} disabled={busy}
                         onChange={team_workspaces_readable => setDraft({ ...draft, team_workspaces_readable })} />
                     )}
                   </TabPanel>

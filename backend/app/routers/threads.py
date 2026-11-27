@@ -520,6 +520,8 @@ async def answer_approval(
     # A standing "always allow" rule applies to the whole workspace, so it needs its own permission.
     # Without it the answer still counts, just once.
     project_scoped = bool((target_thread.provider_state or {}).get("employee_project"))
+    if payload.task_scope and not project_scoped:
+        raise _error(422, "invalid_scope", "Work-order grants require an active employee project.")
     may_remember = has_permission(principal, "rules")
     project_result = {}
     if project_scoped and payload.remember:
@@ -530,16 +532,22 @@ async def answer_approval(
             from app.feishu.approvals import confirmed_owner_grant
             may_remember = (principal.kind == "device" and await asyncio.to_thread(confirmed_owner_grant,
                 rt.owner_id, approval_id, thread_id, payload.expected_turn_id,
-                payload.expected_employee_id, payload.expected_assignment_epoch))
+                payload.expected_employee_id, payload.expected_assignment_epoch, **({'task_scope':True} if payload.task_scope else {})))
     named = principal is not None and principal.person_id is not None
     if not await rt.answer_approval(
         approval_id, payload.decision, remember=payload.remember and may_remember,
+        **({"task_scope": True} if project_scoped and payload.task_scope else {}),
         **({"saved_project_rule": project_result} if project_scoped and payload.remember else {}),
         person_id=principal.person_id if named else None, person_label=principal.label if named else None,
         **({'expected_turn_id': payload.expected_turn_id} if payload.expected_turn_id is not None else {}),
         **({'expected_assignment_epoch': payload.expected_assignment_epoch, 'expected_employee_id': payload.expected_employee_id}
            if payload.expected_assignment_epoch is not None or payload.expected_employee_id is not None else {}),
     ):
+        if (payload.review_if_stale and project_scoped and payload.decision == "allow"
+                and payload.expected_turn_id and payload.expected_employee_id and payload.expected_assignment_epoch
+                and await rt.team_jobs.stale_native_decision(approval_id, thread_id, payload.expected_turn_id,
+                    payload.expected_employee_id, payload.expected_assignment_epoch)):
+            return ApprovalAnswerResponse(status="review_requested", decision="allow")
         raise _error(
             409, "approval_not_waiting", "That request is no longer waiting for an answer."
         )

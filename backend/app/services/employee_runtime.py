@@ -47,6 +47,11 @@ class TerminalSettings:
     read_folders: tuple[str, ...] = ()
     outbound_network: bool = False
 
+    def effective(self, owner_id):
+        if owner_id and owner_id == settings.STEWARD_STRICT_OWNER:
+            return TerminalSettings(self.enabled)
+        return self
+
     def validate(self, protected=(), *, check_folders=True) -> None:
         if (type(self.enabled) is not bool or type(self.outbound_network) is not bool
                 or not isinstance(self.read_folders, tuple) or len(self.read_folders) > 32
@@ -76,7 +81,7 @@ def terminal_settings(owner_id: str, employee_id: int) -> TerminalSettings:
                     and type(data["enabled"]) is bool and type(data["outbound_network"]) is bool
                     and isinstance(data["read_folders"], list) and len(data["read_folders"]) <= 32
                     and all(isinstance(v, str) for v in data["read_folders"])):
-                return TerminalSettings(data["enabled"], tuple(data["read_folders"]), data["outbound_network"])
+                return TerminalSettings(data["enabled"], tuple(data["read_folders"]), data["outbound_network"]).effective(owner_id)
         except (UnicodeError, ValueError):
             pass
     raise BoundaryUnavailable("无法识别这名员工的项目终端设置，请检查本机数据目录。")
@@ -88,6 +93,8 @@ def native_enabled(owner_id: str, employee_id: int) -> bool:
 
 def _host_native_default(owner_id: str, employee_id: int) -> bool:
     entries = os.environ.get("SUPARAGENT_EMPLOYEE_NATIVE_IDS", "").split(",")
+    if owner_id and owner_id == settings.STEWARD_STRICT_OWNER:
+        return True
     return f"{owner_id}/{employee_id}" in {entry.strip() for entry in entries}
 
 
@@ -117,6 +124,8 @@ def save_native_enabled(owner_id: str, employee_id: int, enabled: bool) -> None:
 
 def save_terminal_settings(owner_id: str, employee_id: int, choice: TerminalSettings) -> None:
     from app.services.agent_memory import write_atomic
+    if choice != choice.effective(owner_id):
+        raise ValueError("此工作台通过任务工具联网，本地查阅目录由员工权限管理。")
     choice.validate(check_folders=choice.enabled)
     path = _terminal_preference_path(owner_id, employee_id)
     _private_directory(path.parent)
@@ -238,13 +247,19 @@ def _python_installation(base: Path, version: str | None = None):
     return base
 
 
-def _installed_tools(project: Path, reserved_roots) -> tuple[tuple[str, Path, Path], ...]:
+def _installed_tools(project: Path, reserved_roots, *, workstation=False) -> tuple[tuple[str, Path, Path], ...]:
     if os.name != "nt":
         return ()
     # Never expose the service virtualenv (it may contain application configuration).
     # The standalone base installation supplies python.exe, the exact Python DLL and stdlib.
-    base = _python_installation(Path(sys.base_prefix).resolve(), f"{sys.version_info.major}.{sys.version_info.minor}")
-    tools = [("python", base / "python.exe", base)]
+    tools = []
+    try:
+        base = _python_installation(Path(sys.base_prefix).resolve(), f"{sys.version_info.major}.{sys.version_info.minor}")
+    except (OSError, ValueError):
+        if not workstation:
+            raise
+    else:
+        tools.append(("python", base / "python.exe", base))
     from app.core.codex_installation import store_codex_executable
     for location in (settings.LOCAL_CODEX_CLI_PATH, os.getenv("SUPARAGENT_PACKAGED_CODEX_PATH"), shutil.which("codex.exe")):
         packaged = store_codex_executable(location)
@@ -269,12 +284,19 @@ def _installed_tools(project: Path, reserved_roots) -> tuple[tuple[str, Path, Pa
         if name == "pwsh" and not (install / "System.Management.Automation.dll").is_file():
             continue
         if name == "python":
-            _python_installation(install)
+            try:
+                _python_installation(install)
+            except (OSError, ValueError):
+                if not workstation:
+                    raise
+                continue
         if (name, exe, install) not in tools:
             tools.append((name, exe, checked_root(install)))
     for _, _, root in tools:
         if any(root.is_relative_to(p) or p.is_relative_to(root) for p in (*reserved_roots, project, _service_root())):
             raise BoundaryUnavailable("工具安装目录与员工目录或后台私有目录重叠。")
+    if workstation:
+        return tuple(tools)
     # A project-controlled pyvenv.cfg is a dependency declaration, never a grant.
     for name in (".venv", "venv"):
         cfg = project / name / "pyvenv.cfg"
@@ -312,6 +334,17 @@ class ProjectRuntime:
     external_reads: tuple[Path, ...] = ()
     outbound_network: bool = False
 
+    local_workstation: bool = False
+    pinned_files: tuple[Path, ...] = ()
+
+    @property
+    def scratch(self) -> Path:
+        return self.profile / "task-temp" / f"{self.task_id}-{self.assignment_epoch}"
+
+    @property
+    def reviewed_permission_name(self) -> str:
+        return self.permission_name + "-reviewed" if self.local_workstation else self.permission_name
+
     @property
     def profile(self) -> Path:
         return self.profile_path or profile_dir(self.owner_id, self.employee_id, self.model_vendor)
@@ -339,9 +372,14 @@ class ProjectRuntime:
     @property
     def permission_name(self) -> str:
         # A changed grant cannot reuse a stale process configuration.
-        payload = json.dumps([str(self.root), self.writable, *map(str, self.readable_roots),
-                              *(str(path) for _, _, path in self.installed_tools),
-                              list(map(str, self.external_reads)), self.outbound_network])
+        if self.local_workstation or self.pinned_files:
+            payload = json.dumps([self._filesystem(), self._filesystem(check=True), self.writable,
+                                  self.outbound_network, self.local_workstation])
+        else:
+            # Existing grants for unmodified, conventional project profiles stay valid.
+            payload = json.dumps([str(self.root), self.writable, *map(str, self.readable_roots),
+                                  *(str(path) for _, _, path in self.installed_tools),
+                                  list(map(str, self.external_reads)), self.outbound_network])
         return "employee-" + hashlib.sha256(payload.encode()).hexdigest()[:24]
 
     def has_terminal_access(self, read_folders, outbound_network: bool) -> bool:
@@ -351,7 +389,11 @@ class ProjectRuntime:
 
     def process_environment(self, source=None) -> dict[str, str]:
         directories = (str(executable.parent) for _, executable, _ in self.installed_tools)
-        return _profile_environment(self.profile, source, directories)
+        env = _profile_environment(self.profile, source, directories)
+        if self.local_workstation:
+            # Keep the app server's temporary files out of its child processes' scratch directory.
+            _private_directory(self.scratch)
+        return env
 
     def _binding_paths(self, backend_thread_id: int) -> tuple[Path, Path]:
         if type(backend_thread_id) is not int or backend_thread_id < 1:
@@ -415,12 +457,53 @@ class ProjectRuntime:
     def check_permission_name(self) -> str:
         return self.permission_name + "-check"
 
-    def _filesystem(self, *, check=False):
+    def private_read_roots(self):
+        paths = [settings.SQLITE_FILE.resolve().parent, _service_root(), self.profile.parents[3],
+                 Path(tempfile.gettempdir()).resolve(), Path(__file__).resolve().parents[3]]
+        paths.extend(Path.home() / name for name in
+                     (".codex", ".agents", ".config", ".aws", ".ssh", ".gnupg", ".azure", ".kube",
+                      ".docker", ".claude", ".git-credentials", ".npmrc", ".netrc"))
+        paths.extend(Path(v).resolve() for v in (settings.ATTACHMENTS_DIR, settings.DECISION_LOG_DIR,
+                     settings.ENGINE_PROCESS_DIR, settings.AUTH_LIMITS_DIR, settings.TENANT_DATA_DIR) if v)
+        paths.extend(Path(v).resolve() for key in ("CODEX_HOME", "CODEX_SQLITE_HOME", "GNUPGHOME",
+                     "AWS_SHARED_CREDENTIALS_FILE", "KUBECONFIG")
+                     if (v := os.environ.get(key)) and Path(v).is_absolute())
+        return tuple(paths)
+
+    def peer_control_paths(self):
+        return tuple(root / name for root in self.readable_roots for name in
+                     ("AGENTS.md", "MEMORY.md", "memory", "skills", ".agents", ".codex", ".git"))
+
+    @staticmethod
+    def application_data_roots():
+        return (Path.home() / "AppData", *(Path(v).resolve() for key in ("APPDATA", "LOCALAPPDATA")
+                if (v := os.environ.get(key)) and Path(v).is_absolute()))
+
+    def _filesystem(self, *, check=False, reviewed=False):
         fs = {":root": "deny", ":minimal": "read", **{str(p): "read" for _, _, p in self.installed_tools},
               **{str(path): "read" for path in self.external_reads if not check},
               str(self.root): "write" if self.writable and not check else "read",
               **{str(path): "read" for path in self.readable_roots if not check}, str(_default_service_root()): "deny",
               str(self.profile.parents[3]): "deny", str(_service_root()): "deny"}
+        if self.local_workstation:
+            # A general subprocess can unlink any writable file. Normal project edits
+            # go through scoped file tools. Only an explicitly reviewed command may write.
+            fs[str(self.root)] = "write" if reviewed and self.writable else "read"
+            if not check:
+                fs[":root"] = "read"
+                private = self.private_read_roots() + self.application_data_roots()
+                fs.update({str(p): "deny" for p in private})
+                fs.update({str(p): "deny" for p in self.employee_folders
+                           if p != self.root and p not in self.readable_roots})
+                fs.update({str(p): "deny" for p in self.peer_control_paths()})
+                fs[str(self.scratch)] = "write"
+                fs[str(self.root / "任务")] = "read"
+                if reviewed and self.writable:
+                    fs[str(self.task_dir)] = "write"
+                for name in ("AGENTS.md", "MEMORY.md", "memory", "skills", ".agents", ".codex", ".git"):
+                    fs[str(self.root / name)] = "read"
+        if not check:
+            fs.update({str(p): "read" for p in self.pinned_files})
         return "{" + ", ".join(f"{json.dumps(k, ensure_ascii=False)}={json.dumps(v)}" for k, v in fs.items()) + "}"
 
     def cli_options(self) -> list[str]:
@@ -441,6 +524,12 @@ class ProjectRuntime:
             "allow_login_shell": "false",
             "analytics.enabled": "false", "check_for_update_on_startup": "false",
         }
+        if self.local_workstation:
+            for key in ("TEMP", "TMP", "TMPDIR"):
+                config[f"shell_environment_policy.set.{key}"] = json.dumps(str(self.scratch))
+            if self.writable:
+                config[f"permissions.{self.reviewed_permission_name}.filesystem"] = self._filesystem(reviewed=True)
+                config[f"permissions.{self.reviewed_permission_name}.network.enabled"] = "false"
         if self.writable:
             config[f"permissions.{self.check_permission_name}.filesystem"] = self._filesystem(check=True)
             config[f"permissions.{self.check_permission_name}.network.enabled"] = "false"
@@ -565,7 +654,8 @@ def resolve_project_runtime(agent, task, *, approval_mode, readable_roots=(),
             or not native_enabled(agent.owner_id, agent.id)):
         raise ValueError("此员工未获准以原生项目会话执行这项派工。")
     root = checked_root(Path(agent.role_path))
-    peers = tuple(sorted({checked_root(Path(p)) for p in readable_roots})) if agent.team_workspaces_readable else ()
+    workstation = bool(agent.owner_id and agent.owner_id == settings.STEWARD_STRICT_OWNER)
+    peers = tuple(sorted({checked_root(Path(p)) for p in readable_roots})) if workstation or agent.team_workspaces_readable else ()
     storage = _service_root()
     if any(storage.is_relative_to(p) or p.is_relative_to(storage) for p in protected_roots):
         raise BoundaryUnavailable("员工的会话存储不能与任何员工的项目目录重叠。")
@@ -580,7 +670,9 @@ def resolve_project_runtime(agent, task, *, approval_mode, readable_roots=(),
     profile = profile_dir(agent.owner_id, agent.id, model_vendor)
     choice = terminal_settings(agent.owner_id, agent.id)
     choice.validate((root, *peers, *protected_roots))
+    from app.services import shared_library
+    pins = shared_library.project_files(agent.owner_id, root)
     return ProjectRuntime(agent.owner_id, agent.id, task.id, assignment_epoch,
                           model_vendor, root, writable, peers,
-                          _installed_tools(root, protected_roots), tuple(protected_roots), profile,
-                          tuple(map(Path, choice.read_folders)), choice.outbound_network)
+                          _installed_tools(root, protected_roots, workstation=workstation), tuple(protected_roots), profile,
+                          tuple(map(Path, choice.read_folders)), choice.outbound_network and not workstation, workstation, pins)

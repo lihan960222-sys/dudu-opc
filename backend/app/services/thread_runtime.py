@@ -317,6 +317,7 @@ class ThreadApprovalGate:
         self._policy_denials: dict[str, str] = {}
         self.employee_rule_keys: dict[str, tuple[str, str]] = {}
         self._employee_rule_ids: dict[str, int] = {}
+        self._reserved_rules: dict[str, int] = {}
 
     @property
     def waiting(self) -> bool:
@@ -453,7 +454,7 @@ class ThreadApprovalGate:
         if project:
             if key:
                 async with runtime.session() as db:
-                    rule = await employee_approval_rules.find(db, runtime.owner_id, key)
+                    rule = await employee_approval_rules.matching(db, runtime.owner_id, project, key)
                 if rule:
                     self._employee_rule_ids[approval.id] = rule.id
         elif (tool not in SCREEN_INPUT
@@ -561,11 +562,14 @@ class ThreadApprovalGate:
                     except (ValueError, OSError):
                         await store.deny_undelivered_allow(db, handle.approval_id, run.owner_token, source="grant_changed")
                         return Decision(DENY)
-                    if matched_rule_id is not None:
+                    if matched_rule_id is not None or handle.approval_id in self._reserved_rules:
                         current = await asyncio.to_thread(employee_approval_rules.identity, run.ctx.project_runtime,
                                                           approved.tool, approved.input)
-                        rule = await employee_approval_rules.find(db, runtime.owner_id, current)
-                        if current != employee_key or not rule or rule.id != matched_rule_id:
+                        rule_changed = current != employee_key
+                        if matched_rule_id is not None and not rule_changed:
+                            rule = await employee_approval_rules.matching(db, runtime.owner_id, run.ctx.project_runtime, current)
+                            rule_changed = not rule or rule.id != matched_rule_id
+                        if rule_changed:
                             await store.deny_undelivered_allow(db, handle.approval_id, run.owner_token, source="grant_changed")
                             return Decision(DENY)
                 delivered = await store.mark_allow_delivered(db, handle.approval_id, run.owner_token)
@@ -589,11 +593,23 @@ class ThreadApprovalGate:
             return
         self._deadlines.pop(approval_id, None)
         async with self._runtime.session() as db:
-            await store.cancel_approval(db, approval_id)
+            closed = await store.cancel_approval(db, approval_id)
+            if not closed and getattr(self._run.ctx, "project_runtime", None):
+                await store.retire_unwritten_approval(db, approval_id, self._run.owner_token)
         future = self._runtime._waiters.get(approval_id)
         if future is not None and not future.done():
             future.set_result("cancelled")
         self._runtime.hub.notify(self._run.thread_id)
+
+    async def native_response(self, approval_id: str, written: bool):
+        """A request cannot delegate future calls until its exact reply was written."""
+        rule_id = self._reserved_rules.pop(approval_id, None)
+        if written and rule_id:
+            async with self._runtime.session() as db:
+                await employee_approval_rules.confirm(db, self._runtime.owner_id, rule_id)
+        elif not written:
+            async with self._runtime.session() as db:
+                await store.retire_unwritten_approval(db, approval_id, self._run.owner_token)
 
     async def _status(self, approval_id: str) -> str:
         async with self._runtime.session() as db:
@@ -2159,7 +2175,7 @@ class ThreadRuntime:
         self, approval_id: str, decision: str, *, remember: bool = False, expected_turn_id: int | None = None,
         person_id: int | None = None, person_label: str | None = None,
         expected_assignment_epoch: int | None = None, expected_employee_id: int | None = None,
-        saved_project_rule: dict | None = None,
+        saved_project_rule: dict | None = None, task_scope: bool = False,
     ) -> bool:
         """The person's answer (`allow` or `deny`). True if it was recorded; False
         means it changed nothing (already answered, cancelled, or its turn is no
@@ -2170,6 +2186,7 @@ class ThreadRuntime:
         if decision not in (ALLOW, DENY):
             raise ValueError("decision must be 'allow' or 'deny'")
         status = "allowed" if decision == ALLOW else "denied"
+        reserved_id = None
         lease, scoped_reply = {}, expected_assignment_epoch is not None or expected_employee_id is not None
         if scoped_reply and (not expected_turn_id or not expected_assignment_epoch or not expected_employee_id):
             return False
@@ -2207,11 +2224,19 @@ class ThreadRuntime:
                 if remember and decision == ALLOW:
                     key = await asyncio.to_thread(employee_approval_rules.identity, project, approval.tool, approval.input)
                     if key and key == run.gate.employee_rule_keys.get(approval_id):
-                        await employee_approval_rules.stage(db, self.owner_id, key)
+                        if task_scope:
+                            key = employee_approval_rules.work_order_key(project, key)
+                        reserved = await employee_approval_rules.stage(db, self.owner_id, key, reserve=True)
+                        reserved_id = reserved.id
                         if saved_project_rule is not None:
-                            saved_project_rule["id"] = (await employee_approval_rules.find(db, self.owner_id, key)).id
+                            saved_project_rule["id"] = reserved.id
                     else:
                         remember = False
+                # Hashing an installed target or waiting on a database lock can outlive
+                # the native question. Roll back a staged scope if it was withdrawn.
+                if run.gate._deadlines.get(approval_id, 0) <= asyncio.get_running_loop().time():
+                    await db.rollback()
+                    return False
                 lease = {"expected_turn_id":run.turn_id, "expected_tool":approval.tool, "owner_token":run.owner_token,
                          "fresh_after":datetime.now(UTC) - timedelta(seconds=settings.THREAD_LEASE_SECONDS),
                          "by":{"by":"person", "assignment_epoch":project.assignment_epoch, "employee_id":project.employee_id}}
@@ -2219,6 +2244,8 @@ class ThreadRuntime:
                 db, approval_id, status, person_id=person_id, person_label=person_label, **lease)
             approval = await store.get_approval(db, approval_id)
         if won:
+            if reserved_id is not None:
+                run.gate._reserved_rules[approval_id] = reserved_id
             future = self._waiters.get(approval_id)
             if future is not None and not future.done():
                 future.set_result(status)

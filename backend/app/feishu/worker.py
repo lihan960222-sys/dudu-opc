@@ -447,7 +447,7 @@ class Worker:
                         self.db.execute("update outbox set state='superseded' where id=? and state='pending'",(outgoing,))
                 await db.commit()
 
-    def flush(self, *, cleanup=True, history_id=None, assignment_id=None):
+    def flush(self, *, cleanup=True, history_id=None, assignment_id=None, approvals_only=False):
         with self.db:
             self.db.execute("""update outbox set state='superseded' where state='pending' and id in
                 (select n.outgoing from direct_notices n join direct_finals f using(app,event))""")
@@ -457,9 +457,11 @@ class Worker:
             (select 1 from outbox root where root.is_root=1 and root.role=o.role and root.task=o.task and root.state='sent'))
             and ((? is null and not exists(select 1 from history_reply_policy h where h.outgoing=o.id)) or o.id=?)
             and ((? is null and not exists(select 1 from assignment_outbox a where a.outgoing=o.id)) or o.id=?)
-            order by o.rowid""",(history_id,history_id,assignment_id,assignment_id)).fetchall():
+            and (?=0 or exists(select 1 from approval_dm a where a.outgoing=o.id))
+            order by o.rowid""",(history_id,history_id,assignment_id,assignment_id,approvals_only)).fetchall():
             with self.db:
-                self.db.execute("update outbox set state='verify' where id=?",(row['id'],))
+                if not self.db.execute("update outbox set state='verify' where id=? and state='pending'",(row['id'],)).rowcount:
+                    continue
             try:
                 remote = self.pub.deliver(row)
             except Exception as exc:
@@ -567,6 +569,19 @@ class Worker:
 
     async def tick(self):
         from .lead_chat import publish_reports,register_report
+        # Posted decisions and soon-expiring cards take priority over reports,
+        # attachment preparation, and routine work already waiting in the inbox.
+        replies = self.db.execute("""select i.* from inbox i join owner_dm_sources s using(app,event,message)
+            join outbox o on o.remote=json_extract(i.payload,'$.parent_id') and o.state='sent'
+            join approval_dm a on a.outgoing=o.id
+            where i.state='received' and i.app=? and s.tenant=? and s.owner=?
+            order by i.rowid""", tuple(self.cfg["steward"].get(k) for k in ("app_id","tenant_key","open_id"))).fetchall()
+        for row in replies:
+            msg = json.loads(row["payload"])
+            if msg.get("message_type") == "text":
+                approvals.answer(self, row, msg, json.loads(msg["content"]).get("text", ""))
+        await team_progress.poll(self)
+        self.flush(cleanup=False, approvals_only=True)
         for row in self.db.execute("select i.*,d.thread,d.turn from inbox i join direct_turns d using(app,event) where i.state='direct_running'").fetchall():
             try:
                 response = self.api.get(f"threads/{row['thread']}")
@@ -648,7 +663,6 @@ class Worker:
         await self.flush_assignment_reports()
         self.flush()
         suggestions.poll(self)
-        await team_progress.poll(self)
 
     async def run(self, wake=None):
         await team_progress.poll(self)

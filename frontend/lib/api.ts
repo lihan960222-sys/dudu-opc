@@ -236,6 +236,7 @@ export type DecisionsPage = { items: DecisionEntry[]; next_before: string | null
 
 export type ApprovalRule = {
   employee_name?: string | null;
+  task_id?: number | null;
   cwd?: string | null;
   id: number;
   match: "exact" | "prefix";
@@ -1727,11 +1728,11 @@ export const api = {
     threadId: number,
     approvalId: string,
     decision: "allow" | "deny",
-    remember = false
+    remember: boolean | "task" = false
   ) =>
     request<ApprovalAnswer>(
       `/threads/${threadId}/approvals/${encodeURIComponent(approvalId)}`,
-      { method: "POST", body: JSON.stringify(remember ? { decision, remember } : { decision }) }
+      { method: "POST", body: JSON.stringify(remember === "task" ? { decision, remember: true, task_scope: true } : remember ? { decision, remember } : { decision }) }
     ),
 
   // --- Approval rules, the decision log and the health scan (local only) ---

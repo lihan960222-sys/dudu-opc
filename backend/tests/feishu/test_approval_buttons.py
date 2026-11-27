@@ -58,6 +58,42 @@ def test_bound_owner_click_sends_exact_decision_once(tmp_path):
     db.close()
 
 
+def test_new_card_default_work_order_and_late_review(tmp_path):
+    db = journal(tmp_path / "channel")
+    approvals.initialize(db)
+    args = {"thread":2, "turn":3, "event":"team:42", "assignment_epoch":1, "agent_id":5}
+    item = {"id":"new", "tool":"Bash", "can_remember":True, "can_scope_task":True,
+            "input":{"command":"Get-Location", "cwd":str(tmp_path)}}
+    approvals.queue_notice(db, args, 10, item, "员工 · 工单 #10")
+    db.execute("update outbox set state='sent',remote='sent'")
+    requests, replies = [], []
+    def backend(req):
+        requests.append(json.loads(req.content))
+        return httpx.Response(200, json={"status":"review_requested"})
+    with httpx.Client(transport=httpx.MockTransport(backend), base_url="http://localhost") as api:
+        worker = SimpleNamespace(db=db, cfg={"steward":{"app_id":"app","open_id":"owner"}},
+                                 api=api, respond=lambda *args: replies.append(args[2]))
+        assert approvals.answer(worker, {"app":"app","event":"reply"},
+                                {"parent_id":"sent","chat_type":"p2p","message_type":"text"}, "允许")
+    assert requests == [{"decision":"allow","remember":True,"expected_turn_id":3,
+                         "expected_assignment_epoch":1,"expected_employee_id":5,
+                         "task_scope":True,"review_if_stale":True}]
+    assert "只读核对" in replies[0]
+    db.close()
+
+
+def test_recursive_metadata_pipeline_has_plain_language_description_but_no_shell_grant():
+    from app.services.employee_approval_rules import identity
+    from pathlib import Path
+    script = ("Get-ChildItem -LiteralPath 'C:/logs','D:/other' -Recurse -Filter 'kit_*.log' "
+              "-ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | "
+              "Select-Object -First 3 FullName,LastWriteTime | Format-List")
+    view = approvals._card_display({"tool":"Bash", "input":{"command":script,"cwd":"C:/work"}}, "员工", "detail")
+    assert "最近 3 个文件" in view["summary"]
+    project = SimpleNamespace(root=Path("C:/work"))
+    assert identity(project, "Bash", {"command":script, "cwd":str(project.root)}) is None
+
+
 def test_native_card_preview_for_string_wrapper_preserves_permission_request():
     cmd = r'''"C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile -Command "Get-Location"'''
     args = {"command":cmd, "cwd":"C:/work", "additionalPermissions":{"network":{"enabled":True}}}

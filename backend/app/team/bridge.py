@@ -30,7 +30,8 @@ async def consume_allowed_approval(db, turn_id, owner_token, tool, arguments, *,
     query = select(Approval).where(
         Approval.turn_id == turn_id, Approval.tool == tool, Approval.status == 'allowed',
         Approval.consumed_at.is_(None), Approval.decided_at >= threshold)
-    if tool in ('mcp__team__run_project_command','mcp__team__list_project_files','mcp__team__read_project_text','mcp__team__replace_project_text'):
+    if tool in ('mcp__team__run_project_command','mcp__team__list_project_files','mcp__team__read_project_text','mcp__team__replace_project_text','mcp__team__create_project_text','mcp__team__inspect_local_path',
+                'mcp__team__read_task_reference','mcp__team__download_task_reference','mcp__team__deliver_project_file','mcp__team__use_project_release'):
         query = query.where(Approval.delivered_at.is_not(None))
     approvals = (await db.execute(query.order_by(Approval.created_at))).scalars()
     expected = canonical(arguments)
@@ -69,7 +70,13 @@ class TeamBridge:
         flags = {'run_project_command':'--project-command','read_project_text':'--project-read',
                  'replace_project_text':'--project-edit'}
         allowed = employee_terminal.allowed_tools(self.run.ctx)
+        if "list_project_files" in allowed and self.run.ctx.project_runtime.writable and self.run.ctx.approval_mode != "plan":
+            extra.append("--project-release")
         extra.extend(flag for name, flag in flags.items() if name in allowed)
+        if "inspect_local_path" in allowed:
+            extra.append("--local-inspection")
+        if "create_project_text" in allowed:
+            extra.append("--project-create")
         if "list_peer_files" in allowed:
             extra.append("--peer-files")
         for tool in getattr(self.run.ctx.team, 'feishu_tools', ()):
@@ -131,6 +138,9 @@ class TeamBridge:
             result = {'error': str(exc), 'code': exc.code}
         except Exception:
             result = {'error': 'The team call could not be completed.', 'code': 'team_error'}
+        if getattr(self.run.ctx, "project_runtime", None) or getattr(getattr(self.run.ctx, "team", None), "feishu_tools", ()):
+            from app.services.employee_resources import model_result
+            result = model_result(result)
         response = self.folder / path.name.replace('req-', 'resp-').replace('.working', '.json')
         tmp = response.with_suffix('.tmp')
         tmp.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
@@ -141,12 +151,41 @@ class TeamBridge:
 
     async def execute(self, name, args, *, approval_id=None):
         rt, run = self.runtime, self.run
-        if name in ('list_project_files','read_project_text','replace_project_text','list_peer_files','read_peer_text'):
+        if name in ("use_project_release", "publish_shared_release"):
+            from app.services import shared_library
+            allowed, _ = policy.automatic("mcp__team__" + name, run.ctx.approval_mode, run.ctx.team, args)
+            if allowed != "allowed":
+                raise service.TeamError("outside_shared_library", "此回合不能更改依赖。")
+            if name == "use_project_release":
+                return await shared_library.use_release(rt, run, args)
+            async def require_steward(db):
+                team = await service.team_for(db, rt.owner_id, lock=True)
+                turn = await db.get(Turn, run.turn_id, with_for_update=True)
+                if (not team or team.id != run.ctx.team.team_id or team.lead_agent_id != run.agent_id
+                        or not turn or turn.owner_token != run.owner_token or turn.status != "running"):
+                    raise service.TeamError("outside_shared_library", "只有当前在岗的大管家可以登记共享版本。")
+            try:
+                async with rt.session() as db:
+                    await require_steward(db)
+                spec = shared_library.ReleaseRequest(**args)
+                release, data = await asyncio.to_thread(shared_library.resolve_request, rt.owner_id, spec)
+                if data is None:
+                    data = await asyncio.to_thread(shared_library.prefetch, rt.owner_id, release)
+                async with rt.session() as db:
+                    await begin_write(db)
+                    await require_steward(db)
+                    return await asyncio.to_thread(shared_library.publish, rt.owner_id, release, fetched=data)
+            except (ValueError, OSError) as exc:
+                raise service.TeamError("shared_release_unavailable", str(exc)) from None
+        from app.services import employee_resources
+        if name in (employee_resources.READ, employee_resources.DOWNLOAD, employee_resources.DELIVER):
+            return await employee_resources.execute(rt, run, name, args)
+        if name in ('list_project_files','read_project_text','replace_project_text','create_project_text','inspect_local_path','list_peer_files','read_peer_text'):
             from app.core.config import settings
             from app.services import employee_project_files, employee_runtime, employee_terminal, team_workspaces, workspace_files
             from app.team.steward_review import current_native_job
 
-            writing = name == 'replace_project_text'
+            writing = name in ('replace_project_text','create_project_text')
             peer_read = name in employee_terminal.PEER_READ_TOOLS
             async with rt.session() as db:
                 await begin_write(db)
@@ -157,7 +196,10 @@ class TeamBridge:
                 try:
                     project = await employee_runtime.checked_active_project(db, run)
                     root, scope = project.root, 'role'
-                    if peer_read:
+                    if name == 'inspect_local_path':
+                        result = await asyncio.to_thread(employee_project_files.inspect_local,project,args)
+                        root, scope = Path(result["path"]).anchor, "local"
+                    elif peer_read:
                         listing = name == 'list_peer_files'
                         options = dict(args)
                         agent_id = options.pop('agent_id', None)
@@ -179,6 +221,8 @@ class TeamBridge:
                         result = await asyncio.to_thread(employee_project_files.inspect_workspace, root,
                             args.get('path',''), listing=True, own=True, limit=args.get('limit',50),
                             folders_only=args.get('folders_only',False))
+                    elif name == 'create_project_text':
+                        result = await asyncio.to_thread(employee_project_files.create,project,args)
                     elif writing:
                         result = await asyncio.to_thread(employee_project_files.edit,project,args,storage=settings.SQLITE_FILE.parent)
                     else:
@@ -190,11 +234,20 @@ class TeamBridge:
                        'path':result['path'], 'root':str(root)}
             if name in ('list_peer_files','list_project_files'):
                 receipt.update(operation='list_files', count=len(result['entries']), truncated=result['truncated'])
+            if name == 'inspect_local_path':
+                receipt.update(operation={"list":"list_files", "find":"list_files", "read":"read_text", "metadata":"metadata"}[args["operation"]])
+                if args["operation"] == "find":
+                    receipt.update(count=result["matched"], truncated=result["truncated"], scan_complete=result["scan_complete"])
+                if result.get("contents_hidden"):
+                    receipt["operation"] = "metadata"
             if writing:
                 receipt['sha256'] = result['sha256']
             if not await run.recorder.emit('tool.completed', {'call_id':'project-file-' + os.urandom(16).hex(),
                     'name':name, 'ok':True, 'truncated':False,'output':'','file_receipts':[receipt]}):
                 raise service.TeamError('receipt_lost','文件操作已结束，工单回执未保存，请先核对文件。')
+            if getattr(project, "local_workstation", False):
+                from app.services.agent_memory import redact_json
+                result = redact_json(result)
             return result
         if name == 'run_project_command':
             from app.db.models import AgentJobEvent, Event
@@ -240,7 +293,7 @@ class TeamBridge:
                 raise service.TeamError('project_command_failed',str(exc)) from exc
         if name in ("employee_capabilities","enable_local_skill"):
             from app import composio_tools
-            from app.services import agent_skills
+            from app.services import agent_skills, shared_library
             allowed, _ = policy.automatic("mcp__team__"+name,run.ctx.approval_mode,run.ctx.team,args)
             if allowed!="allowed":
                 raise service.TeamError("outside_skill_scope","当前任务不能启用技能。")
@@ -285,6 +338,9 @@ class TeamBridge:
                               "source":skill.source, "revision":skill.revision}
                              for skill in agent_skills.list_skills(caller.id) if skill.enabled]
                     return {**agent_skills.bundled_catalog(caller.id), "saved_skills":saved,
+                            "shared_releases": [{**r, **({"template_id":"shared@" + r["sha256"]} if r["kind"] == "skill" else {})}
+                                                for r in shared_library.catalog(rt.owner_id)],
+                            "project_releases": shared_library.project_entries(rt.owner_id, project.root) if project else [],
                             "role_path":caller.role_path, "read_only_peers":peers,
                             "feishu_tool_details":{t["name"]:t["description"] for t in FEISHU_TOOLS
                                                    if t["name"] in feishu_tools},
@@ -293,8 +349,14 @@ class TeamBridge:
                         feishu_tools|peer_tools|set(run.ctx.community_tools)|set(connector_tools or []))}
                 management.strict(args,{"template_id","name"})
                 try:
-                    skill=agent_skills.selected_employee_skill(caller.id,args.get("name"),args.get("template_id"),
-                                                                project.root if project else None)
+                    template = args.get("template_id")
+                    if isinstance(template, str) and template.startswith("shared@"):
+                        skill = shared_library.skill(rt.owner_id, None, args.get("name"), template[7:])
+                    elif template == "shared" and project:
+                        skill = shared_library.skill(rt.owner_id, project.root, args.get("name"))
+                    else:
+                        skill=agent_skills.selected_employee_skill(caller.id,args.get("name"),args.get("template_id"),
+                                                                    project.root if project else None)
                 except agent_skills.SkillError as exc:
                     raise service.TeamError(exc.code,exc.message) from None
                 if getattr(run, "recorder", None):

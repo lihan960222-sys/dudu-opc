@@ -368,7 +368,7 @@ const APPROVAL_LABEL: Record<Item<"approval">["status"], string> = {
 
 // What became of "Always allow this command" on this card: the saved rule
 // (null after Undo), or why it could not be saved.
-export type Remembered = { ruleId: number | null; error: string | null };
+export type Remembered = { ruleId: number | null; error: string | null; taskScope?: boolean };
 
 export function ApprovalCard({
   item,
@@ -384,7 +384,7 @@ export function ApprovalCard({
   threadId?: number | null;
   answering: boolean;
   error: string | null;
-  onAnswer: (decision: "allow" | "deny", remember?: boolean) => void;
+  onAnswer: (decision: "allow" | "deny", remember?: boolean | "task") => void;
   remembered?: Remembered;
   // Rules removed since the page opened: their cards stop offering Undo.
   undoneRules?: number[];
@@ -399,7 +399,8 @@ export function ApprovalCard({
   const pending = item.status === "pending";
   // A decided card is one line; the input it was asked about is behind the arrow.
   const [open, setOpen] = useState(false);
-  const candidate = canAlwaysAllow(item.tool, item.input);
+  const delivery = item.tool === "mcp__team__deliver_project_file";
+  const candidate = delivery || canAlwaysAllow(item.tool, item.input);
   const [offer, setOffer] = useState<{ id: string; employee: boolean | null } | null>(null);
   useEffect(() => {
     if (!pending || !candidate || !threadId || !mayRemember) return;
@@ -412,7 +413,7 @@ export function ApprovalCard({
   }, [pending, candidate, threadId, mayRemember, item.approvalId]);
   const scoped = offer?.id === item.approvalId ? offer : null;
   const employeeGrant = scoped?.employee === true && canOpenWorkbench(session);
-  const rememberable = candidate && (employeeGrant || scoped?.employee === null);
+  const rememberable = candidate && (employeeGrant || (!delivery && scoped?.employee === null));
   const screenInput = isScreenInput(item.tool);
   const byRule = item.resolvedBy === "saved_rule";
   const savedRuleId = remembered?.ruleId ?? (byRule ? item.ruleId : null);
@@ -515,15 +516,15 @@ export function ApprovalCard({
       )}
       {pending && mayAnswer && (
         <>
-        {employeeGrant && <p className="text-xs text-muted">{t("approval.employeeScope")}</p>}
+        {employeeGrant && <p className="text-xs text-muted">{t(delivery ? "approval.deliveryScope" : "approval.employeeScope")}</p>}
         <div className="flex flex-wrap gap-2">
+          {employeeGrant && <Button variant="primary" disabled={answering} onClick={() => onAnswer("allow", "task")}>{t("approval.allowTask")}</Button>}
           <Button variant={employeeGrant ? undefined : "primary"} onClick={() => onAnswer("allow")} disabled={answering}>
             <ThumbsUp size={13} className="mr-1.5 inline" aria-hidden="true" />
             {employeeGrant ? t("approval.onceOnly") : screenInput ? t("approval.allowThisTurn") : t("approval.allow")}
           </Button>
           {rememberable && mayRemember && (
             <Button
-              variant={employeeGrant ? "primary" : undefined}
               onClick={() => onAnswer("allow", true)}
               disabled={answering}
               title={t(employeeGrant ? "approval.employeeScope" : "approval.alwaysAllowHint")}
@@ -542,7 +543,7 @@ export function ApprovalCard({
       {!pending && undone && <p className="text-xs text-muted">{t("approval.noLongerAlwaysAllowed")}</p>}
       {!pending && savedRuleId != null && !undone && onUndo && (
         <p className="flex flex-wrap items-center gap-2 text-xs text-muted">
-          {remembered?.ruleId != null ? t("approval.alwaysAllowedHere") : t("approval.savedRuleAllows")}
+          {remembered?.ruleId != null ? t(remembered.taskScope ? "approval.rememberedTask" : "approval.alwaysAllowedHere") : t("approval.savedRuleAllows")}
           <button onClick={() => onUndo(savedRuleId)} className="cursor-pointer underline hover:text-ink">
             {remembered?.ruleId != null ? t("common.undo") : t("approval.stopAlwaysAllowing")}
           </button>

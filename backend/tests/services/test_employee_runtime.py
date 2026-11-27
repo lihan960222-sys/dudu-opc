@@ -249,3 +249,33 @@ async def test_shell_uses_role_root_and_respects_peer_grant(tmp_path, monkeypatc
         assert run([str(python), "-B", "-E", "-s", "check.py"]).returncode == 0
         subprocess.run([str(python), "-B", "-E", "-s", "check.py"], cwd=runtime.root, check=True,
                        **host_exec.background_process_options())
+
+def test_workstation_profiles_keep_host_and_project_writes_separate(tmp_path, monkeypatch):
+    import tomllib
+    from dataclasses import replace
+    from app.services import employee_runtime
+
+    monkeypatch.setattr(settings, "STEWARD_STRICT_OWNER", "employee-test-owner")
+    project = employee_project(tmp_path, monkeypatch)
+    foreign = tmp_path / "another owner"
+    pinned = settings.SQLITE_FILE.parent / "employee-settings" / "library" / "tool.py"
+    project = replace(project, employee_folders=(project.root, foreign), pinned_files=(pinned,))
+    assert employee_runtime.native_enabled(project.owner_id, 8)
+    assert not employee_runtime.native_enabled("another owner", 8)
+    fs = tomllib.loads("fs=" + project._filesystem())["fs"]
+    assert fs[":root"] == "read" and fs[str(project.root)] == "read"
+    assert fs[str(pinned)] == "read" and fs[str(foreign)] == "deny"
+    assert fs[str(settings.SQLITE_FILE.parent)] == "deny"
+    assert fs[str(project.scratch)] == "write"
+    assert str(project.scratch) != project.process_environment()["TEMP"]
+    assert project.scratch.is_dir()
+    reviewed = tomllib.loads("fs=" + project._filesystem(reviewed=True))["fs"]
+    assert reviewed[str(project.root)] == reviewed[str(project.task_dir)] == "write"
+    assert reviewed[str(project.root / "AGENTS.md")] == reviewed[str(project.root / "任务")] == "read"
+    assert "write" not in tomllib.loads("fs=" + project._filesystem(check=True))["fs"].values()
+    reader = replace(project, writable=False)
+    assert reader.reviewed_permission_name != project.reviewed_permission_name
+    assert not any(reader.reviewed_permission_name in opt for opt in reader.cli_options())
+    assert not any("network.enabled=true" in opt for opt in project.cli_options())
+    employee_runtime.save_native_enabled(project.owner_id, 8, False)
+    assert not employee_runtime.native_enabled(project.owner_id, 8)

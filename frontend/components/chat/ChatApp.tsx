@@ -980,7 +980,7 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
       }),
   };
 
-  const answer = async (approvalId: string, decision: "allow" | "deny", remember = false) => {
+  const answer = async (approvalId: string, decision: "allow" | "deny", remember: boolean | "task" = false) => {
     if (threadId === null) return;
     setAnswering(approvalId);
     setApprovalErrors((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => id !== approvalId)));
@@ -989,7 +989,7 @@ export function ChatApp({ unified = false, foreground = true, onEmployeeChange, 
       if (remember && decision === "allow") {
         setRemembered((prev) => ({
           ...prev,
-          [approvalId]: { ruleId: result?.rule_id ?? null, error: result?.remember_error ?? null },
+          [approvalId]: { ruleId: result?.rule_id ?? null, error: result?.remember_error ?? null, taskScope: remember === "task" },
         }));
       }
     } catch (err) {

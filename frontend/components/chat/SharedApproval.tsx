@@ -8,7 +8,7 @@ import { ApprovalCard } from "./items";
 export function SharedApproval({ approval, onChanged }: { approval: Approval; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const answer = async (decision: "allow" | "deny", remember = false) => {
+  const answer = async (decision: "allow" | "deny", remember: boolean | "task" = false) => {
     setBusy(true); setError(null);
     try {
       const result = await api.answerThreadApproval(approval.thread_id, approval.id, decision, remember);

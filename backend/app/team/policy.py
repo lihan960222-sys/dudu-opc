@@ -42,6 +42,16 @@ def automatic(tool, mode, team, arguments):
         if team.origin == "routine" and name in team.feishu_tools and not team.is_lead:
             return "allowed", "bound_weekly_knowledge"
         return "denied", "weekly_tool_not_granted"
+    if name in ("read_task_reference", "download_task_reference", "deliver_project_file"):
+        if not team.feature_consult or not team.strict_hierarchy or team.is_lead or team.origin != "person":
+            return "denied", "outside_employee_resources"
+        if name == "read_task_reference":
+            return "allowed", "owner_reference"
+        if mode == "plan":
+            return "denied", "readonly_employee_resources"
+        if name == "download_task_reference":
+            return "allowed", "owner_reference_to_task"
+        return None  # Review the exact artifact, destination and optional replacement digest.
     if name in ("list_peer_files", "read_peer_text"):
         if team.feature_consult and team.strict_hierarchy and not team.is_lead and team.origin == "person":
             return "allowed", "read_only_peer_workspace"
@@ -56,8 +66,17 @@ def automatic(tool, mode, team, arguments):
         return None  # Each complete command needs a one-use review, including repeated tests.
     if name == "employee_capabilities":
         return "allowed","own_capabilities"
+    if name == "use_project_release":
+        if team.feature_consult and team.strict_hierarchy and not team.is_lead and team.origin == "person" and mode != "plan":
+            return "allowed", "project_release"
+        return "denied", "outside_project_release"
+    if name == "publish_shared_release":
+        if team.is_lead and team.strict_hierarchy and team.configuration_allowed and team.origin == "person" and mode != "plan":
+            return "allowed", "trusted_release"
+        return "denied", "outside_shared_library"
     if name == "enable_local_skill":
-        if arguments.get("template_id") in ("employee", "project"):
+        template = arguments.get("template_id")
+        if template in ("employee", "project", "shared") or isinstance(template, str) and template.startswith("shared@"):
             return "allowed", "read_enabled_skill"
         if mode=="plan" or team.origin!="person":
             return "denied","outside_skill_scope"

@@ -267,11 +267,11 @@ def receive_approval_click(db, identity, event):
             or action.get("tag") != "button" or not isinstance(value, dict)
             or not all(isinstance(v,str) and v for v in (event_id, chat, parent, value.get("approval")))):
         return False
-    binding = db.execute("""select a.offer_remember from approval_dm a join outbox o on o.id=a.outgoing
+    binding = db.execute("""select a.offer_remember,a.offer_task,json_extract(o.body,'$.review_only') from approval_dm a join outbox o on o.id=a.outgoing
         where a.approval=? and a.state='pending' and o.role='steward' and o.state='sent' and o.remote=?
         and json_extract(o.body,'$.approval_card')=a.approval""",(value["approval"],parent)).fetchone()
     decision = value.get("decision")
-    if not binding or decision not in ("仅本次","拒绝","允许并记住") or (decision=="允许并记住" and not binding[0]):
+    if not binding or decision not in ("仅本次","拒绝","允许并记住","本工单允许","只读核对") or (decision=="只读核对") != bool(binding[2]) or (decision=="本工单允许" and not binding[1]) or (decision=="允许并记住" and not binding[0]):
         return False
     # A forwarded card has a different remote message id. Do not accept approval IDs alone.
     return receive(db, identity, {"header":header, "event":{

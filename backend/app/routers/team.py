@@ -62,10 +62,11 @@ def _plan_shares_workspace(plan: dict) -> bool:
 
 @router.get('')
 async def get_team(rt=Depends(get_runtime)):
+    workstation = bool(rt.owner_id and rt.owner_id == settings.STEWARD_STRICT_OWNER)
     async with rt.session() as db:
         team = await service.team_for(db, rt.owner_id)
         if not team:
-            return {'enabled': bool(app_settings.get('TEAM_ENABLED')), 'team': None, 'agents': [], 'limits': {'max_agents': settings.TEAM_MAX_AGENTS, 'max_depth': settings.TEAM_MAX_DEPTH}, 'lead_ready': {'ok': False, 'reason': 'Choose a team lead.'}}
+            return {'local_workstation': workstation, 'enabled': bool(app_settings.get('TEAM_ENABLED')), 'team': None, 'agents': [], 'limits': {'max_agents': settings.TEAM_MAX_AGENTS, 'max_depth': settings.TEAM_MAX_DEPTH}, 'lead_ready': {'ok': False, 'reason': 'Choose a team lead.'}}
         rows = list((await db.execute(select(Agent).where(Agent.owner_id == rt.owner_id, Agent.team_id == team.id, Agent.archived_at.is_(None)).order_by(Agent.id))).scalars())
         output = []
         for agent in rows:
@@ -74,10 +75,16 @@ async def get_team(rt=Depends(get_runtime)):
             running = await db.scalar(select(Turn.id).join(Thread, Thread.id == Turn.thread_id).where(Thread.agent_id == agent.id, Turn.status == 'running').limit(1))
             waiting = await db.scalar(select(Approval.id).join(Thread, Thread.id == Approval.thread_id).where(Thread.agent_id == agent.id, Approval.status == 'pending').limit(1))
             data.update(is_lead=team.lead_agent_id == agent.id, state='waiting_on_you' if waiting else 'working' if running else 'idle', instructions_reviewed=agent.created_by_agent_id is None or agent.instructions_reviewed_at is not None)
+            if workstation and agent.id != team.lead_agent_id:
+                from app.services.employee_runtime import BoundaryUnavailable, native_enabled
+                try:
+                    data["project_terminal_enabled"] = native_enabled(rt.owner_id, agent.id)
+                except (BoundaryUnavailable, OSError):
+                    data["project_terminal_enabled"] = None
             output.append(data)
         lead = next((a for a in rows if a.id == team.lead_agent_id), None)
         available = bool(lead and lead_engine_ok(rt, lead))
-        return {'enabled': bool(app_settings.get('TEAM_ENABLED')), 'team': {'id': team.id, 'name': team.name, 'lead_agent_id': team.lead_agent_id}, 'agents': output,
+        return {'local_workstation': workstation, 'enabled': bool(app_settings.get('TEAM_ENABLED')), 'team': {'id': team.id, 'name': team.name, 'lead_agent_id': team.lead_agent_id}, 'agents': output,
                 'limits': {'max_agents': settings.TEAM_MAX_AGENTS, 'max_depth': settings.TEAM_MAX_DEPTH, 'max_parallel': settings.TEAM_MAX_PARALLEL},
                 'lead_ready': {'ok': available, 'reason': None if available else 'This lead needs an engine with team tools (Claude or Codex).'}}
 

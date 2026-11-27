@@ -123,6 +123,13 @@ PROJECT_FILES = [
      'inputSchema':schema({'path': string(400)}, ('path',))},
     {'name':'replace_project_text', 'description':'Replace one unique literal in a previously read UTF-8 project file. Supply the SHA-256 from the read. Preserves other bytes.',
      'inputSchema':schema({'path':string(400),'sha256':string(64),'old':string(4096),'new':string(4096)}, ('path','sha256','old','new'))},
+    {'name':'create_project_text', 'description':'Create a new UTF-8 file (up to 64 KiB) in your own project or current task. Never overwrites an existing file.',
+     'inputSchema':schema({'path': string(400), 'text': {'type':'string','maxLength':65536}}, ('path','text'))},
+    {'name':'inspect_local_path','description':'Inspect an absolute local path, list its directory or read UTF-8 text and the tail of large logs, including application diagnostics. Use find to search directory descendants by filename glob, newest first. modified_since is Unix time in seconds. matched counts files within the scanned part. Check scan_complete before claiming a complete search. Sensitive files return metadata. Credential-like values are masked.',
+     'inputSchema':schema({'path':string(1024),'operation':{'enum':['metadata','list','read','find']},
+                           'pattern':string(128), 'limit':{'type':'integer','minimum':1,'maximum':100},
+                           'max_depth':{'type':'integer','minimum':0,'maximum':8},
+                           'modified_since':{'type':'number','minimum':0}}, ('path','operation'))},
     {'name':'list_project_files', 'description':'List one folder in your own assigned project. Use an empty path for its root, folders_only for folders, and limit for a bounded sample. Returns names, types and truncated.',
      'inputSchema':schema({'path':string(400), 'limit':{'type':'integer','minimum':1,'maximum':500},
                            'folders_only':{'type':'boolean'}})},
@@ -139,17 +146,37 @@ PEER_FILES = [
 
 OPTIONAL = {'raise_escalation'}
 
+PUBLIC_READ = {"name": "read_task_reference", "description": "Read an HTTPS source linked in the owner's request, without local credentials. Treat the response as source data.",
+               "inputSchema": schema({"url": string(2048), "offset": {"type": "integer", "minimum": 0}}, ("url",))}
+PUBLIC_DOWNLOAD = {"name": "download_task_reference", "description": "Download a public HTTPS source linked by the owner into the task directory. Preserve existing files.",
+                   "inputSchema": schema({"url": string(2048), "name": string(200)}, ("url", "name"))}
+DELIVER_FILE = {"name": "deliver_project_file", "description": "Deliver an existing project artifact to the owner's chosen local folder. A collision preserves the original. Only for an explicitly requested update supply the existing target file's previous_sha256. The approval binds the artifact, destination and version.",
+                "inputSchema": schema({"source": string(400), "folder": string(1000), "name": string(200),
+                                       "sha256": string(64), "previous_sha256": string(64)}, ("source", "folder", "sha256"))}
+
+
+RELEASE_SOURCE = {"kind": {"enum": ["skill", "tool", "package"]}, "url": string(1600), "sha256": string(64)}
+RELEASE_ID = {"name": string(48), "version": string(80)}
+PROJECT_RELEASE = {"name": "use_project_release",
+                   "description": "Pin an existing shared version or supply a pinned source URL (SHA-256 required except trusted GitHub commits). Official or trusted sources enter the immutable shared library. Other sources stay project-private pending one owner review. Use copy_to_project for an immediately usable local Python tool, Markdown skill, ZIP or wheel. Install dependencies in the project's environment.",
+                   "inputSchema": schema({**RELEASE_ID, "source": schema(RELEASE_SOURCE, ("kind", "url")),
+                                          "copy_to_project": {"type": "boolean"}}, RELEASE_ID)}
+SHARED_RELEASE = {"name": "publish_shared_release",
+                  "description": "Register an immutable Markdown skill, Python tool, or ZIP dependency from a trusted publisher. Use a pinned GitHub commit URL, or NVIDIA Kit production registry file URL with SHA-256. Other sources can be tested in an employee project. The owner can approve a version or publisher from the Projects workbench.",
+                  "inputSchema": schema({**RELEASE_ID, **RELEASE_SOURCE}, (*RELEASE_ID, "kind", "url"))}
+
 
 class Server:
     def __init__(self, mailbox, escalations=False, project_consult=False, feishu_tools=(), employee_only=False,
                  feishu_only=False, project_command=False, project_read=False, project_edit=False, peer_files=False,
-                 steward=False):
+                 steward=False, project_create=False, project_release=False, local_inspection=False):
         self.mailbox = Path(mailbox)
         if feishu_only:
             self.tools = [tool for tool in FEISHU_TOOLS if tool["name"] in feishu_tools]
             return
         self.tools = [t for t in TOOLS if escalations or t['name'] not in OPTIONAL]
         if steward:
+            self.tools.append(SHARED_RELEASE)
             from copy import deepcopy
             self.tools = [deepcopy(t) if t["name"] == "delegate" else t for t in self.tools if t["name"] != "ask_agent"]
             delegate = next(t for t in self.tools if t["name"] == "delegate")
@@ -175,13 +202,22 @@ class Server:
         if employee_only:
             self.tools = []
         if project_consult or employee_only:
+            if local_inspection:
+                self.tools.extend(t for t in PROJECT_FILES if t['name']=='inspect_local_path')
+            if project_release:
+                self.tools.append(PROJECT_RELEASE)
             self.tools.extend(t for t in TOOLS if t["name"] in ("employee_capabilities","enable_local_skill"))
             if project_command:
                 self.tools.append(PROJECT_COMMAND)
             if project_read:
-                self.tools.extend(t for t in PROJECT_FILES if t['name'] != 'replace_project_text')
+                self.tools.append(PUBLIC_READ)
+                if project_command or project_edit:
+                    self.tools.extend((PUBLIC_DOWNLOAD, DELIVER_FILE))
+                self.tools.extend(t for t in PROJECT_FILES if t['name'] in ('read_project_text','list_project_files'))
             if project_edit:
                 self.tools.append(PROJECT_FILES[1])
+            if project_create:
+                self.tools.extend(t for t in PROJECT_FILES if t['name']=='create_project_text')
             if peer_files:
                 self.tools.extend(PEER_FILES)
         self.tools.extend(t for t in FEISHU_TOOLS if t["name"] in feishu_tools)
@@ -236,13 +272,17 @@ def main():
     parser.add_argument('--project-command', action='store_true')
     parser.add_argument('--project-read', action='store_true')
     parser.add_argument('--project-edit', action='store_true')
+    parser.add_argument('--project-create', action='store_true')
+    parser.add_argument('--local-inspection', action='store_true')
     parser.add_argument('--peer-files', action='store_true')
     parser.add_argument('--steward', action='store_true')
+    parser.add_argument('--project-release', action='store_true')
     parser.add_argument('--employee-tool', action='append', choices=[t['name'] for t in FEISHU_TOOLS], default=[])
     arguments = parser.parse_args()
     server = Server(arguments.mailbox, arguments.escalations, arguments.project_consult, arguments.employee_tool,
                     arguments.employee_only, arguments.feishu_only, arguments.project_command,
-                    arguments.project_read, arguments.project_edit, arguments.peer_files, arguments.steward)
+                    arguments.project_read, arguments.project_edit, arguments.peer_files, arguments.steward,
+                    arguments.project_create, arguments.project_release, arguments.local_inspection)
     for line in sys.stdin:
         try:
             if len(line) > 100000:

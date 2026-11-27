@@ -120,3 +120,25 @@ def test_corrupt_or_linked_preferences_cannot_reenable_the_host_default(tmp_path
     os.link(saved, tmp_path / "other.json")
     with pytest.raises(employee_runtime.BoundaryUnavailable):
         employee_runtime.native_enabled("host", 4)
+
+async def test_workstation_shows_effective_settings_and_refuses_unrestricted_network(sessions, owner, rt, cli, tmp_path, monkeypatch):
+    from app.routers.team import get_team
+    monkeypatch.setattr(settings, "LOCAL_EXECUTION_ENABLED", True)
+    monkeypatch.setattr(settings, "SQLITE_PATH", str(tmp_path / "store" / "test.db"))
+    monkeypatch.setattr(settings, "STEWARD_STRICT_OWNER", owner)
+    async with sessions() as db:
+        agent = await agent_store.create_agent(db, owner_id=owner, name="Reader", provider="codex", model="gpt-fake")
+        await db.commit()
+    app = app_for(rt)
+    app.include_router(router, prefix="/api/v1")
+    @app.middleware("http")
+    async def auth(request, next_handler):
+        request.state.auth = Principal(kind="browser", role="owner", person_id=3, session_id=72)
+        return await next_handler(request)
+    async with client_for(app) as client:
+        endpoint = f"/api/v1/staff/{agent.id}/project-terminal"
+        assert (await client.get(endpoint)).json() == {"enabled":True, "local_workstation":True,
+                                                        "read_folders":[], "outbound_network":False}
+        for update in ({"outbound_network":True}, {"read_folders":[str(tmp_path)]}):
+            assert (await client.put(endpoint, json={"enabled": True, **update})).status_code == 422
+    assert (await get_team(rt))["local_workstation"]

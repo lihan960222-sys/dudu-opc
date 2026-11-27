@@ -71,6 +71,7 @@ _KEY_SHAPES = tuple(
 )
 # Shapes where only the value after a label is secret; group 1 is kept.
 _LABELLED = (
+    re.compile(r'''(?i)(["'](?:password|passwd|passphrase|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key)["']\s*:\s*")(?:\\.|[^"\\])+(?=")'''),
     re.compile(r"(?i)(\bauthorization\s*[:=]\s*(?:basic|token|digest)\s+)[A-Za-z0-9._~+/\-]{8,}=*"),
     re.compile(r"(?i)(\b(?:x-api-key|api-key|x-auth-token|cookie|set-cookie)\s*:\s*)[^\r\n]{8,}"),
     re.compile(r"(\b[a-z][a-z0-9+.\-]*://[^\s/:@]+:)[^\s/@]{3,}(?=@)"),  # user:password@host

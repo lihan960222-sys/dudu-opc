@@ -124,9 +124,9 @@ async def test_read_only_native_turn_discovers_and_inspects_permitted_colleague(
         engine.rpc = Mock()
         engine.gate = SimpleNamespace(open=AsyncMock(return_value=None))
         cases = {**dict.fromkeys(tools,args),"list_project_files":{"limit":2},"read_project_text":{"path":"fixture.md"}}
-        for tool, call_args in cases.items():
+        for request_id, (tool, call_args) in enumerate(cases.items(), start=7):
             await engine._item_started({"id": tool, "type": "mcpToolCall", "server": "team", "tool": tool, "arguments": call_args})
-            await engine._server_request({"id": 7, "method": "mcpServer/elicitation/request", "params": {
+            await engine._server_request({"id": request_id, "method": "mcpServer/elicitation/request", "params": {
                 "serverName": "team", "message": f'run tool "{tool}"',
                 "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": call_args}}})
             assert engine.gate.open.await_args.kwargs["tool"] == "mcp__team__" + tool
@@ -225,3 +225,44 @@ async def test_native_terminal_receipt_accepts_only_a_readable_registered_peer(s
         (await db.get(Agent, reader.id)).team_workspaces_readable = False
         await db.flush()
         assert (await work_verification.assess(db, job, run, {"kind": "inspection"}))["state"] == "missing"
+
+async def test_employee_finds_recent_host_logs_through_its_readonly_tool(sessions, owner, staff, tmp_path, monkeypatch):
+    from app.core.config import settings
+    from app.services import tool_policy
+    team, lead, reader, _ = staff
+    monkeypatch.setattr(settings, "STEWARD_STRICT_OWNER", owner)
+    monkeypatch.setitem(vars(settings), "LOCAL_TOOLS_ENABLED", True)
+    vendor = tmp_path / "AppData" / "Vendor"
+    logs = vendor / "session" / "logs"
+    logs.mkdir(parents=True)
+    logfile = logs / "session.log"
+    logfile.write_text("private contents", encoding="utf8")
+    monkeypatch.setenv("LOCALAPPDATA", str(vendor.parent))
+    async with sessions() as db:
+        card = await feature_tasks.route(db, owner_id=owner, agent_id=reader.id, project="diagnostics",
+            event_key="find-logs", title="Inspect", text="Find the latest log.")
+        task = card["task_id"]
+        thread, _ = await feature_tasks.session_for(db, owner, task, model=reader.model, workspace_path=reader.role_path)
+        dispatched = await feature_tasks.dispatch(db, owner_id=owner, steward_id=lead.id, task_id=task,
+            event_key="find-logs", thread_id=thread.id)
+        turn = await thread_store.start_turn(db, thread.id, "Find log", feature_event_key="find-logs")
+        job = await db.get(AgentJob, dispatched)
+        job.assignee_turn_id, job.status = turn.id, "running"
+        project = await feature_tasks.project_runtime_for(db, owner, reader, thread, "plan")
+        await db.commit()
+    ctx = SimpleNamespace(project_runtime=project, approval_mode="plan", aborted=False,
+        team=policy.TurnTeam(team.id, reader.id, False, False, strict_hierarchy=True,feature_consult=True))
+    run = SimpleNamespace(ctx=ctx, thread_id=thread.id, turn_id=turn.id,owner_token=turn.owner_token,
+                          recorder=SimpleNamespace(lost=False,emit=AsyncMock(return_value=True)))
+    bridge = TeamBridge(SimpleNamespace(session=sessions, owner_id=owner),run)
+    try:
+        args = {"operation":"find", "path":str(vendor), "pattern":"*.log", "limit":1}
+        assert "inspect_local_path" in feature_team_tools(ctx)
+        assert tool_policy.automatic("mcp__team__inspect_local_path","plan",run,args)[0] == "allowed"
+        result = await bridge.execute("inspect_local_path", args)
+        assert result["scan_complete"] and result["entries"][0]["path"] == str(logfile)
+        assert "private contents" not in str(result)
+        receipt = run.recorder.emit.await_args.args[1]["file_receipts"][0]
+        assert receipt["scope"] == "local" and receipt["operation"] == "list_files" and receipt["count"] == 1
+    finally:
+        await bridge.close()

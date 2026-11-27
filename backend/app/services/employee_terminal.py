@@ -27,8 +27,13 @@ def allowed_tools(ctx, *, live=False):
     if setting.effective_value is not True and not (setting.source == "default" and not setting.error):
         return ()
     peer_reads = PEER_READ_TOOLS if getattr(project, "readable_roots", ()) else ()
+    if getattr(project, "local_workstation", False):
+        peer_reads = (*peer_reads, "inspect_local_path")
     if ctx.approval_mode == "plan" and not project.writable:
         return (*PROJECT_READ_TOOLS, *peer_reads)
+    if (getattr(project, "local_workstation", False) and project.writable
+            and ctx.approval_mode in ("ask", "accept_edits", "approve_for_me", "full_access")):
+        return ("run_project_command", *PROJECT_READ_TOOLS, "create_project_text", "replace_project_text", *peer_reads)
     if project.writable and ctx.approval_mode == "ask":
         return ("run_project_command", *PROJECT_READ_TOOLS, "replace_project_text", *peer_reads)
     if project.writable and ctx.approval_mode == "accept_edits":
@@ -91,7 +96,8 @@ async def execute(run, args, check, *, scope=None):
         if not system_cmd.is_file() or system_cmd.resolve(strict=True) != system_cmd:
             raise ValueError("找不到 Windows 的项目命令解释器。")
         command[0] = str(system_cmd)
-    permission = run.project.check_permission_name if scope else run.project.permission_name
+    permission = run.project.check_permission_name if scope else (
+        run.project.reviewed_permission_name if getattr(run.project, "local_workstation", False) else run.project.permission_name)
     params = {"command": command, "cwd": str(cwd), "permissionProfile": permission,
               "timeoutMs": max(1, int(budget * 1000)), "outputBytesCap": 32_768, "processId": process_id}
     if run.ctx.aborted or run.sink.lost:
@@ -125,6 +131,9 @@ async def execute(run, args, check, *, scope=None):
         await run._emit("tool.completed", {"call_id": process_id, "ok": False, "truncated": False,
             "output": "员工引擎未返回完整的退出结果。"})
         raise ValueError("未收到完整的项目命令回执。")
+    if getattr(run.project, "local_workstation", False):
+        from app.services.agent_memory import redact_json
+        result = redact_json(result)
     after = await asyncio.to_thread(_declared_files, run.project, check) if not scope else {}
     code = result["exitCode"]
     root = str(run.project.root)

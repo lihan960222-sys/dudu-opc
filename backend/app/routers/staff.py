@@ -21,6 +21,7 @@ from app.db.models.team import TeamSetupRequest
 from app.db.transactions import begin_write
 from app.routers.agents import _agent_or_404, _restricted, get_runtime, _check_engine
 from app.routers.employee_codex_login import router as employee_codex_login_router
+from app.routers.shared_library import router as shared_library_router
 from app.routers.feishu_access import router as feishu_access_router
 from app.routers.weekly_knowledge import router as weekly_knowledge_router
 from app.routers.feishu_owner_oauth import owner_browser, signed_in_owner_browser
@@ -42,6 +43,7 @@ router = APIRouter(prefix="/staff", dependencies=[Depends(require_local_access),
 router.include_router(employee_codex_login_router)
 router.include_router(feishu_access_router)
 router.include_router(weekly_knowledge_router)
+router.include_router(shared_library_router)
 
 
 class StaffingGrant(BaseModel):
@@ -67,6 +69,13 @@ async def _terminal_employee(db, owner, agent_id, *, lock=False):
     return agent
 
 
+def _terminal_response(owner, choice):
+    from app.core.config import settings
+    workstation = bool(owner and owner == settings.STEWARD_STRICT_OWNER)
+    return {"enabled": choice.enabled, "read_folders": choice.read_folders,
+            "outbound_network": choice.outbound_network, "local_workstation": workstation}
+
+
 @router.get("/{agent_id}/project-terminal", dependencies=[Depends(signed_in_owner_browser)])
 async def project_terminal_status(agent_id: int, rt: ThreadRuntime = Depends(get_runtime)):
     from app.services import employee_runtime
@@ -76,8 +85,7 @@ async def project_terminal_status(agent_id: int, rt: ThreadRuntime = Depends(get
         choice = employee_runtime.terminal_settings(rt.owner_id, agent_id)
     except (ValueError, OSError) as exc:
         raise HTTPException(409, str(exc)) from None
-    return JSONResponse({"enabled": choice.enabled, "read_folders": choice.read_folders,
-                         "outbound_network": choice.outbound_network}, headers={"Cache-Control": "no-store"})
+    return JSONResponse(_terminal_response(rt.owner_id, choice), headers={"Cache-Control": "no-store"})
 
 
 @router.put("/{agent_id}/project-terminal", dependencies=[Depends(signed_in_owner_browser)])
@@ -93,6 +101,8 @@ async def set_project_terminal(agent_id: int, choice: ProjectTerminalSetting, rt
             updated = employee_runtime.TerminalSettings(choice.enabled,
                 current.read_folders if choice.read_folders is None else tuple(dict.fromkeys(p.strip() for p in choice.read_folders)),
                 current.outbound_network if choice.outbound_network is None else choice.outbound_network)
+            if updated != updated.effective(rt.owner_id):
+                raise HTTPException(422, "本工作台已统一管理员工的本地查阅和联网范围。")
             if current != updated:
                 job = await db.scalar(select(AgentJob.id).where(AgentJob.owner_id == rt.owner_id,
                     AgentJob.assignee_agent_id == agent_id, AgentJob.kind == "job", AgentJob.mode == "work",
@@ -116,7 +126,7 @@ async def set_project_terminal(agent_id: int, choice: ProjectTerminalSetting, rt
         except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc)) from None
         await db.commit()
-    return {"enabled": updated.enabled, "read_folders": updated.read_folders, "outbound_network": updated.outbound_network}
+    return _terminal_response(rt.owner_id, updated)
 
 
 @router.patch("/{agent_id}/staffing", dependencies=[Depends(owner_browser)])

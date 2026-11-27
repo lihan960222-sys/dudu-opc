@@ -18,6 +18,9 @@ import { planner, type WorkBoard, type WorkItem } from "@/lib/planner-api";
 import type { TeamSetupPlan } from "@/lib/transcript";
 import { TeamSetupCard } from "../chat/TeamCards";
 import { StaffEditor } from "./StaffEditor";
+import { SharedLibraryReviews } from "./SharedLibrary";
+import { useSession } from "../AuthGate";
+import { canManageProjectTerminal } from "@/lib/directory-mode";
 import { ReportingBoard } from "./ReportingBoard";
 import { Face } from "./ProfileControls";
 import { FEISHU_RETURN_EMPLOYEE, feishuEntry } from "@/lib/feishu-employee";
@@ -520,6 +523,7 @@ function loadPortal(page: ManagementSection) {
 }
 
 export function Workbench({ page, onChanged }: { page: ManagementSection; onChanged: () => void }) {
+  const { session } = useSession();
   const router = useRouter();
   const params = useSearchParams();
   const t = useT();
@@ -745,6 +749,7 @@ export function Workbench({ page, onChanged }: { page: ManagementSection; onChan
           {page === "projects" && (
             <>
               <Suggestions />
+              {canManageProjectTerminal(session) && <SharedLibraryReviews />}
               <Projects staff={agents} />
             </>
           )}

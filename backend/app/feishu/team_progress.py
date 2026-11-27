@@ -73,12 +73,12 @@ async def refresh(worker):
 
 async def poll(worker):
     now = time.monotonic()
-    if now < getattr(worker,'next_team_poll',0):
-        return
-    worker.next_team_poll = now + 15
+
     try:
         from .approvals import collect_team_requests
         await collect_team_requests(worker)
-        await refresh(worker)
+        if now >= getattr(worker, 'next_team_poll', 0):
+            worker.next_team_poll = now + 15
+            await refresh(worker)
     except SQLAlchemyError as error:
         logging.getLogger(__name__).warning('Team work status unavailable: %s',type(error).__name__)

@@ -229,10 +229,12 @@ class ApprovalAnswerRequest(BaseModel):
     # With an allow on a Bash call: also always allow this exact command from
     # now on (see /api/v1/approval-rules). Ignored for a deny or other tools.
     remember: bool = False
+    task_scope: bool = False
+    review_if_stale: bool = False
 
 
 class ApprovalAnswerResponse(BaseModel):
-    status: Literal["recorded"] = "recorded"
+    status: Literal["recorded", "review_requested"] = "recorded"
     decision: Literal["allow", "deny"]
     # With `remember`: the saved rule (DELETE /api/v1/approval-rules/{id}
     # undoes it), or null with `remember_error` saying why it was allowed this

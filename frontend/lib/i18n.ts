@@ -355,6 +355,9 @@ export const en = {
   "approval.allow": "Allow",
   "approval.alwaysAllow": "Always allow this command",
   "approval.employeeScope": "Remember for this employee and this project only. The exact command and target must match. You can revoke the grant in Settings → Approvals.",
+  "approval.deliveryScope": "Delegated scope includes other artifacts of this file type from the active work order to the same folder. Existing files are preserved.",
+  "approval.rememberedTask": "This grant applies to this work order once the decision reaches the employee.",
+  "approval.allowTask": "Allow for this work order",
   "approval.onceOnly": "Allow once",
   "approval.rememberEmployee": "Allow and remember",
   "approval.alwaysAllowHint": "Allow it now, and run exactly this command in this folder without asking from now on",
@@ -533,6 +536,9 @@ export const en = {
 // Locale catalogs provide translated shared interface copy; any missing entry uses English.
 export type MessageKey = Exclude<keyof typeof en,
   | "approval.employeeScope"
+  | "approval.deliveryScope"
+  | "approval.rememberedTask"
+  | "approval.allowTask"
   | "approval.onceOnly"
   | "approval.rememberEmployee"
   | "channels.telegramTitle"

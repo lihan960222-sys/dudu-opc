@@ -160,7 +160,9 @@ async def protect_active_scope(db, agent, *, shared_folders=False):
     for thread, worker in rows:
         if not (thread.provider_state or {}).get("employee_project"):
             continue
-        shares = shared_folders and worker.team_workspaces_readable and worker.team_id == agent.team_id
+        from app.core.config import settings
+        workstation = bool(worker.owner_id and worker.owner_id == settings.STEWARD_STRICT_OWNER)
+        shares = shared_folders and (workstation or worker.team_workspaces_readable) and worker.team_id == agent.team_id
         current, visited = worker, set()
         while current and current.id not in visited:
             visited.add(current.id)

@@ -1026,6 +1026,19 @@ async def mark_allow_delivered(db: AsyncSession, approval_id: str, owner_token: 
     return result.rowcount == 1
 
 
+async def retire_unwritten_approval(db, approval_id: str, owner_token: str):
+    """The adapter knows it never wrote this reply. Release its delivery claim."""
+    await begin_write(db)
+    owned = exists().where(Turn.id == Approval.turn_id, Turn.owner_token == owner_token)
+    row = (await db.execute(update(Approval).where(Approval.id == approval_id, Approval.status == "allowed",
+        Approval.consumed_at.is_(None), owned).values(status="cancelled", delivered_at=None, decided_at=utcnow())
+        .returning(Approval.thread_id, Approval.turn_id))).one_or_none()
+    if row:
+        await _add_event(db, row.thread_id, "approval.resolved", {"approval_id":approval_id,
+                         "status":"cancelled", "by":"transport_closed"}, row.turn_id)
+    await db.commit()
+
+
 async def deny_undelivered_allow(db: AsyncSession, approval_id: str, owner_token: str, *, source: str) -> bool:
     """Withdraw an automatic Allow before it reaches the provider after revocation."""
     await begin_write(db)

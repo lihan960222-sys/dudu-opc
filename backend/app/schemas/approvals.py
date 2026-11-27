@@ -51,6 +51,7 @@ class ApprovalRuleResponse(BaseModel):
     command: str
     workspace: str | None = None
     employee_name: str | None = None
+    task_id: int | None = None
     cwd: str | None = None
     created_at: datetime
 

@@ -102,3 +102,101 @@ def test_ambiguous_matching_text_and_a_hard_link_are_rejected(tmp_path):
         files.read(project,{"path":"source.txt"})
     with pytest.raises(ValueError):
         files.edit(project,args,storage=tmp_path)
+
+def test_workstation_creation_is_confined_and_never_clobbers(tmp_path):
+    project = SimpleNamespace(root=tmp_path, task_dir=tmp_path / "任务" / "2",
+                              writable=True, local_workstation=True)
+    relative = "任务/2/输出/answer.txt"
+    data = {"path": relative, "text": "answer"}
+    assert files.create(project, data)["sha256"] == sha256(b"answer").hexdigest()
+    with pytest.raises(FileExistsError):
+        files.create(project, {**data,"text":"changed"})
+    assert files.read(project, {"path": relative})["text"] == "answer"
+    for forbidden in ("../peer", "任务/1/file.txt", "AGENTS.md", ".codex/config.toml", "skills/s/SKILL.md"):
+        with pytest.raises(ValueError):
+            files.create(project, {**data,"path": forbidden})
+    project.writable = False
+    with pytest.raises(ValueError):
+        files.create(project, {**data,"path":"new.txt"})
+
+def test_absolute_vendor_log_reads_hide_credentials_and_deny_service_files(tmp_path, monkeypatch):
+    from tests.services.test_employee_runtime import employee_project
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "STEWARD_STRICT_OWNER", "employee-test-owner")
+    project = employee_project(tmp_path, monkeypatch, mode="plan")
+    local = tmp_path / "AppData" / "Local"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    logs = local / "Vendor" / "logs"
+    logs.mkdir(parents=True)
+    log = logs / "today.txt"
+    token = "sk-" + "example" * 5
+    log.write_text("request failed: network timeout\napi_key=" + token,encoding="utf8")
+    names = files.inspect_local(project, {"path":str(logs), "operation":"list"})
+    assert names["entries"] == [{"name":"today.txt","folder":False}]
+    read = files.inspect_local(project, {"path":str(log), "operation":"read"})
+    assert read["redacted"] and "network timeout" in read["text"] and token not in str(read)
+    config = local / "Vendor" / "settings.json"
+    config.write_text(token,encoding="utf8")
+    assert files.inspect_local(project, {"path":str(config),"operation":"read"})["contents_hidden"]
+    assert files.inspect_local(project, {"path":str(log),"operation":"metadata"})["bytes"] == log.stat().st_size
+    for raw in (str(settings.SQLITE_FILE), str(logs / ".." / "settings.json"), "relative.txt", str(log)+":data"):
+        with pytest.raises((OSError,ValueError)):
+            files.inspect_local(project, {"path":raw,"operation":"read"})
+    os.link(log, logs / "linked.txt")
+    with pytest.raises(ValueError):
+        files.inspect_local(project, {"path":str(log), "operation":"read"})
+
+def test_local_find_returns_newest_metadata_and_reports_partial_scans(tmp_path,monkeypatch):
+    from app.core.config import settings
+    from tests.services.test_employee_runtime import employee_project
+    monkeypatch.setattr(settings, "STEWARD_STRICT_OWNER", "employee-test-owner")
+    project = employee_project(tmp_path, monkeypatch, mode="plan")
+    appdata = tmp_path / "Local"
+    monkeypatch.setenv("LOCALAPPDATA", str(appdata))
+    base = appdata / "Vendor"
+    for folder, name, timestamp in (("first","old.log",100), ("second","new.LOG",300),
+                                    ("third","middle.log",200), ("credentials","vault.log",400)):
+        path = base / folder / name
+        path.parent.mkdir(parents=True)
+        path.write_text("must stay local", encoding="utf8")
+        os.utime(path, (timestamp,timestamp))
+    os.link(base / "second" / "new.LOG", base / "alias.log")
+    args = {"path":str(base),"operation":"find","pattern":"*.log","limit":1,"modified_since":150}
+    result = files.inspect_local(project,args)
+    assert result["entries"] == [{"path":str(base / "third" / "middle.log"),"bytes":15,"modified":200}]
+    assert result["scan_complete"] and result["matched"] == 1
+    (base / "alias.log").unlink()
+    result = files.inspect_local(project,args)
+    assert result["matched"] == 2 and result["truncated"] and result["scan_complete"]
+    assert result["entries"][0] == {"path":str(base / "second" / "new.LOG"),"bytes":15,"modified":300}
+    assert "must stay local" not in str(result)
+    depth_limited = files.inspect_local(project,{**args, "max_depth":0})
+    assert not depth_limited["scan_complete"] and not depth_limited["entries"]
+    monkeypatch.setattr(files, "FIND_MAX_ENTRIES", 2)
+    bounded = files.inspect_local(project,args)
+    assert bounded["visited"] == 2 and not bounded["scan_complete"]
+    for update in ({"limit":101},{"pattern":"../*"},{"modified_since":float("nan")}):
+        with pytest.raises(ValueError):
+            files.inspect_local(project,{**args,**update})
+
+def test_local_find_skips_directory_replaced_before_pinning(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from app.core.config import settings
+    from tests.services.test_employee_runtime import employee_project
+    monkeypatch.setattr(settings, "STEWARD_STRICT_OWNER", "employee-test-owner")
+    project = employee_project(tmp_path, monkeypatch, mode="plan")
+    child = project.root / "changed"
+    child.mkdir()
+    (child / "old.log").touch()
+    pin = files._directory
+    @contextmanager
+    def replace_before_open(path):
+        if path == child:
+            path.rename(tmp_path / "old-folder")
+            path.mkdir()
+            (path / "other.log").touch()
+        with pin(path) as descriptor:
+            yield descriptor
+    monkeypatch.setattr(files, "_directory", replace_before_open)
+    found = files.inspect_local(project, {"operation":"find","path":str(project.root),"pattern":"*.log"})
+    assert not found["scan_complete"] and not found["entries"] and found["skipped"] == 1

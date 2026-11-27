@@ -114,7 +114,7 @@ export function Conversation({
   transcript: Transcript;
   answering: string | null;
   approvalErrors: Record<string, string>;
-  onAnswer: (approvalId: string, decision: "allow" | "deny", remember?: boolean) => void;
+  onAnswer: (approvalId: string, decision: "allow" | "deny", remember?: boolean | "task") => void;
   onReactionReply: (message: string) => Promise<boolean>;
   sendingReactionReplyDisabled: boolean;
   // "Always allow" outcomes by approval id, from answers given on this page.

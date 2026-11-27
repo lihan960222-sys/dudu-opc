@@ -8,6 +8,7 @@ import { canOpenWorkbench } from "@/lib/session";
 import { reportingPath } from "@/lib/reporting";
 import { useT } from "@/lib/use-i18n";
 import { collaboration, type TeamState } from "@/lib/collaboration";
+import { SharedLibrary } from "./SharedLibrary";
 import { StaffCapabilities } from "./StaffCapabilities";
 import { StaffModelFields } from "./ProfileControls";
 import { canManageProjectTerminal, directoryMode, directoryModes } from "@/lib/directory-mode";
@@ -49,6 +50,7 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
   const { session } = useSession();
   const ownsHost = session?.kind === "browser" && !!session.session_id && session.scopes.includes("admin")
     && (session.role === "owner" || (!session.role && !session.person_id));
+  const workstation = team?.local_workstation === true && team.agents.find(a => a.id === agent?.id)?.project_terminal_enabled !== false;
   const isLead = !!agent && agent.id === lead?.id;
   const [name, setName] = useState(agent?.name ?? ""),
     [title, setTitle] = useState(agent?.title ?? ""),
@@ -152,7 +154,7 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
         ...profile, ...(ownsHost ? { approval_mode: approvalMode } : {}),
         ...(ownsHost && delegateWrites !== (agent?.delegate_project_writes ?? false)
           ? { delegate_project_writes: delegateWrites } : {}),
-        ...(ownsHost && !isLead && !makeLead && teamFiles !== (agent?.team_workspaces_readable ?? false)
+        ...(ownsHost && !workstation && !isLead && !makeLead && teamFiles !== (agent?.team_workspaces_readable ?? false)
           ? { team_workspaces_readable: teamFiles } : {}),
       };
       const before = persisted.current;
@@ -242,10 +244,10 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
                     onChange={e => setApprovalMode(directoryMode(e.target.value))}>
                     {Object.entries(directoryModes).map(([value, mode]) => <option key={value} value={value}>{mode.label}</option>)}
                   </select>
-                  <small>{directoryModes[approvalMode].help}</small>
+                  <small>{workstation ? (approvalMode === "plan" ? "本轮可以查阅资料，在临时目录处理文件。项目目录保持只读。" : approvalMode === "ask" ? "员工可查阅资料和新建文件。修改已有文件或执行可能改写项目的命令前需要确认。" : "员工可在自己的目录新建和编辑文件。删除文件和可能改写项目的命令需要确认。") : directoryModes[approvalMode].help}</small>
                 </label>}
                 {ownsHost && !isLead && !makeLead && (
-                  <TeamWorkspaceAccess value={teamFiles} onChange={setTeamFiles} disabled={busy} />
+                  <TeamWorkspaceAccess workstation={workstation} value={teamFiles} onChange={setTeamFiles} disabled={busy} />
                 )}
                 {ownsHost && !isLead && !makeLead && <label className="dp-field">
                   <span><input type="checkbox" checked={delegateWrites} disabled={busy}
@@ -378,7 +380,7 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
           ) : tab === "access" ? (<>
             {accessFields}
             {agent && !isLead && canManageProjectTerminal(session) && <EmployeeProjectTerminal
-              key={agent.id} employee={agent.id} busy={busy} folderSaved={!!agent.role_path && agent.role_path === path.trim()} />}
+              key={agent.id} employee={agent.id} busy={busy} onChanged={onTeamChanged} folderSaved={!!agent.role_path && agent.role_path === path.trim()} />}
             {agent && !isLead && ownsHost && !canManageProjectTerminal(session) &&
               <small>用老板账号登录后，可在这里设置员工的项目终端。</small>}
             <div className="dp-cap-row"><span>工作记忆</span><small>{agent?.memory_enabled === false ? "已关闭" : "已开启"}</small></div>
@@ -404,6 +406,7 @@ export function StaffEditor({ agent, chatHref, lead, member, engines, members, o
           ) : tab === "tools" && agent ? (
             <>
               <StaffCapabilities key={agent.id} employee={agent.id} />
+              {canManageProjectTerminal(session) && <SharedLibrary key={"library-" + agent.id} employee={agent.id} hasProject={!!agent.role_path} />}
               {agent && (member || isLead) && ownsHost && (
                 <section className="dp-cap-section">
                   <button type="button" className="dp-cap-toggle" aria-expanded={showFeishu}

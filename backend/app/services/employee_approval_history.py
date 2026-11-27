@@ -34,6 +34,7 @@ async def current(db, owner_id, *, team_id=None):
     rows = await db.scalars(select(PermissionRule).where(
         PermissionRule.user_id == owner_id,
         PermissionRule.bucket == employee_approval_rules.BUCKET,
+        PermissionRule.decision == "allow",
     ).order_by(PermissionRule.id.desc()))
     result = []
     for row in rows:
@@ -41,6 +42,7 @@ async def current(db, owner_id, *, team_id=None):
         if scope and (team_id is None or scope["employee_id"] in names):
             result.append({
                 "id": row.id, "employee_id": scope["employee_id"],
+                "task_id": scope.get("task_id"),
                 "employee_name": names.get(scope["employee_id"]) or f'#{scope["employee_id"]}',
                 "workspace": scope["project"], "cwd": scope["cwd"], "command": scope["command"],
                 "match": "exact", "created_at": row.created_at,
@@ -59,7 +61,7 @@ async def steward_memory(db, owner_id, team_id):
         .order_by(Approval.created_at.desc()).limit(12))).all()
     return {
         "active_rule_count": len(active),
-        "recent_active_rules": [{k: r[k] for k in ("id", "employee_name", "workspace", "command")}
+        "recent_active_rules": [{k: r[k] for k in ("id", "employee_name", "workspace", "task_id", "command")}
                                 for r in active[:12]],
         "recent_decisions": [
             {"request_id": r.id, "employee": r.name, "tool": r.tool, "decision": r.status,

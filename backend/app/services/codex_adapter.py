@@ -135,10 +135,26 @@ def feature_team_tools(ctx):
         return tuple(feishu)
     from app.services import employee_terminal
     reviewed = employee_terminal.allowed_tools(ctx)
-    employee = ("employee_capabilities","enable_local_skill",*feishu,*reviewed)
+    from app.services.employee_resources import tool_names
+    employee = ("employee_capabilities","enable_local_skill",*feishu,*reviewed,*tool_names(reviewed, ctx))
+    if "list_project_files" in reviewed and ctx.project_runtime.writable and ctx.approval_mode != "plan":
+        employee += ("use_project_release",)
     if team and not team.delegation_enabled:
         return employee
     return ("list_agents", "propose_direct_report", "delegate", "answer_job_question", "ask_agent", *employee)
+
+
+def _team_approval_tools(ctx, *, feature):
+    if feature:
+        return feature_team_tools(ctx)
+    # Use the same catalog as the MCP server for this locally constructed
+    # launch. The steward can publish, ordinary chats cannot.
+    from app.team.mcp_server import Server
+    flags = getattr(ctx.team_launch, "args", ())
+    team = getattr(ctx, "team", None)
+    catalog = Server(".", escalations="--escalations" in flags, steward="--steward" in flags,
+                     feishu_only="--feishu-only" in flags, feishu_tools=getattr(team, "feishu_tools", ()))
+    return {tool["name"] for tool in catalog.tools}
 
 
 TOOL_ITEMS = ("commandExecution", "fileChange", "mcpToolCall", "webSearch")
@@ -666,6 +682,8 @@ class _CodexTurn:
     partial: dict = field(default_factory=dict)
     file_items: dict = field(default_factory=dict)
     requests: dict = field(default_factory=dict)
+    request_items: dict = field(default_factory=dict)
+    request_generations: dict = field(default_factory=dict)
     answering: set = field(default_factory=set)
     mcp_calls: dict = field(default_factory=dict)  # item id -> (server, tool, arguments)
     permit_inputs: dict = field(default_factory=dict)  # request id -> the call's arguments
@@ -705,7 +723,7 @@ class _CodexTurn:
             # app still gates every attached MCP call; native tools stay read-only/denied.
             self.policy = CodexPolicy('untrusted', 'read-only', 'readOnly', 'user')
         if self.project:
-            approval = "untrusted" if self.mode == "ask" else "on-request"
+            approval = "untrusted" if self.mode == "ask" and not getattr(self.project, "local_workstation", False) else "on-request"
             self.policy = CodexPolicy(approval, "", "", "user")
         elif self.feature:
             self.policy = CodexPolicy("untrusted", "read-only", "readOnly", "user")
@@ -774,6 +792,8 @@ class _CodexTurn:
             logger.exception("Codex run crashed", thread_id=self.ctx.thread_id)
             return self._outcome(crashed=True)
         finally:
+            for rid in tuple(self.requests):
+                await self._retire_request(rid)
             for task in list(self.answering):
                 task.cancel()
             if self.answering:
@@ -818,6 +838,9 @@ class _CodexTurn:
                 error = ("本机 Codex 无法打开员工会话库。请检查服务目录的路径长度和写入权限。"
                          "新档案可通过 SUPARAGENT_EMPLOYEE_RUNTIME_ROOT 选择较短的独立目录。")
                 code = "employee_session_storage_unavailable"
+        if getattr(self.project, "local_workstation", False):
+            from app.services.agent_memory import redact_json, redact_secrets
+            error, more = redact_secrets(error)[0], redact_json(more)
         if self.deepseek_key:
             error = error.replace(self.deepseek_key, "[redacted]")
         return TurnOutcome("failed", error=_clip(error), error_code=code, **{**self._common(), **more})
@@ -902,6 +925,14 @@ class _CodexTurn:
                 note = ("For other work, use the native terminal and editor within the named project permissions. "
                         "If a project check needs review, use team.run_project_command with its complete argv and relative cwd. "
                         "An unchanged check recorded by your assigning steward can run read-only. Other operations need an individual review.")
+                instructions = f"{instructions}\n\n{note}" if instructions else note
+            if self.project and getattr(self.project, "local_workstation", False):
+                note = ("Use team.inspect_local_path for local diagnostics, including application logs under AppData. "
+                        "To find recent files or logs, use its find operation with a filename glob and the narrowest "
+                        "relevant folder. Results are newest first. Check scan_complete before claiming full coverage. "
+                        "Run local programs by absolute path within your current permissions. Use TEMP for intermediate files. "
+                        "Use team.create_project_text and team.replace_project_text for assigned project edits. "
+                        "Ask for review before destructive work or work outside the project. Never print, transmit or include credentials in logs or deliverables.")
                 instructions = f"{instructions}\n\n{note}" if instructions else note
             if self.project and "list_peer_files" in feature_team_tools(self.ctx):
                 note = ("For a colleague's project, use team.employee_capabilities for the registered name, ID and "
@@ -1348,6 +1379,9 @@ class _CodexTurn:
         if self.sink.lost:
             return False
         try:
+            if getattr(self.project, "local_workstation", False):
+                from app.services.agent_memory import redact_json
+                data = redact_json(data)
             return await self.sink.emit(type_, data)
         except Exception:  # noqa: BLE001
             logger.exception("could not record a Codex event", thread_id=self.ctx.thread_id)
@@ -1368,7 +1402,7 @@ class _CodexTurn:
                 item_id = params.get("itemId") or "_"
                 self.partial[item_id] = self.partial.get(item_id, "") + delta
                 self._count(delta)
-                if not self.sink.lost:
+                if not self.sink.lost and not getattr(self.project, "local_workstation", False):
                     self.sink.delta(delta)
         elif method == "item/started":
             await self._item_started(params.get("item") if isinstance(params.get("item"), dict) else {})
@@ -1384,9 +1418,8 @@ class _CodexTurn:
                         usage[ours] = value
                 self.usage = usage or self.usage
         elif method == "serverRequest/resolved":
-            request_id = self.requests.pop(params.get("requestId"), None)
-            if request_id is not None:
-                await self.gate.cancel(request_id)
+            if params.get("turnId") in (None, self.codex_turn_id):
+                await self._retire_request(params.get("requestId"))
         elif method == "error":
             error = params.get("error") if isinstance(params.get("error"), dict) else {"message": params.get("message")}
             if params.get("willRetry") is not True and isinstance(error.get("message"), str):
@@ -1431,7 +1464,8 @@ class _CodexTurn:
         if self.project:
             remote = (self.ctx.community_launch is not None and item.get("server") == community_mcp_bridge.SERVER
                       and item.get("tool") in self.ctx.community_tools)
-            if ((kind == "commandExecution" and self.tools)
+            if ((kind == "webSearch" and self.project.model_vendor == "openai" and not self.scheduled_knowledge)
+                    or (kind == "commandExecution" and self.tools)
                     or (kind == "fileChange" and self.tools and self.project.writable)
                     or (kind == "mcpToolCall" and (project_tool or remote))):
                 self.project_items[item_id] = item
@@ -1497,6 +1531,10 @@ class _CodexTurn:
 
     async def _item_completed(self, item: dict) -> None:
         kind, item_id = item.get("type"), item.get("id")
+        if self.project and isinstance(item_id, str):
+            for rid, associated in tuple(self.request_items.items()):
+                if associated == item_id:
+                    await self._retire_request(rid)
         if kind == "agentMessage":
             text = item.get("text") if isinstance(item.get("text"), str) else ""
             if text:
@@ -1504,6 +1542,9 @@ class _CodexTurn:
             streamed = self.partial.pop(item_id, None) if isinstance(item_id, str) else None
             if streamed is None:
                 self._count(text)
+            if getattr(self.project, "local_workstation", False):
+                from app.services.agent_memory import redact_secrets
+                text = redact_secrets(text)[0]
             if text.strip():
                 self.last_text = text
                 if item.get("phase") == "final_answer":
@@ -1609,6 +1650,12 @@ class _CodexTurn:
                 return {"decision": "cancel"}
             return {"decision": "accept" if allow else "decline"}
 
+        if rid in self.requests:
+            return  # The original JSON-RPC request alone owns this response id.
+        if project and (params.get("threadId") not in (None, self.thread_id)
+                        or params.get("turnId") not in (None, self.codex_turn_id)):
+            self.rpc.respond(rid, error={"code": -32602, "message": "Request is not bound to the active turn."})
+            return
         team_call = kind == "mcp" and params.get("serverName") == "team" and self.ctx.team_launch is not None
         composio_call = (
             kind == "mcp"
@@ -1733,22 +1780,20 @@ class _CodexTurn:
                     self.rpc.respond(rid, payload(False))
                     return
                 name, tool_input = found
-                from app.team.mcp_server import PEER_FILES, PROJECT_COMMAND, PROJECT_FILES, TOOLS
-                feishu_tools = getattr(getattr(self.ctx, 'team', None), 'feishu_tools', ())
-                if ((name not in {entry['name'] for entry in (*TOOLS, *PROJECT_FILES, *PEER_FILES, PROJECT_COMMAND)} and name not in feishu_tools) or
-                        (self.feature and (name not in feature_team_tools(self.ctx) or
-                         (name == 'ask_agent' and tool_input.get('mode') != 'consult')))):
+                from app.team.mcp_server import PROJECT_COMMAND
+                if (name not in _team_approval_tools(self.ctx, feature=bool(self.feature)) or
+                        (self.feature and name == "ask_agent" and tool_input.get("mode") != "consult")):
                     self.rpc.respond(rid, payload(False))
                     return
                 tool, approval_kind = "mcp__team__" + name, "other"
                 summary = summarize_tool(tool, tool_input)
-                if name in ('list_project_files','read_project_text','replace_project_text'):
+                if name in ('list_project_files','read_project_text','create_project_text','replace_project_text'):
                     if not project or name not in feature_team_tools(self.ctx):
                         self.rpc.respond(rid, payload(False))
                         return
-                    operation = {'list_project_files':'列出', 'read_project_text':'读取', 'replace_project_text':'修改'}[name]
+                    operation = {'list_project_files':'列出', 'read_project_text':'读取', 'replace_project_text':'修改', 'create_project_text':'新建'}[name]
                     summary = f"{operation}岗位文件 {str(tool_input.get('path',''))[:150]}"
-                    approval_kind = 'file_write' if name == 'replace_project_text' else 'other'
+                    approval_kind = 'file_write' if name in ('create_project_text','replace_project_text') else 'other'
                 if name == PROJECT_COMMAND['name']:
                     from app.services import employee_terminal
                     import subprocess
@@ -1816,8 +1861,19 @@ class _CodexTurn:
         if len(json.dumps(tool_input, ensure_ascii=False)) > MAX_REVIEWABLE_INPUT_CHARS:
             self.rpc.respond(rid, payload(False))  # too big to show in full: refused
             return
-        request_id = f"codex-{rid}"
+        if getattr(project, "local_workstation", False):
+            from app.services.agent_memory import redact_json, redact_secrets
+            if redact_json(tool_input) != tool_input or redact_secrets(json.dumps(tool_input, ensure_ascii=False))[1]:
+                self.rpc.respond(rid, payload(False))
+                return
+        generation = self.request_generations.get(rid, 0) + 1
+        self.request_generations[rid] = generation
+        request_id = f"codex-{rid}" if type(rid) is int else f"codex-string-{rid!r}"
+        if generation > 1:
+            request_id += f"/{generation}"
         self.requests[rid] = request_id
+        if isinstance(params.get("itemId"), str):
+            self.request_items[rid] = params["itemId"]
         self.permit_inputs[rid] = tool_input
         handle = await self.gate.open(
             request_id=request_id, tool=tool, input=tool_input, summary=summary, kind=approval_kind
@@ -1825,20 +1881,30 @@ class _CodexTurn:
         if handle is None:
             return
         handle.tool = tool
-        task = asyncio.create_task(self._answer(handle, rid, payload))
+        task = asyncio.create_task(self._answer(handle, rid, request_id, payload))
         self.answering.add(task)
         task.add_done_callback(self.answering.discard)
 
-    async def _answer(self, handle, rid, payload) -> None:
+    async def _retire_request(self, rid):
+        request_id = self.requests.pop(rid, None)
+        self.request_items.pop(rid, None)
+        self.permit_inputs.pop(rid, None)
+        if request_id is not None:
+            await self.gate.cancel(request_id)
+
+    async def _answer(self, handle, rid, request_id, payload) -> None:
         self.clock.pause()
         try:
             decision = await self.gate.decide(handle)
         finally:
             self.clock.resume()
-        pending = self.requests.pop(rid, None)
-        permit_input = self.permit_inputs.pop(rid, {})
-        if pending is None or decision.kind == LOST:
+        if self.requests.get(rid) != request_id or decision.kind == LOST:
+            if self.project and decision.kind == ALLOW and hasattr(self.gate, "native_response"):
+                await self.gate.native_response(handle.approval_id, False)
             return
+        self.requests.pop(rid)
+        self.request_items.pop(rid, None)
+        permit_input = self.permit_inputs.pop(rid, {})
         allow = decision.kind == ALLOW
         permit_target = self.computer if self.computer is not None else self.ctx.browser
         if allow and permit_target is not None and handle.tool.startswith(COMPUTER_TOOL_PREFIX):
@@ -1848,7 +1914,9 @@ class _CodexTurn:
             except OSError:
                 logger.exception("could not write a computer permit", thread_id=self.ctx.thread_id)
                 allow = False
-        self.rpc.respond(rid, payload(allow))
+        written = self.rpc.respond(rid, payload(allow))
+        if self.project and decision.kind == ALLOW and hasattr(self.gate, "native_response"):
+            await self.gate.native_response(handle.approval_id, bool(allow and written))
 
     # -- how it ended ----------------------------------------------------------------------
 

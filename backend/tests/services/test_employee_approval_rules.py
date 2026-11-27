@@ -29,6 +29,120 @@ def test_exact_grant_does_not_cross_employees_profiles_or_permission_changes(tmp
     assert rules.identity(project,"Bash",args) != key
 
 
+@pytest.mark.asyncio
+async def test_work_order_grant_matches_read_capability_without_crossing_assignment(tmp_path, monkeypatch, db_session):
+    project, args = request(tmp_path, monkeypatch, "Get-ChildItem -Name")
+    project.task_id, project.assignment_epoch = 11, 2
+    key = rules.identity(project, "Bash", args)
+    await rules.stage(db_session, "owner", rules.work_order_key(project, key))
+    _, repeated = request(tmp_path, monkeypatch, "get-childitem -Name\nGet-ChildItem -Name")
+    current = rules.identity(project, "Bash", repeated)
+    assert current != key
+    assert await rules.matching(db_session, "owner", project, current)
+    assert not await rules.matching(db_session, "other", project, current)
+    project.task_id = 12
+    assert not await rules.matching(db_session, "owner", project, current)
+    project.task_id, project.assignment_epoch = 11, 3
+    assert not await rules.matching(db_session, "owner", project, current)
+    _, unsafe = request(tmp_path, monkeypatch, "Get-ChildItem -Name\nRemove-Item data")
+    assert not rules.identity(project, "Bash", unsafe)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer_before_turn_end", [False, True])
+async def test_stale_decision_only_queues_one_readonly_verification(sessions, owner, cleanup_jobs, tmp_path, answer_before_turn_end):
+    from app.db.models import AgentJob, AgentJobEvent
+    from app.services import agent_store, feature_tasks, thread_store
+    from app.team.jobs import Jobs
+    from sqlalchemy import func, select
+    async with sessions() as db:
+        employee = await agent_store.create_agent(db, owner_id=owner, name="Employee", provider="codex")
+        task = (await feature_tasks.route(db, owner_id=owner, agent_id=employee.id, project="P", event_key="assignment",
+                    title="Inspect project", text="Inspect project"))["task_id"]
+        thread, _ = await feature_tasks.session_for(db, owner, task, model="example", workspace_path=str(tmp_path))
+        thread.provider_state = {"employee_project": {"root": str(tmp_path)}}
+        await db.commit()
+        turn = await thread_store.start_turn(db, thread.id, "Inspect project")
+        job = AgentJob(owner_id=owner, task_id=task, project="P", assignment_epoch=1, requester_agent_id=employee.id,
+            requester_thread_id=thread.id, requester_turn_id=turn.id, assignee_agent_id=employee.id,
+            assignee_thread_id=thread.id, assignee_turn_id=turn.id, current_turn_id=turn.id, kind="job", mode="work",
+            reply="resume", status="running", brief="inspect", brief_hash="a")
+        db.add(job)
+        await db.commit()
+        approval = await thread_store.create_approval(db, thread_id=thread.id, turn_id=turn.id,
+            request_id="native", tool="Bash", input={"command":"some-command"})
+        await thread_store.expire_approval(db, approval.id)
+    jobs = Jobs(SimpleNamespace(session=sessions, owner_id=owner, hub=SimpleNamespace(notify=lambda _: None)))
+    jobs.kick = lambda: None
+    decision = (approval.id, thread.id, turn.id, employee.id, 1)
+    assert not await jobs.stale_native_decision(*decision[:-1], 2)
+    if answer_before_turn_end:
+        assert await jobs.stale_native_decision(*decision)
+    async with sessions() as db:
+        await thread_store.finish_turn(db, turn.id, turn.owner_token, status="failed", error="transport closed")
+    await jobs._finish_execution(job.id)
+    if not answer_before_turn_end:
+        async with sessions() as db:
+            parked = await db.get(AgentJob, job.id)
+            assert (parked.status, parked.outcome) == ("needs_input", "awaiting_native_review")
+        assert await jobs.stale_native_decision(*decision)
+    assert not await jobs.stale_native_decision(*decision)
+    async with sessions() as db:
+        queued = await db.get(AgentJob, job.id)
+        assert (queued.status, queued.approval_mode, queued.assignee_thread_id) == ("queued", "plan", thread.id)
+        assert queued.current_turn_id is None
+        assert await db.scalar(select(func.count()).select_from(AgentJobEvent).where(
+            AgentJobEvent.job_id == job.id, AgentJobEvent.kind == "verification_retry")) == 1
+        original = await thread_store.get_approval(db, approval.id)
+        assert original.status == "expired" and original.delivered_at is None
+        followup = await thread_store.start_turn(db, thread.id, "Inspect existing results")
+        queued.status, queued.current_turn_id, queued.assignee_turn_id = "running", followup.id, followup.id
+        await db.commit()
+        await thread_store.finish_turn(db, followup.id, followup.owner_token, status="succeeded",
+                                      result="BLOCKED: Cannot confirm the previous outcome.")
+    await jobs._finish_execution(job.id)
+    async with sessions() as db:
+        waiting = await db.get(AgentJob, job.id)
+        assert waiting.status == "needs_input" and waiting.outcome == "awaiting_next_step"
+        assert waiting.approval_mode == "ask" and waiting.assignee_thread_id == thread.id
+
+
+def test_real_workstation_grant_spans_jobs_but_tracks_policy(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from app.services.employee_runtime import ProjectRuntime
+    first = ProjectRuntime("owner", 3, 10, 1, "codex", tmp_path, True, (),
+                           profile_path=tmp_path / "runtime" / "owner" / "3" / "codex", local_workstation=True)
+    second = replace(first, task_id=11, assignment_epoch=4)
+    _, args = request(tmp_path, monkeypatch, "Get-Location")
+    assert first.permission_name != second.permission_name
+    key = rules.identity(first, "Bash", args)
+    assert key == rules.identity(second, "Bash", args)
+    assert rules.work_order_key(first, key) != rules.work_order_key(second, key)
+    assert rules.identity(replace(first, writable=False), "Bash", args) != key
+    assert rules.identity(replace(first, model_vendor="other"), "Bash", args) != key
+
+
+def test_typed_create_grant_scopes_source_format_folder_and_collision_policy(tmp_path, monkeypatch):
+    project = SimpleNamespace(root=tmp_path/"project", employee_id=2, permission_name="p",
+                              employee_folders=(), task_dir=tmp_path/"project"/"任务"/"12")
+    project.task_dir.mkdir(parents=True)
+    folder = tmp_path/"output"
+    folder.mkdir()
+    # Windows places pytest fixtures inside protected AppData. Use the same
+    # validated destination as the publication tests, isolating grant scope.
+    from app.services import employee_resources
+    monkeypatch.setattr(employee_resources, "external_folder", lambda *_: folder)
+    (project.task_dir/"first.txt").write_text("first")
+    (project.task_dir/"second.txt").write_text("second")
+    args = {"source":"任务/12/first.txt","folder":str(folder),"sha256":"a"*64}
+    key = rules.identity(project, rules.DELIVER_FILE, args)
+    assert key
+    assert rules.identity(project, rules.DELIVER_FILE, {**args,"source":"任务/12/second.txt","sha256":"b"*64}) == key
+    for changes in ({"source":"other.txt"}, {"previous_sha256":"b"*64}, {"name":"run.cmd"},
+                    {"folder":str(project.root)}, {"source":"../secret.txt"}):
+        assert rules.identity(project, rules.DELIVER_FILE, {**args, **changes}) is None
+
+
 def test_application_grant_pins_installed_file_contents(tmp_path, monkeypatch):
     installed = tmp_path/"Program Files"
     installed.mkdir()
@@ -124,6 +238,15 @@ async def test_original_request_delivers_then_fresh_task_reuses_owner_grant(sess
         rt = SimpleNamespace(session=sessions,owner_id=owner,_runs={turn.id:run},_waiters={},_mode_of=lambda _: "ask",
                              hub=SimpleNamespace(notify=lambda _:None))
         gate = run.gate = ThreadApprovalGate(rt,run)
+        if attempt == 1:
+            lost = await gate.open(request_id="withdrawn", tool="Bash", kind="command", input=args, summary="Get-Location")
+            assert await ThreadRuntime.answer_approval(rt, lost.approval_id, "allow", remember=True)
+            assert (await gate.decide(lost)).kind == "allow"
+            await gate.native_response(lost.approval_id, False)
+            async with sessions() as db:
+                retired = await thread_store.get_approval(db, lost.approval_id)
+                assert retired.status == "cancelled" and retired.delivered_at is None
+                assert not await rules.find(db, owner, rules.identity(project, "Bash", args))
         handle = await gate.open(request_id=title,tool="Bash",kind="command",input=args,summary="Get-Location")
         if attempt == 1:
             record = {}
@@ -137,6 +260,7 @@ async def test_original_request_delivers_then_fresh_task_reuses_owner_grant(sess
                 expected_turn_id=turn.id,expected_assignment_epoch=1,expected_employee_id=worker.id)
             assert record["id"]
             async with sessions() as db:
+                assert not await rules.find(db, owner, rules.identity(project, "Bash", args))
                 assert not await pending_for_jobs(db, owner, [job])
         if attempt == 3:
             # A rule matched when the card opened, but the live profile lost its
@@ -148,6 +272,7 @@ async def test_original_request_delivers_then_fresh_task_reuses_owner_grant(sess
                 assert row.status == "denied" and row.delivered_at is None
             continue
         assert (await gate.decide(handle)).kind == "allow"
+        await gate.native_response(handle.approval_id, True)
         async with sessions() as db:
             row = await thread_store.get_approval(db,handle.approval_id)
             assert row.delivered_at and row.status == "allowed"

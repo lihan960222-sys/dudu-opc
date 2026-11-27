@@ -457,7 +457,7 @@ def _turn(mode, **launches):
     ("item/permissions/requestApproval", {"permissions": {"network": {"enabled": True}}},
      "codex.request_permissions"),
 ])
-@pytest.mark.parametrize("answer", ["allow", "deny", "resolved"])
+@pytest.mark.parametrize("answer", ["allow", "deny", "resolved", "item_finished"])
 async def test_employee_native_approval_resumes_only_live_request(tmp_path, monkeypatch, method, params, tool, answer):
     import asyncio
     from unittest.mock import AsyncMock, Mock
@@ -473,15 +473,18 @@ async def test_employee_native_approval_resumes_only_live_request(tmp_path, monk
 
     turn.gate = SimpleNamespace(open=AsyncMock(return_value=SimpleNamespace(tool="")),
                                 decide=wait_for_decision, cancel=AsyncMock())
-    await turn._server_request({"id": 47, "method": method, "params": params})
+    await turn._server_request({"id": 47, "method": method, "params": {**params, "itemId":"native-item"}})
     assert turn.gate.open.await_args.kwargs["tool"] == tool
     turn.rpc.respond.assert_not_called()
     if answer == "resolved":
         await turn._notification({"method": "serverRequest/resolved", "params": {"requestId": 47}})
         turn.gate.cancel.assert_awaited_once_with("codex-47")
+    if answer == "item_finished":
+        await turn._item_completed({"id":"native-item", "type":"commandExecution", "status":"failed"})
+        turn.gate.cancel.assert_awaited_once_with("codex-47")
     decision.set_result(SimpleNamespace(kind=codex_adapter.ALLOW if answer == "allow" else "deny"))
     await asyncio.gather(*turn.answering)
-    if answer == "resolved":
+    if answer in ("resolved", "item_finished"):
         turn.rpc.respond.assert_not_called()
     elif tool == "codex.request_permissions":
         turn.rpc.respond.assert_called_once_with(47, {"scope": "turn",
@@ -489,6 +492,34 @@ async def test_employee_native_approval_resumes_only_live_request(tmp_path, monk
     else:
         denied = "cancel" if tool == "Bash" else "decline"
         turn.rpc.respond.assert_called_once_with(47, {"decision": "accept" if answer == "allow" else denied})
+
+
+async def test_retired_native_request_cannot_answer_reused_rpc_id(tmp_path, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+    monkeypatch.setattr(settings, "LOCAL_TOOLS_ENABLED", True)
+    turn = _turn("accept_edits", project_runtime=SimpleNamespace(writable=True, root=tmp_path),
+                 feature_workspace=str(tmp_path))
+    turn.rpc = Mock()
+    waiters = {}
+    async def opened(request_id, **kwargs):
+        waiters[request_id] = asyncio.get_running_loop().create_future()
+        return SimpleNamespace(request_id=request_id)
+    async def decide(handle):
+        return await waiters[handle.request_id]
+    turn.gate = SimpleNamespace(open=opened, decide=decide, cancel=AsyncMock())
+    message = {"id":42, "method":"item/commandExecution/requestApproval",
+               "params":{"command":"example", "cwd":str(tmp_path)}}
+    await turn._server_request(message)
+    await turn._notification({"method":"serverRequest/resolved", "params":{"requestId":42}})
+    await turn._server_request(message)
+    first, second = waiters.values()
+    first.set_result(SimpleNamespace(kind="allow"))
+    await asyncio.sleep(0)
+    turn.rpc.respond.assert_not_called()
+    second.set_result(SimpleNamespace(kind="deny"))
+    await asyncio.gather(*turn.answering)
+    turn.rpc.respond.assert_called_once_with(42, {"decision":"decline"})
 
 
 def test_approve_for_me_keeps_attached_apps_on_the_app_gate():
@@ -932,3 +963,36 @@ async def test_steward_gpt_turns_use_backend_history_without_desktop_sessions(cr
     context = codex.received("turn/start")[-1]["params"]["additionalContext"]["prior_conversation"]
     assert context["kind"] == "untrusted"
     assert [r["text"] for r in json.loads(context["value"])] == ["first question", "hello there"]
+
+@pytest.mark.parametrize(("role", "mode", "tool", "allowed"), [
+    ("employee", "ask", "use_project_release", True),
+    ("employee", "ask", "download_task_reference", True),
+    ("employee", "ask", "deliver_project_file", True),
+    ("employee", "plan", "read_task_reference", True),
+    ("employee", "plan", "download_task_reference", False),
+    ("employee", "plan", "deliver_project_file", False),
+    ("employee", "plan", "use_project_release", False),
+    ("employee", "ask", "publish_shared_release", False),
+    ("steward", "ask", "publish_shared_release", True),
+    ("ordinary", "ask", "publish_shared_release", False),
+    ("steward", "ask", "deliver_project_file", False),
+])
+async def test_approval_uses_the_catalog_advertised_to_this_role(tmp_path, role, mode, tool, allowed):
+    from unittest.mock import AsyncMock, Mock
+    from app.team.policy import TurnTeam
+    employee = role == "employee"
+    ctx = TurnTeam(1, 2, role == "steward", False, strict_hierarchy=True,
+                   feature_consult=employee, delegation_enabled=False)
+    turn = _turn(mode, project_runtime=SimpleNamespace(root=tmp_path,writable=mode!="plan") if employee else None,
+                 feature_workspace=str(tmp_path) if employee else None, team=ctx,
+                 team_launch=SimpleNamespace(args=["--steward"] if role=="steward" else []))
+    turn._emit, turn.rpc, turn.gate = AsyncMock(return_value=True), Mock(), SimpleNamespace(open=AsyncMock(return_value=None))
+    args = {"fixture": "value"}
+    await turn._item_started({"id":"item", "type":"mcpToolCall", "server":"team","tool":tool,"arguments":args})
+    await turn._server_request({"id":1,"method":"mcpServer/elicitation/request","params":{
+        "serverName":"team", "message":f'run tool "{tool}"', "_meta":{"codex_approval_kind":"mcp_tool_call","tool_params":args}}})
+    if allowed:
+        assert turn.gate.open.await_args.kwargs["tool"] == "mcp__team__" + tool
+    else:
+        turn.gate.open.assert_not_awaited()
+        turn.rpc.respond.assert_called_once_with(1, {"action":"decline"})
