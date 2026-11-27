@@ -27,7 +27,7 @@ async def fake_session():
 @pytest.mark.parametrize('failure',['before_post','after_remote_commit','after_response'])
 async def test_restart_reuses_exact_request(tmp_path, monkeypatch, failure):
     monkeypatch.setattr(session,'AsyncSessionLocal',fake_session)
-    cfg = {'owner_id':'o'}
+    cfg = {'owner_id':'o', 'steward':{'app_id':'a', 'tenant_key':'t', 'open_id':'owner'}}
     store = journal(tmp_path/'state')
     worker = Worker(cfg,Publisher(cfg,store,tmp_path))
     store.execute("insert into inbox(app,event,message,payload,state,task) values('a','e','m','{}','bound',1)")
@@ -65,7 +65,7 @@ async def test_restart_reuses_exact_request(tmp_path, monkeypatch, failure):
     async def failed_reconcile(row):
         raise ValueError('unverified turn')
     monkeypatch.setattr(resumed,'reconcile',failed_reconcile)
-    monkeypatch.setattr(resumed,'flush',lambda: None)
+    monkeypatch.setattr(resumed,'flush',lambda **options: None)
     await resumed.tick()
     assert store.execute('select state from inbox').fetchone()[0]=='running'
     store.close()

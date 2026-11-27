@@ -66,3 +66,19 @@ async def test_private_steward_continues_its_own_numbered_or_quoted_card_across_
         assert denied.value.code == 'assignment_reference_scope'
         facts = await lead_chat.project_context(db, owner, 'default project', current.id)
         assert json.loads(facts.partition('：')[2]) == [[expected, worker.id]]
+
+        second, _ = await previous(original, 'another assignment')
+        turn = await ask("还是照我们说的做，把上回遗漏的那部分补上。")
+        ctx = await assignment_context.resolve_assignment_context(db, owner, turn.id)
+        card, _ = await assignment_context.resolve_card(db, owner, ctx, worker.id,
+            {"assignment_intent":"continue", "task_id":second})
+        assert card.id == second
+        with pytest.raises(ValueError):
+            await assignment_context.resolve_card(db, owner, ctx, worker.id,
+                {"assignment_intent":"continue", "task_id":foreign_card})
+        with pytest.raises(ValueError):
+            await assignment_context.resolve_card(db, owner, ctx, worker.id, {"assignment_intent":"continue"})
+        turn = await ask("继续聊个完全不同的项目")
+        ctx = await assignment_context.resolve_assignment_context(db, owner, turn.id)
+        assert await assignment_context.resolve_card(db, owner, ctx, worker.id,
+            {"assignment_intent":"independent"}) is None

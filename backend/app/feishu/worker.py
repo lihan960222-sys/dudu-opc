@@ -91,6 +91,8 @@ class Worker:
             return
         if await approvals.owner_request(self, row, msg, text):
             return
+        lead_conversation = bool(self.cfg.get("steward_thread") and msg.get("chat_type") == "p2p"
+                                 and row["state"] == "received")
         followup = self.db.execute("select command from history_continuations where app=? and event=?",
                                    (row["app"],row["event"])).fetchone()
         if followup:
@@ -100,7 +102,7 @@ class Worker:
                     return
                 other = self.db.execute("""select 1 from knowledge_intent_candidates
                     where app=? and event=? and decision='other'""",(row["app"],row["event"])).fetchone()
-                if not other:
+                if not other and not lead_conversation:
                     self.respond(row,"done","老板，我还没对上您要更新的文档。您方便引用上次的任务，或告诉我联系人和文档名吗？")
                     return
             else:
@@ -117,7 +119,7 @@ class Worker:
             return
         from . import history
         retry = re.fullmatch(r"(?:现在)?(?:再)?(?:让|叫)(.+?)(?:再)?(?:试试看|试一下|试试|重试)[吧。！! ]*", text.strip())
-        if retry and retry[1].strip() in self.cfg["roles"] and not self.reference(msg):
+        if not lead_conversation and retry and retry[1].strip() in self.cfg["roles"] and not self.reference(msg):
             from .workspace_access import settings_for
             name = retry[1].strip()
             agent = self.cfg["roles"][name]["agent_id"]
@@ -129,7 +131,7 @@ class Worker:
             return
         tracking = re.fullmatch(r"(?:你)?(?:看一下|看看|怎么样了|进度如何|什么进度|现在什么情况|进度|状态)[？?。！! ]*",text.strip())
         short_retry = re.fullmatch(r"(?:现在)?(?:再)?(?:试试看|试一下|试试|重试)[吧。！!？? ]*",text.strip())
-        if tracking or short_retry:
+        if tracking or (short_retry and not lead_conversation):
             keys = [msg.get("parent_id"), msg.get("root_id")]
             if short_retry and not any(keys):
                 previous = self.db.execute("""select message from inbox where app=? and rowid>? and rowid <
@@ -181,6 +183,11 @@ class Worker:
         pending = self.db.execute("""select i.* from questions q join outbox o on o.id=q.outgoing
             join inbox i on i.app=q.app and i.event=q.event where o.remote=? and (i.state='clarify' or q.resolved_by=?)""",
             (parent,row['event'])).fetchone()
+        # A bound owner talks to their existing lead, regardless of model or employee name.
+        # Explicit gateway commands and answers to old numbered menus still use their original records.
+        if lead_conversation and not intent and not (pending and re.fullmatch(r'#\d+', text.strip())):
+            await self.route_direct(row, msg, text)
+            return
         source = row['message']
         if pending:
             original = json.loads(pending['payload'])
@@ -214,17 +221,6 @@ class Worker:
             if not binding or binding['role'] != named:
                 ref = None
             title = text.strip().splitlines()[0][:160]
-            if not ref and self.cfg.get('steward_thread'):
-                from .steward import named_intent
-                try:
-                    kind,title = await named_intent(self.cfg,named,text)
-                except (httpx.HTTPError,ValueError,RuntimeError,KeyError,IndexError,TypeError):
-                    kind = 'clarify'
-                if kind != 'work':
-                    reply = (f'老板，您想请{named}整理哪位联系人的聊天记录？'
-                             if kind=='history' else f'老板，我知道您点了{named}。您希望这次交付什么？')
-                    self.respond(row,'done',reply)
-                    return
             role, intent = named, 'append' if ref else 'deliver'
         if ref and intent != 'independent':
             binding = self.db.execute('select * from bindings where task=?',(ref,)).fetchone()

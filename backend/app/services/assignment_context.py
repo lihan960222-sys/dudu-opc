@@ -251,7 +251,7 @@ async def steward_context(db, owner, turn):
 
 
 async def resolve_card(db, owner, context, target, args):
-    """Explicit references beat a model's proposed card; ambiguous follow-ups return choices."""
+    """Bind the lead's selection to a visible card. An owner reference takes precedence."""
     ids = list(context.reference_task_ids)
     if context.named_agent_ids and target not in context.named_agent_ids:
         raise ValueError(f"老板点名的员工编号是 {list(context.named_agent_ids)}，请交给指定员工。")
@@ -279,9 +279,7 @@ async def resolve_card(db, owner, context, target, args):
         if len(rows) > 1 and context.named_agent_ids:
             rows = [r for r in rows if r[0].agent_id in context.named_agent_ids]
     else:
-        text = context.original_text.strip()
-        continuing = transfer or args.get("assignment_intent") == "continue" or bool(re.search(
-            r"^(?:请|麻烦)?(?:按.{0,12}(?:那个|上次|之前|原来)|继续|接着|续办|重新来|再试|还是上次)|原来的继续|\b(?:continue|resume)\b",text,re.I))
+        continuing = transfer or args.get("assignment_intent") == "continue"
         if not continuing:
             if claim is None:
                 if args.get("assignment_intent") == "independent" or not project:
@@ -301,18 +299,16 @@ async def resolve_card(db, owner, context, target, args):
                     raise ValueError("所选工单不属于当前项目。")
         else:
             query = query.where(WorkItem.archived.is_(False))
-            if context.named_agent_ids and not transfer:
-                query = query.where(WorkItem.agent_id.in_(context.named_agent_ids))
+            if not transfer:
+                query = query.where(WorkItem.agent_id == target)
+            if claim is not None:
+                query = query.where(WorkItem.id == claim)
             rows = (await db.execute(query.order_by(WorkItem.id))).all()
-            topical = [r for r in rows if any(label and label.casefold() in text.casefold()
-                       for label in [r[0].title, *(r[1].aliases or [])])]
-            if topical:
-                rows = topical
             if not rows:
-                raise ValueError("没有找到可续办的工单，请确认项目或任务编号。")
+                raise ValueError("这位员工在当前任务范围内没有这项可续办的工单。")
     if len(rows) != 1:
-        choices = "、".join(f"#{c.id} {c.title[:48]}" for c, _ in rows[:12])
-        raise ValueError("请让老板选一项工单：" + choices)
+        choices = "、".join(f"#{c.id}" for c, _ in rows[:12])
+        raise ValueError("请结合老板的原话和当前对话，从可见工单中选择并传入 task_id。仍无法区分时再询问老板。候选：" + choices)
     card, scope = rows[0]
     expected = context.reference_epochs.get(str(card.id))
     if expected is not None and expected != scope.assignment_epoch:
