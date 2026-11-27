@@ -1729,11 +1729,14 @@ class _CodexTurn:
 
         if kind == "permissions":
             permissions = params.get("permissions")
-            if not isinstance(permissions, dict) or not permissions:
+            environment = params.get("environmentId")
+            if not isinstance(permissions, dict) or not permissions or environment not in (None, "local"):
                 self.rpc.respond(rid, payload(False))
                 return
             tool, approval_kind = "codex.request_permissions", "other"
             tool_input = {"permissions": permissions, "cwd": str(params.get("cwd") or project.root)}
+            if environment is not None:
+                tool_input["environmentId"] = environment
             if isinstance(params.get("reason"), str):
                 tool_input["reason"] = params["reason"]
             summary = "申请本轮额外权限"

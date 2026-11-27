@@ -597,6 +597,17 @@ async def test_project_app_permission_needs_live_matching_call_and_does_not_repl
     gate.native_response.assert_awaited_with("receipt", False)
 
 
+async def test_local_employee_cannot_approve_another_environments_permissions(tmp_path):
+    from unittest.mock import AsyncMock, Mock
+
+    run = _turn("accept_edits", project_runtime=SimpleNamespace(root=tmp_path, writable=True))
+    run.rpc, run.gate = Mock(), AsyncMock()
+    await run._server_request({"id": 1, "method": "item/permissions/requestApproval",
+                               "params": {"environmentId": "remote", "permissions": {"network": {"enabled": True}}}})
+    run.rpc.respond.assert_called_once_with(1, {"permissions": {}, "scope": "turn"})
+    run.gate.open.assert_not_awaited()
+
+
 @pytest.mark.parametrize("secret", [False, True])
 async def test_experimental_user_question_uses_existing_job_clarification(secret):
     from unittest.mock import Mock
