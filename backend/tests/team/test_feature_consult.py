@@ -10,6 +10,14 @@ from app.team.jobs import Jobs
 from app.team.policy import TurnTeam, automatic
 
 
+def test_project_handoff_preserves_goal_without_prescribing_tools():
+    job = NS(task_id=3, mode="work", approval_mode="accept_edits", reply="resume", rework=False,
+             answer=None, brief="核对导入器的结果", done_when="给出能复查的依据")
+    prompt = Jobs(None).assignment_prompt(job)
+    assert job.brief in prompt and job.done_when in prompt
+    assert "list_files(" not in prompt and "Feishu" not in prompt
+
+
 @pytest.fixture
 def scoped_codex_host(tmp_path, monkeypatch):
     from app.services import employee_runtime
