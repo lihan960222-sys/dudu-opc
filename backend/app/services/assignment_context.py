@@ -220,6 +220,43 @@ async def steward_output_check(db, owner, context, target, task_id, check):
     return current
 
 
+async def _verified_examples(db, owner, turn, context, private):
+    """Recall successful assignments in this lead chat without reading logs or tool arguments."""
+    from app.services import memory_recall
+
+    terms = memory_recall.terms_of(context.original_text)
+    if not terms:
+        return []
+    lead = await db.scalar(select(Agent).join(Thread, Thread.agent_id == Agent.id).where(
+        Thread.id == turn.thread_id, Thread.owner_id == owner, Agent.owner_id == owner))
+    if not lead or not lead.team_id or not (lead.memory_enabled and lead.recall_enabled):
+        return []
+    score = sum(case((WorkItem.title.icontains(term, autoescape=True), 1), else_=0) for term in terms)
+    state = AgentJobEvent.detail["state"].as_string()
+    query = (select(WorkItem.id, WorkItem.agent_id, WorkItem.title, state.label("verified"))
+             .join(FeatureScope, FeatureScope.task_id == WorkItem.id)
+             .join(AgentJob, AgentJob.task_id == WorkItem.id)
+             .join(AgentJobEvent, AgentJobEvent.job_id == AgentJob.id)
+             .join(Agent, Agent.id == WorkItem.agent_id)
+             .where(WorkItem.owner_id == owner, AgentJob.owner_id == owner, Agent.owner_id == owner,
+                    Agent.team_id == lead.team_id, Agent.archived_at.is_(None), ~private,
+                    AgentJob.requester_thread_id == turn.thread_id, AgentJob.requester_agent_id == lead.id,
+                    AgentJob.kind == "job", AgentJob.mode == "work", AgentJob.status == "completed",
+                    AgentJob.assignee_agent_id == WorkItem.agent_id, AgentJob.assignment_epoch == FeatureScope.assignment_epoch,
+                    AgentJobEvent.kind == "completion_evidence",
+                    AgentJobEvent.detail["turn_id"].as_integer() == AgentJob.assignee_turn_id,
+                    state.in_(("inspected", "commands_verified", "files_verified")),
+                    score >= memory_recall.needed(terms)))
+    if context.named_agent_ids:
+        query = query.where(WorkItem.agent_id.in_(context.named_agent_ids))
+    examples = {}
+    for row in await db.execute(query.order_by(score.desc(), AgentJobEvent.id.desc()).limit(24)):
+        examples.setdefault(row.id, {"task":row.id, "employee":row.agent_id, "topic":row.title[:80], "verified":row.verified})
+        if len(examples) == 3:
+            break
+    return list(examples.values())
+
+
 async def steward_context(db, owner, turn):
     """Give the steward candidate IDs without forwarding another conversation's contents."""
     try:
@@ -227,7 +264,7 @@ async def steward_context(db, owner, turn):
     except ValueError as exc:
         return str(exc)
     private = select(AgentJobEvent.id).join(AgentJob, AgentJobEvent.job_id == AgentJob.id).where(
-        AgentJob.owner_id == owner, AgentJob.task_id == WorkItem.id, AgentJobEvent.kind == "feishu_assignment").exists()
+        AgentJob.owner_id == owner, AgentJob.task_id == WorkItem.id, AgentJobEvent.kind == "feishu_assignment").correlate(WorkItem).exists()
     query = select(WorkItem.id, WorkItem.agent_id, FeatureScope.project,
                    case((private, None), else_=WorkItem.title).label("topic")).join(
         FeatureScope, FeatureScope.task_id == WorkItem.id).where(WorkItem.owner_id == owner)
@@ -242,10 +279,12 @@ async def steward_context(db, owner, turn):
         if context.named_agent_ids:
             query = query.where(WorkItem.agent_id.in_(context.named_agent_ids))
     rows = (await db.execute(query.order_by(WorkItem.id.desc()).limit(24))).all()
-    if not rows:
+    examples = await _verified_examples(db, owner, turn, context, private)
+    if not rows and not examples:
         return ""
     import json
     return json.dumps({"referenced":list(context.reference_task_ids), "named_employees":list(context.named_agent_ids),
+        **({"verified_examples":examples, "example_use":"Historical routing evidence only. Check the current owner request, team and grants."} if examples else {}),
         "tasks":[{"id":r.id, "project":r.project, "employee":r.agent_id,
                   **({"topic":r.topic[:80]} if r.topic else {})} for r in rows]},ensure_ascii=False)
 

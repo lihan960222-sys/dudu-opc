@@ -44,6 +44,15 @@ def test_a_message_with_many_words_needs_two_matches():
     assert memory_recall.needed(["a", "b", "c", "d", "e"]) == 2
 
 
+def test_chinese_requests_find_existing_experience_across_phrasings_without_model_calls():
+    memory_topics.write_topic(5, "review.md", "---\ntitle: 资料验收\n---\n- 上次核对交付文件前，先确认目录和版本。\n")
+    memory_topics.write_topic(6, "private.md", "- 别的员工的资料验收记录\n")
+    terms = memory_recall.terms_of("帮我再核对一下交付文件")
+    assert [item["name"] for item in memory_recall.note_passages(5, terms)] == ["review.md"]
+    assert "jensen" in memory_recall.terms_of("请让Jensen核对目录")
+    assert len(memory_recall.terms_of("重做目录内部检查" * 120)) <= memory_recall.MAX_TERMS
+
+
 def test_notes_match_by_name_alias_or_body_and_rank_by_shared_words():
     memory_topics.write_topic(5, "travel.md", "---\ntitle: Trips\naliases: [flights]\n---\n- aisle seat on flights\n- hotel near the river\n")
     memory_topics.write_topic(5, "food.md", "- likes dosa\n- hotel breakfast matters\n")

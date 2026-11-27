@@ -31,6 +31,7 @@ from app.services.agent_memory import redact_secrets
 MIN_MESSAGE_CHARS = 8
 QUERY_CHARS = 500
 MAX_TERMS = 12
+_HAN = re.compile(r"([\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f]+)")
 MAX_NOTES = 4
 MAX_PASSAGES = 4
 PER_CONVERSATION = 2
@@ -78,10 +79,12 @@ def terms_of(message: str) -> list[str]:
     """The content words of a message, lower-cased, in order, at most
     MAX_TERMS. Empty for a message too short to recall from."""
     text = (message or "").strip()
-    if len(text) < MIN_MESSAGE_CHARS:
+    pieces = _HAN.split(text[:QUERY_CHARS].lower())
+    if len(text) < MIN_MESSAGE_CHARS and sum(map(len, pieces[1::2])) < 4:
         return []
     out: list[str] = []
-    for word in re.findall(r"[^\W_]+(?:['’][^\W_]+)?", text[:QUERY_CHARS].lower()):
+    # An ASCII tool or employee name embedded in Chinese is still a whole word.
+    for word in re.findall(r"[^\W_]+(?:['’][^\W_]+)?", " ".join(pieces[::2])):
         word = word.replace("’", "'")
         if len(word) < 3 or word in STOPWORDS or word.isdigit() and len(word) < 4:
             continue
@@ -89,7 +92,13 @@ def terms_of(message: str) -> list[str]:
             out.append(word)
         if len(out) >= MAX_TERMS:
             break
-    return out
+    # Adjacent Han characters overlap across rephrasings without a remote
+    # embedding call. Spread the bounded lookup over the whole request.
+    pairs = list(dict.fromkeys(word[i:i+2] for word in pieces[1::2] for i in range(len(word)-1)))
+    left = MAX_TERMS - len(out)
+    if len(pairs) > left and left > 1:
+        pairs = [pairs[i * (len(pairs) - 1) // (left - 1)] for i in range(left)]
+    return out + pairs[:left]
 
 
 def needed(terms: list[str]) -> int:
