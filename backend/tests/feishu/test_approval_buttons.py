@@ -102,6 +102,41 @@ def test_native_card_preview_for_string_wrapper_preserves_permission_request():
     assert "额外权限" in view["summary"] and json.loads(view["details"]) == args
 
 
+def test_long_native_command_card_explains_purpose_and_available_scope(tmp_path):
+    from app.feishu.publisher import _approval_card
+
+    script = "Get-Location\n" * 130
+    argv = ["pwsh.exe", "-NoProfile", "-Command", script]
+    args = {"command": shlex.join(argv), "argv": argv, "cwd": "C:/job", "reason": "核对当前项目目录"}
+    db = journal(tmp_path / "channel")
+    approvals.initialize(db)
+    execution = {"thread": 2, "turn": 3, "event": "team:10", "assignment_epoch": 1, "agent_id": 5}
+    approvals.queue_notice(db, execution, 10, {"id": "a", "input": args, "tool": "Bash"}, "Jensen · 工单 #10")
+    notice = json.loads(db.execute("select body from outbox").fetchone()[0])
+    binding = db.execute("select * from approval_dm").fetchone()
+    card = _approval_card(notice, binding)
+    summary = card["elements"][0]["text"]["content"]
+    assert "查看工作目录" in summary and "员工说明：核对当前项目目录" in summary
+    assert "没有可复用的授权范围" in summary
+    assert [a["value"]["decision"] for a in card["elements"][-1]["actions"]] == ["仅本次", "拒绝"]
+    assert json.loads(notice["approval_display"]["details"]) == args
+    db.execute("update outbox set remote='sent',state='sent'")
+    messages = []
+    worker = SimpleNamespace(db=db, cfg={"steward": {"app_id":"app"}}, respond=lambda *a: messages.append(a[2]))
+    assert approvals.answer(worker, {"app":"app","event":"reply"},
+                            {"parent_id":"sent","chat_type":"p2p","message_type":"text"}, "允许并记住")
+    assert messages and db.execute("select state from approval_dm").fetchone()[0] == "pending"
+    db.close()
+
+
+def test_native_approval_purpose_not_guessed_from_code_or_private_task():
+    args = {"command": "Stop-Process -Id 2133", "cwd": "C:/work"}
+    approval = {"input": args, "tool": "Bash", "task_brief": "password=example"}
+    display = approvals._card_display(approval, "Jensen", "details")
+    assert "结束进程，进程号 2133" in display["summary"]
+    assert "没有单独说明" in display["summary"] and "password" not in display["summary"]
+
+
 @pytest.mark.parametrize("reject_layout", [False, True])
 def test_native_card_shows_task_employee_and_script_before_exact_details(tmp_path, reject_layout):
     cfg = {"steward":{"app_id":"app","open_id":"owner"}}

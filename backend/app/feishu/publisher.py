@@ -45,11 +45,17 @@ def _approval_card(body, binding, *, flat=False):
     view = body.get("approval_display")
     if not view:
         return {"elements":[paragraph(body["text"]), action]}
-    hint = "请先核对完整参数。"
-    if binding["offer_remember"]:
-        hint += "选择「允许并记住」后，大嘴可代批同一员工在该项目的相同操作。"
-    if "本工单允许" in choices:
-        hint += "「本工单允许」只在当前工单代批同一员工的相同操作。"
+    if body.get("review_only"):
+        hint = "原审批已结束，只能核对已有结果。"
+    elif binding["offer_remember"]:
+        hint = "「仅本次」只批准眼前这一步。"
+        if "本工单允许" in choices:
+            hint += "\n「本工单允许」只在当前工单内有效。"
+        hint += "\n「允许并记住」适用于同一员工在同一项目中的匹配操作，权限配置改变后需要重新核对。"
+        hint += (" 命令及参数必须一致。" if body.get("approval_tool") == "Bash" else "")
+    else:
+        hint = "这项申请没有可复用的授权范围，只能选「仅本次」或「拒绝」。"
+    hint += "\n完整参数可在下方核对。"
     details = paragraph(view["details"])
     panel = {"tag":"collapsible_panel", "expanded":False, "header":{"title":plain("查看完整参数")},
              "elements":[details]}

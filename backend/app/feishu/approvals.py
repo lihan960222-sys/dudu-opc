@@ -43,14 +43,14 @@ def _exact_text(value, *, multiline=False, limit=1200):
             and redact(value) == value)
 
 
-def _public_parameters(value):
+def _public_parameters(value, *, limit=1200):
     if isinstance(value, dict):
         return all(isinstance(k,str) and not re.search(r"password|token|secret|api[_-]?key|credential|auth", k, re.I)
-                   and _public_parameters(v) for k,v in value.items())
+                   and _public_parameters(v, limit=limit) for k,v in value.items())
     if isinstance(value, list):
-        return all(_public_parameters(v) for v in value)
+        return all(_public_parameters(v, limit=limit) for v in value)
     # Nested parameters are always serialized as JSON before being displayed.
-    return not isinstance(value, str) or _exact_text(value, multiline=True)
+    return not isinstance(value, str) or _exact_text(value, multiline=True, limit=limit)
 
 
 def describe(approval, *, native=False):
@@ -71,7 +71,9 @@ def describe(approval, *, native=False):
         cmd, cwd = args.get("command"), args.get("cwd")
         extras = {k:v for k,v in args.items() if k not in ("command","cwd")}
         exact = json.dumps(extras, ensure_ascii=False, sort_keys=True)
-        if _exact_text(cmd, multiline=True) and _exact_text(cwd) and _public_parameters(extras) and _exact_text(exact):
+        if (_exact_text(cmd, multiline=True, limit=6000) and _exact_text(cwd)
+                and _public_parameters(extras, limit=6000) and _exact_text(exact, limit=6000)
+                and len(json.dumps(args, ensure_ascii=False).encode("utf-8")) <= 16000):
             if any(c in cmd for c in "\r\n\t"):
                 # Show control characters as reversible JSON escapes, preserving literal backslashes.
                 cmd = json.dumps(cmd, ensure_ascii=False)
@@ -132,10 +134,9 @@ _LOG_QUERY = re.compile(
 def _card_display(approval, label, detail):
     """Called only after describe() has approved the fields for this channel."""
     tool, args = approval["tool"], approval["input"]
-    if tool == "mcp__team__run_project_command":
-        summary = f"在员工项目目录 {args['cwd']} 运行 {PureWindowsPath(args['argv'][0]).name}，请展开核对具体操作。"
-    elif tool == "Bash":
-        cmd, argv = args["command"], args.get("argv")
+    if tool in ("Bash", "mcp__team__run_project_command"):
+        argv = args.get("argv")
+        cmd = args["command"] if tool == "Bash" else shlex.join(argv)
         if (isinstance(argv, list) and len(argv) == 4 and all(isinstance(a, str) for a in argv)
                 and shlex.join(argv) == cmd and PureWindowsPath(argv[0]).name.lower() in ("pwsh.exe", "powershell.exe")
                 and [a.lower() for a in argv[1:3]] == ["-noprofile", "-command"]):
@@ -154,6 +155,8 @@ def _card_display(approval, label, detail):
             action = "查询指定进程及其状态"
         elif launch := _LAUNCH.fullmatch(cmd):
             action = f"启动程序 {PureWindowsPath(launch[1]).name}"
+        elif stop := re.fullmatch(r"Stop-Process -Id (\d+)( -Force)?", cmd.strip(), re.I):
+            action = ("强制结束" if stop[2] else "结束") + f"进程，进程号 {stop[1]}"
         else:
             action = "申请运行终端命令（预览）"
         first_line = cmd.splitlines()[0]
@@ -161,19 +164,38 @@ def _card_display(approval, label, detail):
         if len(snippet) < len(cmd):
             snippet += "…"
         summary = f"{action}\n{snippet}\n工作目录：{args['cwd']}"
-        if isinstance(args.get("reason"), str) and args["reason"].strip():
-            reason = " ".join(args["reason"].split())
-            summary += "\n员工说明：" + (reason if len(reason) <= 100 else reason[:100] + "…")
         if args.get("additionalPermissions") or args.get("networkApprovalContext"):
             summary += "\n这条命令还申请了额外权限，请展开查看范围。"
     elif tool == "mcp__team__deliver_project_file":
         summary = ("更新指定版本的文件" if args.get("previous_sha256") else "把项目产物另存到您指定的文件夹")
         summary += f"\n来源：{args.get('source')}\n目标目录：{args.get('folder')}"
     elif tool == "feature_files.write_text":
-        return {"title":label,"summary":f"写入 {args['path']}，已有文件将被替换。","details":detail}
+        summary = f"写入 {args['path']}，已有文件将被替换。"
     else:
-        summary = {"apply_patch":"申请修改项目文件", "codex.request_permissions":"申请额外权限"}.get(tool, f"申请调用工具 {tool}")
-    return {"title":label, "summary":summary, "details":json.dumps(args, ensure_ascii=False, indent=2)}
+        if tool == "apply_patch":
+            summary = "申请修改项目文件"
+            if args.get("grant_root"):
+                summary += f"；申请写入位置 {args['grant_root']}"
+        elif tool == "codex.request_permissions":
+            permissions = args.get("permissions")
+            labels = []
+            if isinstance(permissions, dict):
+                for key in permissions:
+                    labels.append({"network":"联网", "fileSystem":"文件访问", "file_system":"文件访问"}.get(key, key))
+            summary = "申请额外权限" + ("（" + "、".join(labels) + "）" if labels else "")
+        else:
+            summary = f"申请调用工具 {tool}"
+    reason = args.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        reason = " ".join(reason.split())
+        purpose = "员工说明：" + (reason if len(reason) <= 200 else reason[:200] + "…")
+    elif _exact_text(approval.get("task_brief"), multiline=True):
+        brief = " ".join(approval["task_brief"].split())
+        purpose = "所属任务：" + (brief if len(brief) <= 120 else brief[:120] + "…") + "\n员工没有单独说明这一步的用途。"
+    else:
+        purpose = "员工没有单独说明这一步的用途。"
+    return {"title":label, "summary":f"{summary}\n{purpose}",
+            "details":detail if tool == "feature_files.write_text" else json.dumps(args, ensure_ascii=False, indent=2)}
 
 
 def queue_notice(db, execution, task, approval, label):
@@ -198,7 +220,10 @@ def queue_notice(db, execution, task, approval, label):
         if deny_only:
             body = f"老板，{label} 有一项操作的完整参数不适合发到飞书。我已保留原申请。您可以引用这条消息回复「拒绝」，让员工停止这项操作。"
         elif detail is None:
-            body = f"老板，{label} 有一项操作需要您决定。完整请求在管理网页的团队派工记录里，您可以在那里核对和处理。"
+            operation = {"Bash":"运行终端命令", "apply_patch":"修改项目文件",
+                         "codex.request_permissions":"申请额外权限",
+                         "mcp__team__run_project_command":"运行项目命令"}.get(approval.get("tool"), "调用工具")
+            body = f"老板，{label} 申请{operation}。这份请求的完整参数无法安全显示在飞书卡片里，请到管理网页的团队派工记录核对后决定。"
         else:
             body = f"老板，{label} 有一项操作需要您的许可。\n{detail}\n您可以引用这条私聊，回复「确认」或「拒绝」。"
         if offer:
@@ -227,6 +252,7 @@ def queue_notice(db, execution, task, approval, label):
             if len(body) > LIMIT:
                 notice["text"] = f"老板，{label} 的审批卡已列出完整参数。请核对卡片后选择。"
             notice["approval_card"] = approval["id"]
+            notice["approval_tool"] = approval["tool"]
             notice["approval_display"] = (_card_display(approval, label, detail) if detail else
                                           {"title":label, "summary":"", "details":"完整请求可在工作台核对。"})
             if offer and approval["tool"] == "mcp__team__deliver_project_file":
@@ -296,7 +322,7 @@ async def collect_team_requests(worker):
                     AgentJobEvent.job_id == job.id, AgentJobEvent.kind == "review_escalated"))
                 if not any(e.get("approval_id") == approval.id for e in escalations):
                     continue
-            item = {"id": approval.id, "tool": approval.tool, "input": approval.input,
+            item = {"id": approval.id, "tool": approval.tool, "input": approval.input, "task_brief": job.brief,
                     "retired": approval.status != "pending"}
             execution = {"thread": approval.thread_id, "turn": approval.turn_id, "event": f"team:{job.id}"}
             thread = await db.get(Thread, approval.thread_id)
@@ -433,6 +459,9 @@ def answer(worker, row, msg, text):
         return True
     if binding["state"] not in ("pending","deny_only"):
         worker.respond(row,"done","老板，我没能再处理这份申请。它可能已经处理或失效，也可能需要在本机核对。",task)
+        return True
+    if text.strip() == "允许并记住" and not binding["offer_remember"]:
+        worker.respond(row, "done", "老板，这项操作没有可复用的授权范围。原申请仍在等待，您可以选「仅本次」或「拒绝」。", task)
         return True
     # Reserve the specific reply before posting. A crash after this point requires
     # reconciliation, never a second decision on a guessed or newer approval.
