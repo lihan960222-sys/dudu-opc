@@ -186,7 +186,9 @@ class Server:
             delegate["inputSchema"]["properties"]["mode"]["enum"] = ["work"]
             delegate["description"] = (
                 "Assign one to four employees a scoped work item, including for short lookups. "
-                "Set read_only for inspections. Supply a brief, success criteria and feishu_delivery. "
+                "Pass on the owner's objective and constraints in clear prose; the employee chooses how to do it. "
+                "Use done_when for the requested outcome and feishu_delivery for the destination. "
+                "Only specify exact command or file checks when the owner supplied them. Set read_only for inspections. "
                 "The receipt confirms assignment. End the turn to receive the employees' reports."
             )
 

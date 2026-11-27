@@ -1417,9 +1417,11 @@ class ThreadRuntime:
                             listing += "\nOwner's project task references: " + routing
                 if ctx.team.strict_hierarchy and ctx.team.is_lead:
                     policy += (" For employee work use delegate with mode=work, an explicit stable project, "
-                        "task_title, done_when, priority and deliverables. Use task_id to continue an existing "
+                        "and task_title. Add done_when and deliverables only for outcomes the owner requested, "
+                        "and priority only when specified. Use task_id to continue an existing "
                         "assignment. For follow-up on an existing feature, use its task_id to continue the same card. Supply dependencies as same-project task IDs when work must await acceptance. "
-                        "The document employee's Feishu tools load in the employee turn. For a bound knowledge document, ask the employee to sync it using feishu_publish_knowledge and report its receipt. "
+                        "The document employee's Feishu tools load in the employee turn. Pass on the requested document "
+                        "and outcome; the employee selects the tools to deliver and verify it. "
                         "Keep the same task, document and requested changes on retries. Read receipts and an existing link do not confirm a requested rewrite. "
                         "When publication fails, check the tool receipt and identify the failed step. Recover within the existing grant; "
                         "if still blocked, report the blocker briefly and keep the task open. Never offload publishing by asking the person "

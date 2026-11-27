@@ -141,7 +141,7 @@ async def test_real_dispatch_and_gate_bind_one_review_to_one_unchanged_check(ses
         staff.role_path=str(frame.root)
         active=await people.ensure_owner_person(db)
         chat=await thread_store.create_thread(db,owner_id=owner,agent_id=lead.id,provider="codex",workspace_path=str(lead_folder))
-        source=await thread_store.start_turn(db,chat.id,"Verify the project",origin="person",person_id=active.id,use_employee_role=True)
+        source=await thread_store.start_turn(db,chat.id,"Run cmd.exe /d /c verify.cmd in tests.",origin="person",person_id=active.id,use_employee_role=True)
     rt=SimpleNamespace(session=sessions,owner_id=owner,adapters={"codex":CodexAdapter()},hub=ThreadHub(),_waiters={})
     dispatch=SimpleNamespace(thread_id=chat.id,turn_id=source.id,agent_id=lead.id,owner_token=source.owner_token,
         ctx=SimpleNamespace(approval_mode="ask",team=SimpleNamespace(team_id=lead.team_id,origin="person")))

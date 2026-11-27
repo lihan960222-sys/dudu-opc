@@ -35,6 +35,48 @@ async def test_scoped_steward_offers_real_employee_work_even_for_short_questions
     assert any(t["name"] == "ask_agent" for t in Server(tmp_path, project_consult=True).tools)
 
 
+def test_steward_cannot_turn_its_plan_into_mandatory_project_checks():
+    from app.services.assignment_context import requested_output_check
+    command = {"command": "pytest", "cwd": "."}
+    path = {"scope": "role", "path": "out/result.txt"}
+    proposal = {"kind": "commands", "commands": [{**command, "contains": "all passed"}], "files": [path]}
+    assert requested_output_check(proposal, "看看这个软件能否启动，看到窗口再关闭。") == {"kind": "report"}
+    assert requested_output_check(proposal, r"把结果存到 out\result.txt") == {"kind": "files", "files": [path]}
+    assert requested_output_check(proposal, "先运行 pytest，再把结果存到 out/result.txt") == {
+        "kind": "commands", "commands": [command], "files": [path]}
+    assert requested_output_check(proposal, "pytest 输出 all passed，再写 out/result.txt") == proposal
+
+
+async def test_steward_dispatch_carries_owner_goal_without_invented_command(sessions, owner, tmp_path, monkeypatch):
+    from app.db.models import AgentJobEvent
+    from app.services.assignment_context import employee_input
+    from app.services.codex_adapter import CodexAdapter
+    from app.services.thread_hub import ThreadHub
+    monkeypatch.setattr(settings, "STEWARD_STRICT_OWNER", owner)
+    monkeypatch.setenv("FEISHU_CONFIG", str(tmp_path / "no-feishu.json"))
+    original = "打开软件，看到界面后再关闭。"
+    async with sessions() as db:
+        lead = await agent_store.create_agent(db, owner_id=owner, name="Lead", make_lead=True)
+        worker = await agent_store.create_agent(db, owner_id=owner, name="Engineer", provider="codex")
+        await service.change_member(db, owner, worker.id)
+        worker.role_path = str(tmp_path)
+        thread = await thread_store.create_thread(db, owner_id=owner, agent_id=lead.id, provider="codex")
+        turn = await thread_store.start_turn(db, thread.id, original, origin="person")
+    run = SimpleNamespace(agent_id=lead.id, turn_id=turn.id, thread_id=thread.id, owner_token=turn.owner_token,
+                          ctx=SimpleNamespace(approval_mode="ask", team=SimpleNamespace(team_id=lead.team_id, origin="person")))
+    jobs = Jobs(SimpleNamespace(session=sessions, owner_id=owner, hub=ThreadHub(), adapters={"codex": CodexAdapter()}))
+    job = await jobs.enqueue(run, {"agent_id": worker.id, "project": "demo", "brief": "确认软件能正常打开，再关闭。",
+                                   "feishu_delivery": "none",
+                                   "completion_check": {"kind": "commands", "commands": [{"command": "invented.exe"}]}},
+                             reply="resume")
+    async with sessions() as db:
+        messages, _ = await employee_input(db, job)
+        assert messages == [{"text": original, "turn_id": turn.id}]
+        check = await db.scalar(select(AgentJobEvent.detail).where(AgentJobEvent.job_id == job.id,
+                                AgentJobEvent.kind == "completion_check"))
+        assert check == {"kind": "report"}
+
+
 @pytest.mark.parametrize(("mode", "reply"), [("consult", "wait"), ("consult", "resume"), ("work", "wait")])
 async def test_incompatible_dispatch_does_not_persist_an_unstartable_job(
         sessions, owner, monkeypatch, mode, reply):

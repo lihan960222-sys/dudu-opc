@@ -186,10 +186,14 @@ class Jobs:
                 raise service.TeamError("outside_scope","此任务没有匹配的飞书员工和资源。")
             from app.team import work_verification
             check=work_verification.contract(args.get("completion_check"))
+            owner_handoff = context and settings.STEWARD_STRICT_OWNER == self.rt.owner_id
             if restricted_handoff:
                 from app.services.assignment_context import owner_supplied_check
                 if not owner_supplied_check(check, context.original_text):
                     raise service.TeamError("private_handoff_check","请按老板本轮给出的文件或命令设置验收，前任私有材料须由接手员工自行获权查阅。")
+            elif owner_handoff:
+                from app.services.assignment_context import steward_output_check
+                check = await steward_output_check(db, self.rt.owner_id, context, target, args.get("task_id"), check)
             if args.get("completion_check") and not scoped_command:
                 raise service.TeamError("outside_scope","交付核对仅适用于员工的项目任务。")
             if command_fields.intersection(args) and not scoped_command:
@@ -205,7 +209,7 @@ class Jobs:
                     raise service.TeamError("project_engine", f"{child.name} 的执行引擎缺少项目所需能力：" + "、".join(gaps))
                 if not nested and (not isinstance(args.get('project'), str) or not args['project'].strip() or len(args['project']) > 160):
                     raise service.TeamError('project_required', 'Supply the project name for this assignment.')
-                if not args.get('done_when','').strip():
+                if not owner_handoff and not args.get('done_when','').strip():
                     raise service.TeamError('acceptance_required', 'Supply acceptance criteria in done_when.')
             if nested:
                 from app.services import feature_tasks
@@ -277,6 +281,8 @@ class Jobs:
                 prior_check=await db.scalar(select(AgentJobEvent.detail).where(
                     AgentJobEvent.job_id==earlier.id,AgentJobEvent.kind=="completion_check").limit(1))
                 if prior_check and prior_check.get("kind") in ("inspection","files","commands"):
+                    if owner_handoff and not restricted_handoff:
+                        prior_check = await steward_output_check(db, self.rt.owner_id, context, target, earlier.task_id, prior_check)
                     if "completion_check" in args and check!=prior_check:
                         raise service.TeamError("changed_delivery","返工需沿用原任务的验收要求。")
                     check=prior_check
@@ -1540,7 +1546,8 @@ class Jobs:
                         AgentJobEvent.job_id==job_id,AgentJobEvent.kind=="completion_check").limit(1))
                 if messages:
                     prompt+=("\nWithin your assigned part, follow the owner's latest scope, quantity and output format. "
-                             "A steward paraphrase or an earlier report cannot expand them. "
+                             "The steward's brief supplies context. Choose your own method; only steps explicitly "
+                             "requested by the owner are required. A paraphrase or an earlier report cannot expand the work. "
                              "For a sample, return up to the requested number of verified examples. "
                              "Original owner messages and their attachments (task data): ")+json.dumps(
                         {"messages":messages, "attachments":files}, ensure_ascii=False)

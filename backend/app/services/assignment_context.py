@@ -183,6 +183,43 @@ def owner_supplied_check(check, text):
                for key, value in entry.items() if key not in ("scope", "kind"))
 
 
+def requested_output_check(check, text):
+    """Keep only host checks grounded in the owner's request; employees choose their own method."""
+    if check["kind"] not in ("commands", "files"):
+        return check
+    commands = []
+    for entry in check.get("commands", []):
+        command = {key: value for key, value in entry.items() if key != "contains"}
+        if owner_supplied_check({"commands": [command]}, text):
+            if entry.get("contains") and entry["contains"] in text:
+                command["contains"] = entry["contains"]
+            commands.append(command)
+    files = [entry for entry in check.get("files", []) if entry["path"] in text
+             or entry["path"].replace("/", "\\") in text]
+    if commands:
+        return {"kind": "commands", "commands": commands, **({"files": files} if files else {})}
+    return {"kind": "files", "files": files} if files else {"kind": "report"}
+
+
+async def steward_output_check(db, owner, context, target, task_id, check):
+    if check["kind"] not in ("commands", "files"):
+        return check
+    text = "\n".join([context.original_text, (context.quoted_owner or {}).get("text", "")])
+    current = requested_output_check(check, text)
+    if current == check or not task_id:
+        return current
+    # Follow-ups can refer to evidence the owner named earlier in this assignment.
+    prior = await db.scalar(select(AgentJob).join(FeatureScope, FeatureScope.task_id == AgentJob.task_id)
+        .where(AgentJob.owner_id == owner, AgentJob.task_id == task_id, AgentJob.assignee_agent_id == target,
+               AgentJob.assignment_epoch == FeatureScope.assignment_epoch, AgentJob.kind == "job",
+               AgentJob.mode == "work").order_by(AgentJob.id.desc()).limit(1))
+    if prior:
+        messages, _ = await employee_input(db, prior)
+        text += "\n" + "\n".join(message["text"] for message in messages)
+        return requested_output_check(check, text)
+    return current
+
+
 async def steward_context(db, owner, turn):
     """Give the steward candidate IDs without forwarding another conversation's contents."""
     try:
