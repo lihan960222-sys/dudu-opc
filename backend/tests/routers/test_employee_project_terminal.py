@@ -121,13 +121,17 @@ def test_corrupt_or_linked_preferences_cannot_reenable_the_host_default(tmp_path
     with pytest.raises(employee_runtime.BoundaryUnavailable):
         employee_runtime.native_enabled("host", 4)
 
-async def test_workstation_shows_effective_settings_and_refuses_unrestricted_network(sessions, owner, rt, cli, tmp_path, monkeypatch):
+async def test_workstation_network_requires_explicit_owner_opt_in(sessions, owner, rt, cli, tmp_path, monkeypatch):
     from app.routers.team import get_team
     monkeypatch.setattr(settings, "LOCAL_EXECUTION_ENABLED", True)
     monkeypatch.setattr(settings, "SQLITE_PATH", str(tmp_path / "store" / "test.db"))
     monkeypatch.setattr(settings, "STEWARD_STRICT_OWNER", owner)
+    project = tmp_path / "reader"
+    project.mkdir()
+    role_workspace.initialize(project, "gpt-fake", "Work within this project.")
     async with sessions() as db:
         agent = await agent_store.create_agent(db, owner_id=owner, name="Reader", provider="codex", model="gpt-fake")
+        agent.role_path = str(project)
         await db.commit()
     app = app_for(rt)
     app.include_router(router, prefix="/api/v1")
@@ -139,6 +143,13 @@ async def test_workstation_shows_effective_settings_and_refuses_unrestricted_net
         endpoint = f"/api/v1/staff/{agent.id}/project-terminal"
         assert (await client.get(endpoint)).json() == {"enabled":True, "local_workstation":True,
                                                         "read_folders":[], "outbound_network":False}
-        for update in ({"outbound_network":True}, {"read_folders":[str(tmp_path)]}):
-            assert (await client.put(endpoint, json={"enabled": True, **update})).status_code == 422
+        saved = employee_runtime._terminal_preference_path(owner, agent.id)
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        saved.write_text('{"enabled":true,"read_folders":[],"outbound_network":true}')
+        assert (await client.get(endpoint)).json()["outbound_network"] is False
+        for granted in (True, False):
+            changed = await client.put(endpoint, json={"enabled": True, "outbound_network": granted})
+            assert changed.status_code == 200, changed.text
+            assert (await client.get(endpoint)).json()["outbound_network"] is granted
+        assert (await client.put(endpoint, json={"enabled": True, "read_folders":[str(tmp_path)]})).status_code == 422
     assert (await get_team(rt))["local_workstation"]

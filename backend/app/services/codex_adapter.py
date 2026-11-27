@@ -909,7 +909,7 @@ class _CodexTurn:
                 common["config"] = feature_files.turn_config(current.get("config"), self.workspace,
                     self.tools if self.project else self.tools and self.mode != "plan", consult_only=getattr(self.ctx, "consult_only", False),
                     peer_access=getattr(self.ctx,"peer_workspaces",None), project_runtime=self.project,
-                    scheduled_knowledge=self.scheduled_knowledge)
+                    scheduled_knowledge=self.scheduled_knowledge, approval_mode=self.mode)
             except (AttributeError, TypeError, ValueError, RpcError, RpcClosed, asyncio.TimeoutError):
                 return self._failed("Could not confirm scoped task tools.", "codex_error")
             if not self.project or not self.tools:
@@ -919,6 +919,10 @@ class _CodexTurn:
                         "For a colleague's directory, look up its registered path in team.employee_capabilities. "
                         "When requesting approval explain in the owner's language what you want to do, "
                         "what it affects and why the task needs it.")
+                if common["config"]["features"]["request_permissions_tool"]:
+                    note += (" Start with the existing project permissions. When several steps genuinely require "
+                             "the same additional directory access, use request_permissions for the narrowest "
+                             "scope needed for this turn. Wait for the permission result before proceeding.")
                 instructions = f"{instructions}\n\n{note}" if instructions else note
         launch = self.ctx.memory_launch
         if self.computer is not None:

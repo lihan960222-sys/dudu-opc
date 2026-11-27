@@ -47,7 +47,7 @@ export function EmployeeProjectTerminal({ employee, folderSaved, busy, onChanged
       void onChanged?.();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "终端设置未能保存。");
-      try { setEnabled((await request<Setting>(endpoint)).enabled); } catch { setEnabled(null); }
+      try { load(await request<Setting>(endpoint)); } catch { setEnabled(null); }
     } finally { setSaving(false); }
   }
 
@@ -64,15 +64,14 @@ export function EmployeeProjectTerminal({ employee, folderSaved, busy, onChanged
     </label>
     <small>{saving ? "正在保存…" : !folderSaved ? "请先保存这名员工自己的工作目录。"
       : "切换后立即生效。开启后，管家派来的工单可以在此目录运行命令，读写范围沿用档案权限。模型登录在“基本资料”中管理。"}</small>
-    {enabled && workstation && <small>终端可以在隔离环境中运行本机程序，临时文件保存在本工单的目录。查阅网页和下载资料使用工单授权的工具，终端不能直接联网。</small>}
-    {enabled && !workstation && <details>
-      <summary>外部资料与联网范围</summary>
-      <label className="dp-field"><span>可额外读取的资料或软件目录（每行一个绝对路径）</span>
+    {enabled && <details>
+      <summary>{workstation ? "终端联网" : "外部资料与联网范围"}</summary>
+      {!workstation && <label className="dp-field"><span>可额外读取的资料或软件目录（每行一个绝对路径）</span>
         <textarea className="dp-input" value={folders} disabled={busy || saving}
-          onChange={event => setFolders(event.target.value)} /></label>
+          onChange={event => setFolders(event.target.value)} /></label>}
       <label><input type="checkbox" checked={network} disabled={busy || saving}
         onChange={event => setNetwork(event.target.checked)} /> 允许项目终端直接联网</label>
-      <small>开启后，终端可向任意可达地址发送数据和下载文件。默认关闭。其他员工的目录在跨员工只读权限中设置。</small>
+      <small>默认关闭。开启后，员工可在终端下载依赖，也可向任意可达地址发送数据。请在员工空闲时更改。</small>
       <button type="button" className="dp-link" disabled={busy || saving}
         onClick={() => void change(true, true)}>保存访问范围</button>
     </details>}

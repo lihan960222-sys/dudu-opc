@@ -7,7 +7,7 @@ import { api } from "@/lib/api";
 import { canOpenWorkbench } from "@/lib/session";
 import { canAlwaysAllow, isScreenInput } from "@/lib/approvals";
 import { can } from "@/lib/permissions";
-import { isComputerTool, toolLabel } from "@/lib/computers";
+import { isComputerTool } from "@/lib/computers";
 import { cn } from "@/lib/cn";
 import { failureNextStep, interruptedText, turnUsageText } from "@/lib/everyday";
 import { compactedLabel, recalledLabel } from "@/lib/memory";
@@ -415,6 +415,7 @@ export function ApprovalCard({
   const employeeGrant = scoped?.employee === true && canOpenWorkbench(session);
   const rememberable = candidate && (employeeGrant || (!delivery && scoped?.employee === null));
   const screenInput = isScreenInput(item.tool);
+  const displayTool = item.tool === "Bash" ? t("approvals.command") : item.tool;
   const byRule = item.resolvedBy === "saved_rule";
   const savedRuleId = remembered?.ruleId ?? (byRule ? item.ruleId : null);
   const undone = savedRuleId != null && undoneRules.includes(savedRuleId);
@@ -427,33 +428,10 @@ export function ApprovalCard({
     >
       {pending ? (
         <p className="text-xs font-medium text-ink">
-        {isComputerTool(item.tool) && <ComputerBadge />}
-        {pending ? (
-          isComputerTool(item.tool) ? (
-            <>
-              {screenInput ? t("approval.computerRequest") : t("approval.isolatedRequest")} {t("approval.waitUntilAllowed")}
-            </>
-          ) : (
-            <>
-              Your agent wants to use <span className="font-mono">{item.tool}</span>. It will not run
-              until you allow it.
-            </>
-          )
-        ) : (
-          <>
-            <span className="font-mono">{item.tool}</span>:{" "}
-            {byRule && item.status === "allowed"
-              ? t("approval.allowSaved")
-              : item.resolvedBy === "computer_read"
-                ? t("approval.allowComputerRead")
-                : item.resolvedBy === "accept_edits"
-                  ? t("approval.acceptedEdits")
-                  : item.resolvedBy === "plan_mode"
-                    ? t("approval.planRefused")
-                    : t(APPROVAL_LABEL[item.status])}
-            {!pending && item.summary && <span className="font-mono text-faint"> · {item.summary}</span>}
-          </>
-        )}
+          {isComputerTool(item.tool) && <ComputerBadge />}
+          {isComputerTool(item.tool)
+            ? t(screenInput ? "approval.computerRequest" : "approval.isolatedRequest")
+            : t("approval.toolRequest", { tool: displayTool })} {t("approval.waitUntilAllowed")}
         </p>
       ) : (
         <button
@@ -467,35 +445,20 @@ export function ApprovalCard({
             {item.status === "allowed" ? <Check size={13} /> : <X size={13} />}
           </span>
           <span className="min-w-0 flex-1 truncate">
-        {isComputerTool(item.tool) && <ComputerBadge />}
-            {pending ? (
-              isComputerTool(item.tool) ? (
-                <>
-                  {screenInput ? "Let your agent use this computer’s screen, keyboard and browser for this turn." : <>Your agent wants to {toolLabel(item.tool)}, an isolated machine, not this one.</>} It will not run
-                  until you allow it.
-                </>
-              ) : (
-                <>
-                  {t("approval.toolRequest", { tool: item.tool })} {t("approval.waitUntilAllowed")}
-                </>
-              )
-            ) : (
-              <>
-                <span className="font-mono">{item.tool}</span>:{" "}
-                {byRule && item.status === "allowed"
-                  ? t("approval.allowSaved")
-                  : item.resolvedBy === "computer_read"
-                    ? t("approval.allowComputerRead")
-                    : item.resolvedBy === "accept_edits"
-                      ? t("approval.acceptedEdits")
-                      : item.resolvedBy === "plan_mode"
-                        ? t("approval.planRefused")
-                        : t(APPROVAL_LABEL[item.status])}
-                {item.resolvedPerson && <span className="text-faint"> · by {item.resolvedPerson}</span>}
-                {!pending && item.summary && <span className="font-mono text-faint"> · {item.summary}</span>}
-              </>
-            )}
-              </span>
+            {isComputerTool(item.tool) && <ComputerBadge />}
+            <span className="font-mono">{displayTool}</span>:{" "}
+            {byRule && item.status === "allowed"
+              ? t("approval.allowSaved")
+              : item.resolvedBy === "computer_read"
+                ? t("approval.allowComputerRead")
+                : item.resolvedBy === "accept_edits"
+                  ? t("approval.acceptedEdits")
+                  : item.resolvedBy === "plan_mode"
+                    ? t("approval.planRefused")
+                    : t(APPROVAL_LABEL[item.status])}
+            {item.resolvedPerson && <span className="text-faint"> · by {item.resolvedPerson}</span>}
+            {item.summary && <span className="font-mono text-faint"> · {item.summary}</span>}
+          </span>
           <ChevronRight size={14} aria-hidden="true" className={cn("shrink-0 text-faint transition-transform", open && "rotate-90")} />
         </button>
       )}

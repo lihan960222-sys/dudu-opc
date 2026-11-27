@@ -280,3 +280,46 @@ def test_workstation_profiles_keep_host_and_project_writes_separate(tmp_path, mo
     assert not any("network.enabled=true" in opt for opt in project.cli_options())
     employee_runtime.save_native_enabled(project.owner_id, 8, False)
     assert not employee_runtime.native_enabled(project.owner_id, 8)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows workstation shell settings")
+def test_employee_desktop_shell_uses_own_appdata_and_machine_installations(tmp_path, monkeypatch):
+    import tomllib
+    from dataclasses import replace
+
+    project = employee_project(tmp_path, monkeypatch)
+    desktop = replace(project, local_workstation=True)
+    user = tmp_path / "windows-user"
+    tools = tmp_path / "Program Files" / "installed-tools"
+    tools.mkdir(parents=True)
+    monkeypatch.setenv("PROGRAMFILES", str(tools.parent))
+    monkeypatch.setenv("USERPROFILE", str(user))
+    monkeypatch.setenv("APPDATA", str(user / "AppData" / "Roaming"))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(tools), ".", str(project.root)]))
+    monkeypatch.setenv("CODEX_HOME", str(user / ".codex"))
+    monkeypatch.setenv("OPENAI_API_KEY", "never-pass-to-shell")
+
+    def shell_settings(runtime):
+        options = runtime.cli_options()[1::2]
+        return tomllib.loads("\n".join(options))["shell_environment_policy"]["set"]
+
+    shell = shell_settings(desktop)
+    assert shell["HOME"] == shell["USERPROFILE"] == str(desktop.desktop_home)
+    assert Path(shell["APPDATA"]).is_relative_to(desktop.desktop_home)
+    assert Path(shell["LOCALAPPDATA"]).is_dir()
+    fs = tomllib.loads("fs=" + desktop._filesystem())["fs"]
+    assert fs[str(desktop.desktop_home)] == "write"
+    assert fs[str(desktop.profile.parents[3])] == "deny"
+    assert desktop.desktop_home == replace(desktop, task_id=42).desktop_home
+    assert desktop.desktop_home != replace(desktop, employee_id=8, profile_path=None).desktop_home
+    readonly = replace(desktop, writable=False)
+    assert tomllib.loads("fs=" + readonly._filesystem())["fs"][str(desktop.desktop_home)] == "read"
+    assert shell["CODEX_HOME"] == shell["CODEX_SQLITE_HOME"] == str(desktop.profile)
+    assert shell["TEMP"] == str(desktop.scratch)
+    assert str(tools) in shell["PATH"].split(os.pathsep)
+    assert str(project.root) not in shell["PATH"].split(os.pathsep) and "." not in shell["PATH"].split(os.pathsep)
+    assert "OPENAI_API_KEY" not in shell
+    assert "USERPROFILE" not in shell_settings(project)
+    broker = desktop.process_environment()
+    assert broker["USERPROFILE"] == broker["CODEX_HOME"] == str(desktop.profile)
+    assert str(tools) not in broker["PATH"].split(os.pathsep)

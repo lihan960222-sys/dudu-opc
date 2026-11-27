@@ -89,6 +89,8 @@ def describe(approval, *, native=False):
     if native and tool in ("apply_patch", "codex.request_permissions"):
         exact = json.dumps(args, ensure_ascii=False, sort_keys=True)
         if args and _public_parameters(args) and _exact_text(exact):
+            if tool == "codex.request_permissions":
+                return f"允许后，员工可在本轮内多次使用以下权限，本轮结束即失效。\n完整参数：{exact}"
             return f"操作：{tool}\n完整参数：{exact}"
         return None
     if native and isinstance(tool, str) and tool.startswith("mcp__community__"):
@@ -194,6 +196,7 @@ def _card_display(approval, label, detail):
                 for key in permissions:
                     labels.append({"network":"联网", "fileSystem":"文件访问", "file_system":"文件访问"}.get(key, key))
             summary = "申请额外权限" + ("（" + "、".join(labels) + "）" if labels else "")
+            summary += "。允许后，员工可在本轮内多次使用所列权限，本轮结束即失效。"
         else:
             summary = f"申请调用工具 {tool}"
     reason = args.get("reason")

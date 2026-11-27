@@ -49,7 +49,7 @@ class TerminalSettings:
 
     def effective(self, owner_id):
         if owner_id and owner_id == settings.STEWARD_STRICT_OWNER:
-            return TerminalSettings(self.enabled)
+            return TerminalSettings(self.enabled, outbound_network=self.outbound_network)
         return self
 
     def validate(self, protected=(), *, check_folders=True) -> None:
@@ -77,11 +77,17 @@ def terminal_settings(owner_id: str, employee_id: int) -> TerminalSettings:
             return TerminalSettings(value == b"true")
         try:
             data = json.loads(value)
-            if (isinstance(data, dict) and set(data) == {"enabled", "read_folders", "outbound_network"}
+            fields = {"enabled", "read_folders", "outbound_network"}
+            if (isinstance(data, dict) and (set(data) == fields or
+                    (set(data) == fields | {"version"} and type(data["version"]) is int and data["version"] == 2))
                     and type(data["enabled"]) is bool and type(data["outbound_network"]) is bool
                     and isinstance(data["read_folders"], list) and len(data["read_folders"]) <= 32
                     and all(isinstance(v, str) for v in data["read_folders"])):
-                return TerminalSettings(data["enabled"], tuple(data["read_folders"]), data["outbound_network"]).effective(owner_id)
+                network = data["outbound_network"]
+                if owner_id == settings.STEWARD_STRICT_OWNER and "version" not in data:
+                    # The previous workstation policy always denied direct network access.
+                    network = False
+                return TerminalSettings(data["enabled"], tuple(data["read_folders"]), network).effective(owner_id)
         except (UnicodeError, ValueError):
             pass
     raise BoundaryUnavailable("无法识别这名员工的项目终端设置，请检查本机数据目录。")
@@ -125,12 +131,15 @@ def save_native_enabled(owner_id: str, employee_id: int, enabled: bool) -> None:
 def save_terminal_settings(owner_id: str, employee_id: int, choice: TerminalSettings) -> None:
     from app.services.agent_memory import write_atomic
     if choice != choice.effective(owner_id):
-        raise ValueError("此工作台通过任务工具联网，本地查阅目录由员工权限管理。")
+        raise ValueError("本地查阅范围由员工目录权限管理。")
     choice.validate(check_folders=choice.enabled)
     path = _terminal_preference_path(owner_id, employee_id)
     _private_directory(path.parent)
-    data = json.dumps({"enabled":choice.enabled, "read_folders":choice.read_folders,
-                       "outbound_network":choice.outbound_network}, ensure_ascii=False)
+    stored = {"enabled": choice.enabled, "read_folders": choice.read_folders,
+              "outbound_network": choice.outbound_network}
+    if owner_id == settings.STEWARD_STRICT_OWNER and choice.outbound_network:
+        stored["version"] = 2
+    data = json.dumps(stored, ensure_ascii=False)
     if len(data.encode("utf-8")) > 65536:
         raise ValueError("终端设置过长。")
     write_atomic(path, data)
@@ -395,6 +404,38 @@ class ProjectRuntime:
             _private_directory(self.scratch)
         return env
 
+    @property
+    def desktop_home(self) -> Path:
+        # Application preferences must never share a writable parent with the Codex login.
+        return self.profile / "desktop-user"
+
+    def _workstation_shell_environment(self) -> dict[str, str]:
+        """Give installed desktop software an employee-owned Windows user profile."""
+        home = _private_directory(self.desktop_home)
+        roaming = _private_directory(home / "AppData" / "Roaming")
+        local = _private_directory(home / "AppData" / "Local")
+        env = {"HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(roaming),
+               "LOCALAPPDATA": str(local), "CODEX_HOME": str(self.profile), "CODEX_SQLITE_HOME": str(self.profile)}
+        directories = [exe.parent for _, exe, _ in self.installed_tools]
+        system_root = os.environ.get("SYSTEMROOT")
+        if system_root:
+            directories.extend((Path(system_root) / "System32", Path(system_root)))
+        # Machine installations only. Never add a project, relative PATH entry or personal bin directory.
+        machine_roots = tuple(Path(value).resolve() for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "SYSTEMROOT")
+                              if (value := os.environ.get(key)) and Path(value).is_absolute())
+        project_roots = (self.root, *self.employee_folders, *self.readable_roots)
+        for raw in os.environ.get("PATH", "").split(os.pathsep):
+            path = Path(os.path.normpath(raw.strip('"')))
+            if (any(path.is_relative_to(root) for root in machine_roots)
+                    and not any(path.is_relative_to(root) for root in project_roots)):
+                try:
+                    if path.is_dir() and path == path.resolve():
+                        directories.append(path)
+                except (ValueError, OSError):
+                    continue
+        env["PATH"] = os.pathsep.join(map(str, dict.fromkeys(directories)))
+        return env
+
     def _binding_paths(self, backend_thread_id: int) -> tuple[Path, Path]:
         if type(backend_thread_id) is not int or backend_thread_id < 1:
             raise ValueError("Invalid service thread ID.")
@@ -494,6 +535,8 @@ class ProjectRuntime:
                            if p != self.root and p not in self.readable_roots})
                 fs.update({str(p): "deny" for p in self.peer_control_paths()})
                 fs[str(self.scratch)] = "write"
+                if os.name == "nt":
+                    fs[str(self.desktop_home)] = "write" if self.writable else "read"
                 fs[str(self.root / "任务")] = "read"
                 if self.writable:
                     fs[str(self.task_dir)] = "write"
@@ -522,6 +565,9 @@ class ProjectRuntime:
             "analytics.enabled": "false", "check_for_update_on_startup": "false",
         }
         if self.local_workstation:
+            if os.name == "nt":
+                for key, value in self._workstation_shell_environment().items():
+                    config[f"shell_environment_policy.set.{key}"] = json.dumps(value, ensure_ascii=False)
             for key in ("TEMP", "TMP", "TMPDIR"):
                 config[f"shell_environment_policy.set.{key}"] = json.dumps(str(self.scratch))
             if self.writable:
@@ -672,4 +718,4 @@ def resolve_project_runtime(agent, task, *, approval_mode, readable_roots=(),
     return ProjectRuntime(agent.owner_id, agent.id, task.id, assignment_epoch,
                           model_vendor, root, writable, peers,
                           _installed_tools(root, protected_roots, workstation=workstation), tuple(protected_roots), profile,
-                          tuple(map(Path, choice.read_folders)), choice.outbound_network and not workstation, workstation, pins)
+                          tuple(map(Path, choice.read_folders)), choice.outbound_network, workstation, pins)

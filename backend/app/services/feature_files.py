@@ -30,7 +30,7 @@ TOOLS = [
 
 
 def turn_config(current, root, writable, *, consult_only=False, peer_access=None, project_runtime=None,
-                scheduled_knowledge=False):
+                scheduled_knowledge=False, approval_mode=None):
     if not isinstance(current, dict):
         raise ValueError("Cannot verify Codex configuration")
     servers = {key: {"enabled": False} for key in (current.get("mcp_servers") or {})}
@@ -39,10 +39,13 @@ def turn_config(current, root, writable, *, consult_only=False, peer_access=None
         # Native tools run in the verified OS sandbox. Only backend-created MCP
         # brokers may be attached below; project/user MCP commands run as the host.
         native_tools = writable and not scheduled_knowledge
+        scoped_requests = (native_tools and getattr(project_runtime, "local_workstation", False)
+                           and project_runtime.writable and approval_mode in ("accept_edits", "full_access"))
         cached_search = not scheduled_knowledge and getattr(project_runtime, "model_vendor", None) == "openai"
         return {"mcp_servers": servers, "plugins": plugins, "web_search": "cached" if cached_search else "disabled",
                 **({"project_doc_max_bytes": 0} if scheduled_knowledge else {}),
                 "features": {"shell_tool": native_tools, "unified_exec": native_tools, "view_image": native_tools,
+                             "request_permissions_tool": scoped_requests,
                              "multi_agent": False, "apps": False, "plugins": False,
                              "hooks": False, "code_mode": False, "skill_mcp_dependency_install": False}}
     names = [t["name"] for t in TOOLS if writable or t["name"] != "write_text"]

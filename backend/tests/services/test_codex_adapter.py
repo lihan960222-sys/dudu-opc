@@ -380,6 +380,21 @@ def test_scheduled_knowledge_allows_only_scoped_feishu_tools():
     assert not any(config["features"].values()) and config["project_doc_max_bytes"] == 0
 
 
+def test_turn_permission_requests_follow_native_workstation_edit_grant():
+    from app.services.feature_files import turn_config
+
+    def enabled(mode="accept_edits", *, workstation=True, writable=True, tools=True, scheduled=False):
+        project = SimpleNamespace(local_workstation=workstation, writable=writable)
+        config = turn_config({}, None, tools, project_runtime=project, scheduled_knowledge=scheduled,
+                             approval_mode=mode)
+        return config["features"]["request_permissions_tool"]
+
+    assert enabled()
+    assert not enabled("ask") and not enabled("plan")
+    assert not enabled(workstation=False) and not enabled(writable=False)
+    assert not enabled(tools=False) and not enabled(scheduled=True)
+
+
 def test_private_sqlite_start_error_explains_path_and_permissions(tmp_path, monkeypatch):
     from tests.services.test_employee_runtime import employee_project
 

@@ -104,7 +104,7 @@ async def set_project_terminal(agent_id: int, choice: ProjectTerminalSetting, rt
                 current.read_folders if choice.read_folders is None else tuple(dict.fromkeys(p.strip() for p in choice.read_folders)),
                 current.outbound_network if choice.outbound_network is None else choice.outbound_network)
             if updated != updated.effective(rt.owner_id):
-                raise HTTPException(422, "本工作台已统一管理员工的本地查阅和联网范围。")
+                raise HTTPException(422, "本地查阅范围由员工目录权限管理。")
             if current != updated:
                 job = await db.scalar(select(AgentJob.id).where(AgentJob.owner_id == rt.owner_id,
                     AgentJob.assignee_agent_id == agent_id, AgentJob.kind == "job", AgentJob.mode == "work",
