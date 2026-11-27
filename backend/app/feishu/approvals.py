@@ -330,7 +330,9 @@ async def collect_team_requests(worker):
             if job.requester_agent_id != lead or agent.manager_agent_id not in (None, lead):
                 if not job.task_id or await effective_job_mode(db, job) == "plan":
                     continue
-            if (approval.created_at > datetime.now(UTC) - timedelta(minutes=3)
+            from app.core import app_settings
+            review_window = min(60, app_settings.get("LOCAL_APPROVAL_TIMEOUT_SECONDS", live=True) / 2)
+            if (approval.created_at > datetime.now(UTC) - timedelta(seconds=review_window)
                     and await preview(db, owner, job, approval)):
                 escalations = await db.scalars(select(AgentJobEvent.detail).where(
                     AgentJobEvent.job_id == job.id, AgentJobEvent.kind == "review_escalated"))

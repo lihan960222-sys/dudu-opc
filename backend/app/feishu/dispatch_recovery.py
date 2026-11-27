@@ -342,7 +342,7 @@ def permits_followup(scope, tool, args):
         return False
     if tool=="mcp__team__answer_job_question":
         return scope["question"] and args.get("question_turn_id")==scope["turn"]
-    return (tool=="mcp__team__review_employee_write" and args.get("turn_id")==scope["turn"]
+    return (tool in ("mcp__team__review_employee_write", "mcp__team__review_employee_action") and args.get("turn_id")==scope["turn"]
             and args.get("approval_id") in scope["approvals"])
 
 

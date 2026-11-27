@@ -192,6 +192,11 @@ class Server:
         self.tools = [t for t in TOOLS if escalations or t['name'] not in OPTIONAL]
         if steward:
             self.tools.append(SHARED_RELEASE)
+            self.tools.append({'name':'review_employee_action',
+                'description':'Review the owner request, command, affected data/destination and current delegated_scope. Allow a necessary action only within verified authority. Prior decisions are guidance. For an overbroad shell when a narrower native grant could suffice, request_narrower declines this request and guides the same running worker once. Escalate necessary new authority or material uncertainty. Deny unnecessary work. Network access does not authorize disclosure to a new recipient. reuse_for_task covers exact approved read paths in this assignment.',
+                'inputSchema':schema({'job_id':{'type':'integer'},'approval_id':string(128),'turn_id':{'type':'integer'},
+                    'request_digest':string(64),'decision':{'enum':['allow','deny','escalate','request_narrower']},'reason':string(300),
+                    'reuse_for_task':{'type':'boolean'}}, ('job_id','approval_id','turn_id','request_digest','decision','reason'))})
             self.tools.append({"name": "manage_job",
                 "description": "At the owner's request stop, archive or complete a job. Use job_id from job_status, or all=true only for stop. Never mark unfinished work delivered. Report the returned state.",
                 "inputSchema": schema({"job_id": {"type": "integer"}, "all": {"type": "boolean"},

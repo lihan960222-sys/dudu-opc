@@ -1556,7 +1556,7 @@ class Jobs:
                 approval = await db.get(Approval,item.kind.split(':',1)[1])
                 details = await steward_review.preview(db,self.rt.owner_id,job,approval)
                 if details:
-                    details['previous_decisions'] = await steward_review.history(db,job)
+                    details['previous_decisions'] = await steward_review.history(db,job,authority_profile=details.get('authority_profile'))
                     reviews.append(details)
             elif item.kind == 'needs_input':
                 questions.append({'job_id': job.id, 'teammate': name, 'question': fence.text(job.question or '', 2000),

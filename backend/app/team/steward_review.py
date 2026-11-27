@@ -1,4 +1,5 @@
 """One-operation review by the owner-selected steward of a scoped employee."""
+import asyncio
 import hashlib
 from pathlib import Path
 
@@ -11,6 +12,9 @@ from app.db.transactions import begin_write
 from app.services import thread_store
 from app.services.feature_files import FeatureFiles
 from app.team import service
+
+
+NATIVE_DELEGATED_MODES = {'accept_edits', 'full_access', 'approve_for_me'}
 
 
 async def _owner_channel_request(db, owner, thread, turn):
@@ -177,12 +181,14 @@ async def protect_active_scope(db, agent, *, shared_folders=False):
 
 
 async def preview(db, owner, job, approval):
-    from app.services.feature_tasks import assignment_current
+    from app.services import employee_native_review
+    from app.services.feature_tasks import assignment_current, project_runtime_for
     if (settings.STEWARD_STRICT_OWNER != owner or not approval or job.owner_id != owner
             or job.kind != 'job' or job.mode != 'work' or not job.task_id or job.reply != 'resume'
             or job.origin_kind != 'person' or job.status not in ('running','needs_input')
             or job.approval_mode == 'plan' or approval.status != 'pending'
-            or approval.tool != 'feature_files.write_text' or approval.thread_id != job.assignee_thread_id
+            or approval.tool not in employee_native_review.TOOLS | {'feature_files.write_text'}
+            or approval.thread_id != job.assignee_thread_id
             or approval.turn_id != job.current_turn_id or approval.turn_id != job.assignee_turn_id
             or not await assignment_current(db, job, lock=True)):
         return None
@@ -192,7 +198,7 @@ async def preview(db, owner, job, approval):
     if (not team or not worker or not lead or lead.id != team.lead_agent_id or lead.id == worker.id
             or any(a.team_id != team.id or a.owner_id != owner or a.archived_at for a in (worker,lead))
             or worker.manager_agent_id not in (None, lead.id)
-            or not lead.delegation_enabled or worker.approval_mode != 'accept_edits' or not worker.role_path):
+            or not lead.delegation_enabled or not worker.role_path):
         return None
     thread = await db.get(Thread, approval.thread_id)
     parent = await db.get(Thread, job.requester_thread_id)
@@ -200,11 +206,47 @@ async def preview(db, owner, job, approval):
     card = await db.get(WorkItem, job.task_id)
     binding = await db.get(FeatureSession, approval.thread_id)
     if (not parent or parent.owner_id != owner or parent.agent_id != lead.id or parent.kind != 'chat'
-            or parent.archived_at or parent.room_id or parent.job_id or not original or original.person_id is not None
+            or parent.archived_at or parent.room_id or parent.job_id or not original
             or original.thread_id != parent.id
             or not thread or thread.kind != 'feature' or thread.archived_at or thread.owner_id != owner
             or thread.agent_id != worker.id or not card or card.owner_id != owner or card.agent_id != worker.id
             or card.archived or card.completed_at or card.thread_id != thread.id or not binding or binding.task_id != card.id):
+        return None
+    binding_ids = {'job_id':job.id, 'approval_id':approval.id, 'turn_id':approval.turn_id, 'task_id':card.id,
+                   'assignment_epoch':job.assignment_epoch, 'employee_id':worker.id}
+    if approval.tool in employee_native_review.TOOLS:
+        if (not (thread.provider_state or {}).get('employee_project') or worker.approval_mode not in NATIVE_DELEGATED_MODES
+                or await effective_job_mode(db, job) not in NATIVE_DELEGATED_MODES):
+            return None
+        # A worker's briefing or another agent's recollection cannot originate a native grant.
+        root_job = await db.get(AgentJob, job.root_id) if job.root_id else None
+        source = original
+        if root_job and root_job.kind == 'root' and root_job.owner_id == owner and root_job.requester_thread_id == parent.id:
+            source = await db.get(Turn, root_job.requester_turn_id)
+        if not source or source.thread_id != parent.id or source.origin != 'person':
+            return None
+        if source.person_id is None:
+            if not await _owner_channel_request(db, owner, parent, source):
+                return None
+        else:
+            person = await db.get(Person, source.person_id)
+            if not person or person.role != 'owner' or person.status != 'active':
+                return None
+        try:
+            from app.services.assignment_context import resolve_assignment_context
+            context = await resolve_assignment_context(db, owner, source.id)
+            project = await project_runtime_for(db, owner, worker, thread, job.approval_mode)
+            details = await asyncio.to_thread(employee_native_review.describe, project, approval.tool, approval.input)
+        except (OSError, ValueError):
+            return None
+        if not details:
+            return None
+        from app.services.decision_log import redact
+        from app.services.employee_approval_rules import _approval_profile
+        return {**binding_ids, **details, 'owner_request':redact(context.original_text)[:4000],
+                'job_brief':redact(job.brief or '')[:2000], 'workspace':str(project.root),
+                'authority_profile':_approval_profile(project)}
+    if original.person_id is not None or worker.approval_mode != 'accept_edits':
         return None
     root = Path(worker.role_path) / '任务' / str(card.id)
     args = approval.input or {}
@@ -217,17 +259,17 @@ async def preview(db, owner, job, approval):
             return None
     except (OSError, TypeError, ValueError):
         return None
-    return {'job_id':job.id, 'approval_id':approval.id, 'turn_id':approval.turn_id, 'task_id':card.id,
-            'assignment_epoch':job.assignment_epoch, 'employee_id':worker.id,
+    return {**binding_ids,
             'path':args['path'], 'text':args['text'], 'sha256':hashlib.sha256(args['text'].encode()).hexdigest()}
 
 
-async def decide(rt, run, args):
+async def decide(rt, run, args, *, native=False):
     from app.team.jobs import event
     from app.db.models import AgentJobEvent
     from datetime import timedelta
     choice = args.get('decision')
-    if (choice not in ('allow','deny','escalate') or type(args.get('job_id')) is not int
+    choices = ('allow','deny','escalate','request_narrower') if native else ('allow','deny','escalate')
+    if (choice not in choices or type(args.get('job_id')) is not int
             or type(args.get('turn_id')) is not int or not isinstance(args.get('approval_id'),str)
             or not isinstance(args.get('reason'),str) or not 0 < len(args['reason'].strip()) <= 300):
         raise service.TeamError('invalid_input','Supply the reviewed operation, decision and brief reason.')
@@ -241,7 +283,9 @@ async def decide(rt, run, args):
             raise service.TeamError('outside_scope','Not the private dispatching steward.')
         request = await db.get(Approval,args['approval_id'],with_for_update=True)
         details = await preview(db,rt.owner_id,job,request)
-        if not details or any(args.get(k)!=details[k] for k in ('path','sha256','turn_id')):
+        keys = ('request_digest','turn_id') if native else ('path','sha256','turn_id')
+        if (not details or (details.get('kind') == 'native_action') != native
+                or any(args.get(k)!=details[k] for k in keys)):
             raise service.TeamError('review_changed','The operation is outside the delegation or is no longer pending.')
         target = rt._runs.get(details['turn_id'])
         if not target or not target.ctx.feature_workspace or target.ctx.approval_mode == 'plan' or target.stop_requested or target.ctx.aborted:
@@ -249,15 +293,47 @@ async def decide(rt, run, args):
         if await db.scalar(select(AgentJobEvent.id).where(AgentJobEvent.job_id==job.id,
                 AgentJobEvent.kind=='review_escalated', AgentJobEvent.detail['approval_id'].as_string()==request.id)):
             raise service.TeamError('escalated','This decision was passed to the owner.')
+        reserved_id = None
+        if native:
+            from app.services import employee_approval_rules, employee_native_review, employee_runtime
+            if (not target.gate or target.gate._deadlines.get(request.id, 0) <= asyncio.get_running_loop().time()
+                    or not await current_native_job(db, target, lock=True)):
+                raise service.TeamError('turn_gone','The native request has expired or its assignment has changed.')
+            project = await employee_runtime.checked_active_project(db, target)
+            verified = await asyncio.to_thread(employee_native_review.describe, project, request.tool, request.input)
+            if not verified or verified['request_digest'] != details['request_digest']:
+                raise service.TeamError('review_changed','The native request or its authority changed.')
+            if choice == 'allow' and (not verified['delegated_scope'] or verified['delegated_scope'] != details['delegated_scope']):
+                choice = 'escalate'
+            if choice == 'request_narrower':
+                previous = await db.scalar(select(AgentJobEvent.id).where(AgentJobEvent.job_id==job.id,
+                    AgentJobEvent.kind=='steward_review', AgentJobEvent.detail['decision'].as_string()=='request_narrower').limit(1))
+                if request.tool!='Bash' or verified['delegated_scope'] or previous:
+                    choice = 'escalate'
+            if choice == 'allow' and request.tool == 'codex.request_permissions' and args.get('reuse_for_task') is True:
+                key = await asyncio.to_thread(employee_approval_rules.identity, project, request.tool, request.input)
+                if key and key == target.gate.employee_rule_keys.get(request.id):
+                    scoped = employee_approval_rules.work_order_key(project, key)
+                    reserved_id = (await employee_approval_rules.stage(db,rt.owner_id,scoped,reserve=True)).id
+            if target.gate._deadlines.get(request.id, 0) <= asyncio.get_running_loop().time():
+                raise service.TeamError('turn_gone','The native request has expired.')
         audit = {'approval_id':request.id,'lead_turn_id':run.turn_id,'decision':choice,'reason':args['reason'],
                  'assignment_epoch':job.assignment_epoch, 'employee_id':job.assignee_agent_id}
+        if native:
+            audit.update(tool=request.tool,request_digest=details['request_digest'])
         event(db,job,'review_escalated' if choice=='escalate' else 'steward_review',audit)
         if choice=='escalate':
             await db.commit()
             return {'status':'pending_owner'}
         status = 'allowed' if choice=='allow' else 'denied'
-        won = await thread_store.decide_approval(db,request.id,status,by={'by':'steward','agent_id':run.agent_id},
-            expected_turn_id=target.turn_id,owner_token=target.owner_token,
+        by = {'by':'steward','agent_id':run.agent_id}
+        if native:
+            by.update(authority_profile=details['authority_profile'], request_narrower=choice=='request_narrower')
+        if native and choice == 'allow':
+            by.update(native_request=verified['request_digest'], native_scope=employee_native_review.fingerprint(verified['delegated_scope']),
+                      job_id=job.id, assignment_epoch=job.assignment_epoch, task_rule_id=reserved_id)
+        won = await thread_store.decide_approval(db,request.id,status,by=by,
+            expected_turn_id=target.turn_id,expected_tool=request.tool,owner_token=target.owner_token,
             fresh_after=service.now()-timedelta(seconds=settings.THREAD_LEASE_SECONDS))
         if not won:
             raise service.TeamError('turn_gone','The pending operation has changed.')
@@ -267,23 +343,63 @@ async def decide(rt, run, args):
         rt.hub.notify(job.assignee_thread_id)
         return {'status':status,'approval_id':request.id}
 
-async def history(db, job):
+async def recheck_native_decision(db, job, run, approval):
+    """Bind the outgoing reply to the current grant, even when a database poll wins the race."""
+    from app.services import employee_native_review
+    if approval.tool not in employee_native_review.TOOLS:
+        return True, None
+    trace = await db.scalar(select(Event.data).where(Event.turn_id==approval.turn_id,
+        Event.type=='approval.resolved', Event.data['approval_id'].as_string()==approval.id,
+        Event.data['by'].as_string()=='steward').order_by(Event.id.desc()).limit(1))
+    if not trace:
+        return True, None
+    team = await service.team_for(db, job.owner_id)
+    if (not team or trace.get('agent_id') != team.lead_agent_id or job.requester_agent_id != team.lead_agent_id
+            or trace.get('job_id') != job.id or trace.get('assignment_epoch') != job.assignment_epoch
+            or await effective_job_mode(db, job) not in NATIVE_DELEGATED_MODES):
+        return False, None
+    details = await asyncio.to_thread(employee_native_review.describe, run.ctx.project_runtime, approval.tool, approval.input)
+    valid = bool(details and details['delegated_scope'] and details['request_digest'] == trace.get('native_request')
+                 and employee_native_review.fingerprint(details['delegated_scope']) == trace.get('native_scope'))
+    return valid, trace.get('task_rule_id') if valid else None
+
+
+async def history(db, job, *, authority_profile=None):
     """Recent decisions on this employee's project; exclude file contents and private conversation text."""
     from app.db.models import AgentJobEvent, Event
+    from app.services import employee_native_review
     from app.db.models.feature import FeatureScope
-    recent = await db.scalars(select(Approval).join(FeatureSession,FeatureSession.thread_id==Approval.thread_id)
-        .join(FeatureScope,FeatureScope.task_id==FeatureSession.task_id).join(WorkItem,WorkItem.id==FeatureScope.task_id)
-        .where(WorkItem.owner_id==job.owner_id,WorkItem.agent_id==job.assignee_agent_id,FeatureScope.project==job.project,
-               FeatureSession.assignment_epoch==FeatureScope.assignment_epoch,
-               Approval.tool=='feature_files.write_text',Approval.status.in_(('allowed','denied')))
-        .order_by(Approval.decided_at.desc()).limit(5))
+    query = select(Approval).join(FeatureSession,FeatureSession.thread_id==Approval.thread_id)
+    query = query.join(FeatureScope,FeatureScope.task_id==FeatureSession.task_id).join(WorkItem,WorkItem.id==FeatureScope.task_id)
+    query = query.where(WorkItem.owner_id==job.owner_id,WorkItem.agent_id==job.assignee_agent_id,FeatureScope.project==job.project,
+                        FeatureSession.assignment_epoch==FeatureScope.assignment_epoch,Approval.status.in_(('allowed','denied')))
+    if authority_profile:
+        query = query.where(Approval.tool.in_(employee_native_review.TOOLS), select(Event.id).where(
+            Event.turn_id==Approval.turn_id, Event.type=='approval.resolved', Event.data['approval_id'].as_string()==Approval.id,
+            Event.data['authority_profile'].as_string()==authority_profile).exists())
+    else:
+        query = query.where(Approval.tool.in_(employee_native_review.TOOLS | {'feature_files.write_text'}))
+    recent = await db.scalars(query.order_by(Approval.decided_at.desc()).limit(5))
     result = []
     for approval in recent:
         trace = await db.scalar(select(Event.data).where(Event.turn_id==approval.turn_id,Event.type=='approval.resolved',
             Event.data['approval_id'].as_string()==approval.id).order_by(Event.id.desc()).limit(1))
+        rule_id = (trace or {}).get('task_rule_id') or (trace or {}).get('rule_id')
+        if rule_id and authority_profile:
+            from app.db.models.permission_rule import PermissionRule
+            rule = await db.get(PermissionRule, rule_id)
+            if not rule or rule.user_id != job.owner_id or rule.decision != 'allow':
+                continue
         escalated = await db.scalar(select(AgentJobEvent.id).join(AgentJob,AgentJob.id==AgentJobEvent.job_id)
             .where(AgentJob.owner_id==job.owner_id,AgentJobEvent.kind=='review_escalated',
                    AgentJobEvent.detail['approval_id'].as_string()==approval.id).limit(1))
-        result.append({'path':str((approval.input or {}).get('path',''))[:200], 'decision':approval.status,
+        audit = await db.scalar(select(AgentJobEvent.detail).join(AgentJob,AgentJob.id==AgentJobEvent.job_id)
+            .where(AgentJob.owner_id==job.owner_id,AgentJob.assignee_agent_id==job.assignee_agent_id,
+                   AgentJobEvent.kind.in_(('steward_review','review_escalated')),
+                   AgentJobEvent.detail['approval_id'].as_string()==approval.id).order_by(AgentJobEvent.id.desc()).limit(1))
+        from app.services.decision_log import redact
+        result.append({'tool':approval.tool, 'action':redact(approval.summary or '')[:160],
+            'path':str((approval.input or {}).get('path',''))[:200], 'decision':approval.status,
+            'reason':redact((audit or {}).get('reason') or '')[:300], 'delivered':bool(approval.delivered_at),
             'source':(trace or {}).get('by','person') if trace is not None else 'unknown','escalated':bool(escalated)})
     return result

@@ -44,7 +44,7 @@ def _trusted_shell(exe):
 
 def _inner_command(args):
     command = args.get("command")
-    if not isinstance(command, str) or len(command) > 1200 or contains_credential(command):
+    if not isinstance(command, str) or len(command) > 1200 or contains_credential(command.replace('\\','/')):
         return None
     argv = args.get("argv")
     if argv is None:
@@ -63,7 +63,7 @@ def _inner_command(args):
 
 def _project_script(project, tool, args):
     if (tool != "Bash" or not isinstance(args, dict)
-            or set(args) - {"command", "cwd", "argv", "reason"} or not project
+            or set(args) - {"command", "cwd", "argv", "reason", "commandActions"} or not project
             or args.get("cwd") != str(project.root)):
         return None
     return _inner_command(args)
@@ -126,6 +126,15 @@ def _delivery_identity(project, args):
 def identity(project, tool, args):
     if tool == DELIVER_FILE:
         return _delivery_identity(project, args)
+    if tool == "codex.request_permissions":
+        from app.services.employee_native_review import permission_scope
+        scope = permission_scope(project, args)
+        if not scope or scope["network"] or any(mode != "read" for mode, _ in scope["paths"]):
+            return None
+        paths = [path for _, path in scope["paths"]]
+        return (_pack({"employee_id":project.employee_id, "project":str(project.root), "cwd":args["cwd"],
+                       "profile":_approval_profile(project)}),
+                _pack({"capability":"native_read_paths", "paths":paths, "command":"只读 " + "、".join(paths)}))
     script = _project_script(project, tool, args)
     if not script:
         return None

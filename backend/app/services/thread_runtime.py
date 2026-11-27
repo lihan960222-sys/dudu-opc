@@ -553,7 +553,8 @@ class ThreadApprovalGate:
                     approved = await store.get_approval(db, handle.approval_id)
                     readonly = approved and employee_approval_rules.readonly_request(
                         run.ctx.project_runtime, approved.tool, approved.input)
-                    if not approved or not await current_native_job(db, run, lock=True, write=bool(matched_rule_id and not readonly)):
+                    job = await current_native_job(db, run, lock=True, write=bool(matched_rule_id and not readonly)) if approved else None
+                    if not job:
                         await store.deny_undelivered_allow(db, handle.approval_id, run.owner_token, source="assignment_changed")
                         return Decision(DENY)
                     from app.services.employee_runtime import checked_active_project
@@ -562,6 +563,13 @@ class ThreadApprovalGate:
                     except (ValueError, OSError):
                         await store.deny_undelivered_allow(db, handle.approval_id, run.owner_token, source="grant_changed")
                         return Decision(DENY)
+                    from app.team.steward_review import recheck_native_decision
+                    valid, task_rule_id = await recheck_native_decision(db, job, run, approved)
+                    if not valid:
+                        await store.deny_undelivered_allow(db, handle.approval_id, run.owner_token, source="grant_changed")
+                        return Decision(DENY)
+                    if task_rule_id is not None:
+                        self._reserved_rules[handle.approval_id] = task_rule_id
                     if matched_rule_id is not None or handle.approval_id in self._reserved_rules:
                         current = await asyncio.to_thread(employee_approval_rules.identity, run.ctx.project_runtime,
                                                           approved.tool, approved.input)
@@ -581,7 +589,18 @@ class ThreadApprovalGate:
                 run.screen_granted = True
             return Decision(ALLOW)
         if status == "denied":
-            return Decision(DENY, DENY_BY_SOURCE.get(self._policy_denials.pop(handle.approval_id, "")))
+            reason = DENY_BY_SOURCE.get(self._policy_denials.pop(handle.approval_id, ""))
+            if handle.tool == 'Bash' and getattr(run.ctx, 'project_runtime', None):
+                from sqlalchemy import select
+                from app.db.models import Event
+                from app.services.employee_native_review import NARROW_REQUEST_HINT
+                async with runtime.session() as db:
+                    narrower = await db.scalar(select(Event.id).where(Event.turn_id==run.turn_id, Event.type=='approval.resolved',
+                        Event.data['approval_id'].as_string()==handle.approval_id, Event.data['by'].as_string()=='steward',
+                        Event.data['request_narrower'].as_boolean().is_(True)).limit(1))
+                if narrower:
+                    reason = NARROW_REQUEST_HINT
+            return Decision(DENY, reason)
         self._policy_denials.pop(handle.approval_id, None)
         if status == "expired":
             return Decision(EXPIRED)
@@ -1439,7 +1458,8 @@ class ThreadRuntime:
         if followup:
             run.recovery_followup = followup
             instruction = ("这是对同一员工派工的后续处理。能从原来信确定答案时，请用 answer_job_question 回复员工。"
-                "需要老板决定的事，请保留员工原问题。对待审的写入，只用 review_employee_write 处理此回合列出的申请。"
+                "保留员工需要老板决定的原问题。用 review_employee_write 审核任务文件写入，"
+                "用 review_employee_action 审核本回合列出的原生请求，并核对老板原话和真实授权。"
                 "超出当前授权时交给老板决定。老板的原来信如下。\n"+json.dumps({"original_request":owner_request},ensure_ascii=False))
             ctx.prompt += "\n"+instruction
             ctx.codex_prompt.user_text += "\n"+instruction
@@ -2243,7 +2263,9 @@ class ThreadRuntime:
                     return False
                 lease = {"expected_turn_id":run.turn_id, "expected_tool":approval.tool, "owner_token":run.owner_token,
                          "fresh_after":datetime.now(UTC) - timedelta(seconds=settings.THREAD_LEASE_SECONDS),
-                         "by":{"by":"person", "assignment_epoch":project.assignment_epoch, "employee_id":project.employee_id}}
+                         "by":{"by":"person", "assignment_epoch":project.assignment_epoch, "employee_id":project.employee_id,
+                               "authority_profile":employee_approval_rules._approval_profile(project) if getattr(project,"local_workstation",False) else None,
+                               "rule_id":reserved_id}}
             won = await store.decide_approval(
                 db, approval_id, status, person_id=person_id, person_label=person_label, **lease)
             approval = await store.get_approval(db, approval_id)
