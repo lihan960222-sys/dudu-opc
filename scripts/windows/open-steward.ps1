@@ -10,10 +10,10 @@ $webLease = Join-Path $scope.DataDir 'suparagent.db.backend-lease'
 
 function Test-StewardReady {
     try {
+        if (-not (Test-StewardHeld $webLease)) { return $false }
         $page = Invoke-WebRequest -UseBasicParsing -Uri "$url/" -MaximumRedirection 0 -TimeoutSec 2
         return ($page.Content -match '(?i)<title>[^<]*(?:Suparagent|Dudu)[^<]*</title>' -and
-            (Invoke-RestMethod -Uri "$url/api/v1/health" -MaximumRedirection 0 -TimeoutSec 2).status -eq 'ok' -and
-            (Test-StewardHeld $webLease))
+            (Invoke-RestMethod -Uri "$url/api/v1/health" -MaximumRedirection 0 -TimeoutSec 2).status -eq 'ok')
     } catch { return $false }
 }
 
@@ -25,9 +25,11 @@ function Start-StewardComponent([string]$Name) {
     [Diagnostics.Process]::Start($start)
 }
 
-function Wait-StewardComponent([string]$Name,[scriptblock]$Ready) {
-    if (& $Ready) { return }
-    $process = Start-StewardComponent $Name
+function Wait-StewardComponent([string]$Name,[scriptblock]$Ready,$process = $null) {
+    if (-not $process) {
+        if (& $Ready) { return }
+        $process = Start-StewardComponent $Name
+    }
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds(75)
         while (-not (& $Ready)) {
@@ -42,6 +44,17 @@ function Wait-StewardComponent([string]$Name,[scriptblock]$Ready) {
 
 function Open-OrdinaryStewardPage {
     Start-Process $url
+    Connect-StewardFeishu
+}
+
+function Connect-StewardFeishu {
+    try {
+        if ($feishuStartError) { throw $feishuStartError }
+        if ($feishuProcess) { Wait-StewardComponent Feishu { Test-StewardHeld $feishuLease } $feishuProcess }
+    } catch {
+        Add-Type -AssemblyName System.Windows.Forms
+        $null = [Windows.Forms.MessageBox]::Show("飞书未启动。工作台仍可使用。" + [Environment]::NewLine + $_.Exception.Message,'嘟嘟')
+    }
 }
 
 function Get-StewardEdge {
@@ -78,6 +91,7 @@ function Open-StewardWindow([Threading.EventWaitHandle]$Activate) {
             if ([DateTime]::UtcNow -ge $deadline -or [Dudu.ExitDialog]::Ending) { return }
             Start-Sleep -Milliseconds 200
         }
+        Connect-StewardFeishu
         $prompted = $false
         while (-not [Dudu.ExitDialog]::Ending) {
             if ($Activate.WaitOne(200)) { $window.Activate() }
@@ -98,8 +112,7 @@ function Open-StewardWindow([Threading.EventWaitHandle]$Activate) {
                     $problems = @()
                     foreach ($part in @('Feishu','Web')) {
                         try {
-                            $lease = if ($part -eq 'Feishu' -and $feishuLease) { $feishuLease }
-                                elseif ($part -eq 'Feishu') { Get-StewardFeishuLock $scope } else { $webLease }
+                            $lease = if ($part -eq 'Feishu') { Get-StewardFeishuLock $scope } else { $webLease }
                             Stop-StewardComponent $scope $part $lease
                         } catch { $problems += $_.Exception.Message }
                     }
@@ -134,13 +147,14 @@ try {
     Import-StewardWorker
     [Dudu.WorkerGroup]::Quiet()
     Wait-StewardComponent Web { Test-StewardReady }
+    $feishuProcess = $null
+    $feishuStartError = $null
     try {
         $feishuLease = Get-StewardFeishuLock $scope
-        if ($feishuLease) { Wait-StewardComponent Feishu { Test-StewardHeld $feishuLease } }
-    } catch {
-        Add-Type -AssemblyName System.Windows.Forms
-        $null = [Windows.Forms.MessageBox]::Show("飞书未启动。工作台仍可使用。" + [Environment]::NewLine + $_.Exception.Message,'嘟嘟')
-    }
+        if ($feishuLease -and -not (Test-StewardHeld $feishuLease)) {
+            $feishuProcess = Start-StewardComponent Feishu
+        }
+    } catch { $feishuStartError = $_ }
     Open-StewardWindow $activate
 } catch {
     Add-Type -AssemblyName System.Windows.Forms
