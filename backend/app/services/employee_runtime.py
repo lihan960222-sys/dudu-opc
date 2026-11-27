@@ -41,19 +41,49 @@ def _terminal_preference_path(owner_id: str, employee_id: int) -> Path:
     return path
 
 
-def native_enabled(owner_id: str, employee_id: int) -> bool:
+@dataclass(frozen=True)
+class TerminalSettings:
+    enabled: bool
+    read_folders: tuple[str, ...] = ()
+    outbound_network: bool = False
+
+    def validate(self, protected=(), *, check_folders=True) -> None:
+        if (type(self.enabled) is not bool or type(self.outbound_network) is not bool
+                or not isinstance(self.read_folders, tuple) or len(self.read_folders) > 32
+                or any(type(path) is not str for path in self.read_folders)):
+            raise ValueError("终端设置无效。")
+        for raw in self.read_folders if check_folders else ():
+            path = checked_root(Path(raw))
+            validate_configured_location(path)
+            validate_location(path, (*protected, settings.SQLITE_FILE.resolve().parent, Path.home() / "AppData"))
+
+
+def terminal_settings(owner_id: str, employee_id: int) -> TerminalSettings:
     path = _terminal_preference_path(owner_id, employee_id)
     try:
         info = path.lstat()
     except FileNotFoundError:
-        return _host_native_default(owner_id, employee_id)
+        return TerminalSettings(_host_native_default(owner_id, employee_id))
     if (stat.S_ISREG(info.st_mode) and not getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
-            and info.st_nlink == 1 and info.st_size <= 8):
+            and info.st_nlink == 1 and info.st_size <= 65536):
         with path.open("rb") as stream:
-            value = stream.read(9).strip()
+            value = stream.read(65537).strip()
         if value in (b"true", b"false"):
-            return value == b"true"
+            return TerminalSettings(value == b"true")
+        try:
+            data = json.loads(value)
+            if (isinstance(data, dict) and set(data) == {"enabled", "read_folders", "outbound_network"}
+                    and type(data["enabled"]) is bool and type(data["outbound_network"]) is bool
+                    and isinstance(data["read_folders"], list) and len(data["read_folders"]) <= 32
+                    and all(isinstance(v, str) for v in data["read_folders"])):
+                return TerminalSettings(data["enabled"], tuple(data["read_folders"]), data["outbound_network"])
+        except (UnicodeError, ValueError):
+            pass
     raise BoundaryUnavailable("无法识别这名员工的项目终端设置，请检查本机数据目录。")
+
+
+def native_enabled(owner_id: str, employee_id: int) -> bool:
+    return terminal_settings(owner_id, employee_id).enabled
 
 
 def _host_native_default(owner_id: str, employee_id: int) -> bool:
@@ -73,17 +103,28 @@ async def checked_active_project(db, run):
             or not employee or employee.owner_id != project.owner_id or not employee.role_path
             or Path(employee.role_path) != project.root or not native_enabled(project.owner_id, project.employee_id)):
         raise ValueError("员工岗位、工单或项目授权已变更。")
+    settings_now = terminal_settings(project.owner_id, project.employee_id)
+    if not project.has_terminal_access(settings_now.read_folders, settings_now.outbound_network):
+        raise ValueError("员工项目终端的目录或联网授权已撤销。")
     await feature_tasks.check_employee_root(db, project.owner_id, employee, project.root)
     return project
 
 
 def save_native_enabled(owner_id: str, employee_id: int, enabled: bool) -> None:
+    prior = terminal_settings(owner_id, employee_id)
+    save_terminal_settings(owner_id, employee_id, TerminalSettings(enabled, prior.read_folders, prior.outbound_network))
+
+
+def save_terminal_settings(owner_id: str, employee_id: int, choice: TerminalSettings) -> None:
     from app.services.agent_memory import write_atomic
-    if type(enabled) is not bool:
-        raise ValueError("员工项目终端只能设为开启或关闭。")
+    choice.validate(check_folders=choice.enabled)
     path = _terminal_preference_path(owner_id, employee_id)
     _private_directory(path.parent)
-    write_atomic(path, "true\n" if enabled else "false\n")
+    data = json.dumps({"enabled":choice.enabled, "read_folders":choice.read_folders,
+                       "outbound_network":choice.outbound_network}, ensure_ascii=False)
+    if len(data.encode("utf-8")) > 65536:
+        raise ValueError("终端设置过长。")
+    write_atomic(path, data)
 
 
 def _default_service_root() -> Path:
@@ -159,6 +200,7 @@ def _profile_environment(home: Path, source, tool_directories) -> dict[str, str]
         system = Path(env["SYSTEMROOT"]) / "System32"
         locations.extend((str(system), env["SYSTEMROOT"]))
         env["COMSPEC"] = str(system / "cmd.exe")
+        env["NoDefaultCurrentDirectoryInExePath"] = "1"
     env["PATH"] = os.pathsep.join(dict.fromkeys(locations)) if os.name == "nt" else os.defpath
     home = _private_directory(home)
     for name in ("CODEX_HOME", "CODEX_SQLITE_HOME", "HOME", "USERPROFILE"):
@@ -203,6 +245,15 @@ def _installed_tools(project: Path, reserved_roots) -> tuple[tuple[str, Path, Pa
     # The standalone base installation supplies python.exe, the exact Python DLL and stdlib.
     base = _python_installation(Path(sys.base_prefix).resolve(), f"{sys.version_info.major}.{sys.version_info.minor}")
     tools = [("python", base / "python.exe", base)]
+    from app.core.codex_installation import store_codex_executable
+    for location in (settings.LOCAL_CODEX_CLI_PATH, os.getenv("SUPARAGENT_PACKAGED_CODEX_PATH"), shutil.which("codex.exe")):
+        packaged = store_codex_executable(location)
+        if packaged:
+            rg = packaged.with_name("rg.exe")
+            if rg.is_file() and rg.resolve() == rg:
+                # Grant the one packaged binary. Never search the inherited PATH for rg.exe.
+                tools.insert(0, ("rg", rg, rg))
+                break
     protected = tuple(Path(value).resolve() for key in ("PROGRAMFILES", "PROGRAMFILES(X86)")
                       if (value := os.environ.get(key)))
     for name in ("pwsh", "git", "python"):
@@ -258,6 +309,8 @@ class ProjectRuntime:
     installed_tools: tuple[tuple[str, Path, Path], ...] = ()
     employee_folders: tuple[Path, ...] = ()
     profile_path: Path | None = None
+    external_reads: tuple[Path, ...] = ()
+    outbound_network: bool = False
 
     @property
     def profile(self) -> Path:
@@ -287,8 +340,14 @@ class ProjectRuntime:
     def permission_name(self) -> str:
         # A changed grant cannot reuse a stale process configuration.
         payload = json.dumps([str(self.root), self.writable, *map(str, self.readable_roots),
-                              *(str(path) for _, _, path in self.installed_tools)])
+                              *(str(path) for _, _, path in self.installed_tools),
+                              list(map(str, self.external_reads)), self.outbound_network])
         return "employee-" + hashlib.sha256(payload.encode()).hexdigest()[:24]
+
+    def has_terminal_access(self, read_folders, outbound_network: bool) -> bool:
+        """Ongoing work retains its initial scope only as long as it is still granted."""
+        return ((not self.outbound_network or outbound_network)
+                and set(self.external_reads).issubset(map(Path, read_folders)))
 
     def process_environment(self, source=None) -> dict[str, str]:
         directories = (str(executable.parent) for _, executable, _ in self.installed_tools)
@@ -358,6 +417,7 @@ class ProjectRuntime:
 
     def _filesystem(self, *, check=False):
         fs = {":root": "deny", ":minimal": "read", **{str(p): "read" for _, _, p in self.installed_tools},
+              **{str(path): "read" for path in self.external_reads if not check},
               str(self.root): "write" if self.writable and not check else "read",
               **{str(path): "read" for path in self.readable_roots if not check}, str(_default_service_root()): "deny",
               str(self.profile.parents[3]): "deny", str(_service_root()): "deny"}
@@ -370,13 +430,15 @@ class ProjectRuntime:
             "windows.sandbox": '"mxc"',
             "default_permissions": json.dumps(self.permission_name),
             f"permissions.{self.permission_name}.filesystem": self._filesystem(),
-            f"permissions.{self.permission_name}.network.enabled": "false",
+            f"permissions.{self.permission_name}.network.enabled": "true" if self.outbound_network else "false",
             "cli_auth_credentials_store": '"file"',
             "projects": "{" + json.dumps(str(self.root), ensure_ascii=False) + '={trust_level="untrusted"}}',
             "project_root_markers": "[]",
             "features.hooks": "false", "features.multi_agent": "false", "features.multi_agent_v2": "false",
             "features.plugins": "false", "features.apps": "false", "features.code_mode": "false",
-            "shell_environment_policy.inherit": '"core"', "allow_login_shell": "false",
+            "shell_environment_policy.inherit": '"core"',
+            "shell_environment_policy.set.NoDefaultCurrentDirectoryInExePath": '"1"',
+            "allow_login_shell": "false",
             "analytics.enabled": "false", "check_for_update_on_startup": "false",
         }
         if self.writable:
@@ -516,6 +578,9 @@ def resolve_project_runtime(agent, task, *, approval_mode, readable_roots=(),
     writable_modes = {"ask", "accept_edits", "approve_for_me", "full_access"}
     writable = approval_mode in writable_modes and agent.approval_mode in writable_modes
     profile = profile_dir(agent.owner_id, agent.id, model_vendor)
+    choice = terminal_settings(agent.owner_id, agent.id)
+    choice.validate((root, *peers, *protected_roots))
     return ProjectRuntime(agent.owner_id, agent.id, task.id, assignment_epoch,
                           model_vendor, root, writable, peers,
-                          _installed_tools(root, protected_roots), tuple(protected_roots), profile)
+                          _installed_tools(root, protected_roots), tuple(protected_roots), profile,
+                          tuple(map(Path, choice.read_folders)), choice.outbound_network)

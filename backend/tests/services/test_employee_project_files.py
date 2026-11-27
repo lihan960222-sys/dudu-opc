@@ -41,12 +41,12 @@ def test_peer_listing_counts_only_visible_matches_and_signals_if_more_exist(tmp_
         (2, True, ["1-alpha", "3-beta"], False),
         (3, True, ["1-alpha", "3-beta"], False),
     ):
-        result = files.inspect_peer(tmp_path, "", listing=True, limit=limit, folders_only=folders_only)
+        result = files.inspect_workspace(tmp_path, "", listing=True, limit=limit, folders_only=folders_only)
         assert [entry["name"] for entry in result["entries"]] == names
         assert result["truncated"] is truncated
     for args in ({"limit": 0}, {"limit": 501}, {"limit": True}, {"limit": "2"}, {"folders_only": 1}):
         with pytest.raises(ValueError):
-            files.inspect_peer(tmp_path, "", listing=True, **args)
+            files.inspect_workspace(tmp_path, "", listing=True, **args)
 
 
 @pytest.mark.parametrize("name", ["../peer.txt", ".env", "AGENTS.md", "任务/7/notes.txt", "C:/wild.txt", "source.txt:stream"])
@@ -63,7 +63,7 @@ def test_files_stay_in_authorized_employee_project(tmp_path, name):
 def test_read_only_assignment_can_inspect_without_shell_or_edits(tmp_path):
     team=policy.TurnTeam(1,2,False,False,strict_hierarchy=True,feature_consult=True)
     ctx=SimpleNamespace(project_runtime=SimpleNamespace(writable=False),approval_mode="plan",team=team)
-    assert employee_terminal.allowed_tools(ctx)==("read_project_text",)
+    assert employee_terminal.allowed_tools(ctx)==("list_project_files","read_project_text")
     server=mcp_server.Server(tmp_path,project_consult=True,project_read=True)
     listed={t["name"] for t in server.tools}
     assert "read_project_text" in listed and "run_project_command" not in listed and "replace_project_text" not in listed
@@ -77,7 +77,10 @@ def test_read_only_assignment_can_inspect_without_shell_or_edits(tmp_path):
 def test_standing_edits_are_separate_from_one_operation_command_decisions():
     team=policy.TurnTeam(1,2,False,False,strict_hierarchy=True,feature_consult=True)
     ctx=SimpleNamespace(project_runtime=SimpleNamespace(writable=True),approval_mode="accept_edits",team=team)
-    assert employee_terminal.allowed_tools(ctx)==("run_project_command",)
+    assert employee_terminal.allowed_tools(ctx)==("run_project_command","list_project_files","read_project_text")
+    for mode in ("ask", "plan", "accept_edits"):
+        for tool in ("list_project_files", "read_project_text"):
+            assert policy.automatic("mcp__team__"+tool,mode,team,{}) == ("allowed","read_only_employee_project")
     assert policy.automatic("mcp__team__replace_project_text","accept_edits",team,{})[0]=="denied"
     assert policy.automatic("mcp__team__replace_project_text","ask",team,{}) is None
     assert policy.automatic("mcp__team__run_project_command","accept_edits",team,{"argv":["anything"]}) is None

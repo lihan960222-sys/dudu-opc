@@ -744,13 +744,20 @@ async def list_threads(db, owner, caller_id):
     if team is None or caller.team_id != team.id:
         raise TeamError('no_team', 'This agent has no team.')
     rows = []
-    for job in await opened_jobs(db, owner, team, caller):
+    jobs = await opened_jobs(db, owner, team, caller)
+    from app.services.employee_approval_history import pending_for_jobs
+    pending = await pending_for_jobs(db, owner, jobs)
+    for job in jobs:
         thread = await db.get(Thread, job.assignee_thread_id)
         if thread is None or thread.owner_id != owner:
             continue
         opener, assignee = await db.get(Agent, job.requester_agent_id), await db.get(Agent, job.assignee_agent_id)
+        state = await thread_state(db, thread)
+        if state == 'waiting_on_person' and not pending.get(job.id):
+            state = 'idle' if job.status in ('completed', 'failed', 'cancelled') else 'running'
         rows.append({'thread_id': thread.id, 'title': fence.line(thread.title or f'Job {job.id}'), 'agent': fence.line(assignee.name) if assignee else None,
-                     'opened_by': fence.line(opener.name) if opener else None, 'job_id': job.id, 'job_status': job.status, 'state': await thread_state(db, thread)})
+                     'opened_by': fence.line(opener.name) if opener else None, 'job_id': job.id, 'task_id': job.task_id,
+                     'job_status': job.status, 'pending_approvals': pending.get(job.id, []), 'state': state})
     return rows
 
 

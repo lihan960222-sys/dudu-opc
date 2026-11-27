@@ -28,6 +28,29 @@ def checked(response):
     return result
 
 
+def _approval_card(body, binding, *, flat=False):
+    def plain(value):
+        return {"tag":"plain_text", "content":value}
+
+    def paragraph(value):
+        return {"tag":"div", "text":plain(value)}
+
+    choices = ["允许并记住", "仅本次", "拒绝"] if binding["offer_remember"] else ["仅本次", "拒绝"]
+    action = {"tag":"action", "actions":[{"tag":"button","text":plain(label),
+              "value":{"approval":binding["approval"],"decision":label}} for label in choices]}
+    view = body.get("approval_display")
+    if not view:
+        return {"elements":[paragraph(body["text"]), action]}
+    hint = "请先核对完整参数。"
+    if binding["offer_remember"]:
+        hint += "选择「允许并记住」后，大嘴可代批同一员工在该项目的相同操作。"
+    details = paragraph(view["details"])
+    panel = {"tag":"collapsible_panel", "expanded":False, "header":{"title":plain("查看完整参数")},
+             "elements":[details]}
+    return {"header":{"title":plain(view["title"]),"template":"orange"},
+            "elements":[paragraph(view["summary"] + "\n" + hint), details if flat else panel, action]}
+
+
 class Publisher:
     def __init__(self, config, db, directory):
         self.config, self.db, self.directory = config, db, Path(directory)
@@ -118,6 +141,13 @@ class Publisher:
         kind = body.get('kind','text')
         if kind == 'text':
             content = {'text':body['text']}
+            if private and body.get('approval_card'):
+                binding = self.db.execute("select approval,offer_remember from approval_dm where approval=? and outgoing=?",
+                                          (body['approval_card'], row['id'])).fetchone()
+                if not binding:
+                    raise ValueError("审批请求与发送记录不匹配")
+                kind = "interactive"
+                content = _approval_card(body, binding)
         elif body.get('private_voice'):
             from .voice import resource
             path,ms=resource(self,row,body)
@@ -179,5 +209,11 @@ class Publisher:
                     self.db.execute("insert or replace into steward_reply_files values(?,?)",
                                     (row["id"], reply["data"]["message_id"]))
             data["content"] = json.dumps({"text":steward_reply.preview(body["text"], attached=bool(sent))}, ensure_ascii=False)
-        result = checked(self.http.post(url,params=params,json=data,headers=self.headers(role)))
+        response = self.http.post(url,params=params,json=data,headers=self.headers(role))
+        if (kind == "interactive" and body.get("approval_display") and response.status_code in (200, 400)
+                and response.json().get("code") == 230099):
+            # A definite card-format rejection permits one simpler rendering, with the same send UUID.
+            data["content"] = json.dumps(_approval_card(body, binding, flat=True), ensure_ascii=False)
+            response = self.http.post(url,params=params,json=data,headers=self.headers(role))
+        result = checked(response)
         return result['data']['message_id']

@@ -117,6 +117,28 @@ async def test_rules_are_added_listed_and_deleted(api):
     assert (await api.get("/api/v1/approval-rules")).json() == []
 
 
+async def test_employee_grant_visibility_and_revocation(api, owner, sessions, monkeypatch):
+    from app.db.models.permission_rule import PermissionRule
+    from app.services import employee_approval_rules
+
+    async with sessions() as db:
+        own, other = [PermissionRule(user_id=user, bucket=employee_approval_rules.BUCKET,
+            connector="employee", tool="operation", decision="allow") for user in (owner, owner + "-other")]
+        db.add_all([own, other])
+        await db.commit()
+        own_id, other_id = own.id, other.id
+    # The rule codec and target fingerprint have separate execution-path tests.
+    monkeypatch.setattr(employee_approval_rules, "decode", lambda row: {
+        "employee_id": 31, "project": "/project", "cwd": "/project/example", "command": "example",
+    })
+    visible = (await api.get("/api/v1/approval-rules", params={"workspace": "/project"})).json()
+    assert [(r["id"], r["employee_name"], r["cwd"]) for r in visible] == [(own_id, "#31", "/project/example")]
+    assert not (await api.get("/api/v1/approval-rules", params={"workspace": "/different"})).json()
+    assert (await api.delete(f"/api/v1/approval-rules/{other_id}")).status_code == 404
+    assert (await api.delete(f"/api/v1/approval-rules/{own_id}")).status_code == 204
+    assert not (await api.get("/api/v1/approval-rules")).json()
+
+
 async def test_a_rule_can_be_tied_to_a_folder(api):
     created = await api.post("/api/v1/approval-rules", json={"command": "ls", "workspace": "/work/a"})
     assert created.status_code == 201 and created.json()["workspace"] == "/work/a"

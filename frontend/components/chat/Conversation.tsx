@@ -269,6 +269,7 @@ export function Conversation({
                   node = (
                     <ApprovalCard
                       key={item.key}
+                      threadId={threadId}
                       item={item}
                       answering={answering === item.approvalId}
                       error={approvalErrors[item.approvalId] ?? null}

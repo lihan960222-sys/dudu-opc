@@ -30,7 +30,7 @@ async def consume_allowed_approval(db, turn_id, owner_token, tool, arguments, *,
     query = select(Approval).where(
         Approval.turn_id == turn_id, Approval.tool == tool, Approval.status == 'allowed',
         Approval.consumed_at.is_(None), Approval.decided_at >= threshold)
-    if tool in ('mcp__team__run_project_command','mcp__team__read_project_text','mcp__team__replace_project_text'):
+    if tool in ('mcp__team__run_project_command','mcp__team__list_project_files','mcp__team__read_project_text','mcp__team__replace_project_text'):
         query = query.where(Approval.delivered_at.is_not(None))
     approvals = (await db.execute(query.order_by(Approval.created_at))).scalars()
     expected = canonical(arguments)
@@ -141,7 +141,7 @@ class TeamBridge:
 
     async def execute(self, name, args, *, approval_id=None):
         rt, run = self.runtime, self.run
-        if name in ('read_project_text','replace_project_text','list_peer_files','read_peer_text'):
+        if name in ('list_project_files','read_project_text','replace_project_text','list_peer_files','read_peer_text'):
             from app.core.config import settings
             from app.services import employee_project_files, employee_runtime, employee_terminal, team_workspaces, workspace_files
             from app.team.steward_review import current_native_job
@@ -171,8 +171,14 @@ class TeamBridge:
                         if not target:
                             raise ValueError('这名同事不在本轮可读的岗位目录中。')
                         root, scope = Path(target['role_path']), f"employee:{target['id']}"
-                        result = await asyncio.to_thread(employee_project_files.inspect_peer, root, path,
+                        result = await asyncio.to_thread(employee_project_files.inspect_workspace, root, path,
                                                          listing=listing, **options)
+                    elif name == 'list_project_files':
+                        if args.keys() - {'path','limit','folders_only'}:
+                            raise ValueError('只可选择岗位内的相对目录、返回条数和是否仅列文件夹。')
+                        result = await asyncio.to_thread(employee_project_files.inspect_workspace, root,
+                            args.get('path',''), listing=True, own=True, limit=args.get('limit',50),
+                            folders_only=args.get('folders_only',False))
                     elif writing:
                         result = await asyncio.to_thread(employee_project_files.edit,project,args,storage=settings.SQLITE_FILE.parent)
                     else:
@@ -182,7 +188,7 @@ class TeamBridge:
                 await db.commit()
             receipt = {'operation':'write_text' if writing else 'read_text', 'scope':scope,
                        'path':result['path'], 'root':str(root)}
-            if name == 'list_peer_files':
+            if name in ('list_peer_files','list_project_files'):
                 receipt.update(operation='list_files', count=len(result['entries']), truncated=result['truncated'])
             if writing:
                 receipt['sha256'] = result['sha256']

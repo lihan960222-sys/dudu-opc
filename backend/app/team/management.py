@@ -81,7 +81,14 @@ async def _call(rt, run, name, args):
         raise service.TeamError('forbidden', 'Configuration changes are unavailable for this turn.')
     if name == 'list_management_capabilities':
         strict(args, set())
-        return capabilities()
+        result = capabilities()
+        if run.steward_owner_turn:
+            from app.services.employee_approval_history import steward_memory
+            async with rt.session() as db:
+                team = await service.team_for(db, rt.owner_id)
+                if team and team.lead_agent_id == run.agent_id:
+                    result['approval_history'] = await steward_memory(db, rt.owner_id, team.id)
+        return result
     if name == 'preview_schedule':
         strict(args, {'schedule_kind', 'schedule_spec', 'timezone'})
         now = datetime.now(UTC)

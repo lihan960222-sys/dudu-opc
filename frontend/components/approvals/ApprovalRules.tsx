@@ -4,7 +4,6 @@ import { Select } from "@/components/ui/Select";
 
 import { useEffect, useState } from "react";
 import { api, ApiError, type ApprovalRule } from "@/lib/api";
-import { ruleMatchLabel, ruleScopeLabel } from "@/lib/approvals";
 import { BUTTON, FIELD, FIELD_BOX } from "./styles";
 import { SaveBar } from "@/components/settings/SaveBar";
 import { SavedConfirmation, useSavedConfirmation } from "@/components/settings/SavedConfirmation";
@@ -108,10 +107,12 @@ export function ApprovalRules({
           {rules.map((rule) => (
             <li key={rule.id} className="flex items-start gap-3 px-3 py-2">
               <div className="min-w-0 flex-1">
+                {rule.employee_name && <p className="font-medium">{rule.employee_name}</p>}
                 <p className="break-all font-mono text-xs">{rule.command}</p>
                 <p className="mt-0.5 break-all text-xs text-muted">
-                  {ruleMatchLabel(rule)} · {ruleScopeLabel(rule)}
+                  {t(rule.match === "prefix" ? "approvals.startsWith" : "approvals.exactly")} · {rule.workspace || t("approvals.folderPlaceholder")}
                 </p>
+                {rule.cwd && rule.cwd !== rule.workspace && <p className="break-all text-xs text-muted">{rule.cwd}</p>}
               </div>
               <button
                 className={BUTTON}

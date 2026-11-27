@@ -3,7 +3,7 @@ from pathlib import Path
 
 from app.computers import policy as computers
 from app import composio_generic
-from app.services import composio_policy, safety_floor
+from app.services import composio_policy, employee_approval_rules, safety_floor
 from app.team import policy as teams
 
 FILE_WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
@@ -103,6 +103,10 @@ def automatic(tool, mode, run, arguments):
                 else:
                     calls.discard(key)
         return decision
+    if getattr(run.ctx, "project_runtime", None) and tool in ("Bash", "apply_patch", "codex.request_permissions"):
+        if mode == "plan" and not employee_approval_rules.readonly_request(run.ctx.project_runtime, tool, arguments):
+            return "denied", "plan_mode"
+        return None
     if mode == "full_access" and not tool.startswith("mcp__"):
         return _full_access(tool, run, arguments)
     # Screen grants are turn scoped and are never persisted as command rules.

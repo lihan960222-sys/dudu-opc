@@ -86,6 +86,11 @@ class Worker:
                 with self.db:
                     self.db.execute("update inbox set state='ignored' where app=? and event=?",(row['app'],row['event']))
             return
+        if msg.get("approval_callback"):
+            approvals.answer(self, row, msg, text)
+            return
+        if await approvals.owner_request(self, row, msg, text):
+            return
         followup = self.db.execute("select command from history_continuations where app=? and event=?",
                                    (row["app"],row["event"])).fetchone()
         if followup:
@@ -355,11 +360,18 @@ class Worker:
         if not turn.get('finished_at'):
             approvals.notify(self,execution,row['task'])
             return
+        last_approval_status = None
         async with AsyncSessionLocal() as session:
             current = await feature_tasks.report(session, self.cfg['owner_id'], key, execution['thread'], execution['turn'])
             from app.db.models import FeatureMessage
             binding = await session.get(FeatureMessage,(self.cfg['owner_id'],key))
             dispatch_id = binding.result["job_id"] if binding else None
+            if turn['status'] != 'succeeded':
+                from app.db.models import Approval
+                from sqlalchemy import select
+                last_approval_status = await session.scalar(select(Approval.status).where(
+                    Approval.thread_id == execution['thread'], Approval.turn_id == execution['turn']
+                ).order_by(Approval.created_at.desc(), Approval.id.desc()).limit(1))
             await session.commit()
         if current is False:
             with self.db:
@@ -394,7 +406,10 @@ class Worker:
                 report = f"老板，任务 #{task} 的进展如下。\n{summary}{''.join(issues)}"
             else:
                 from app.services.steward_reply import turn_status
-                report = turn_status(turn['status'], turn.get('error') or turn.get('result')) + f"\n任务 #{task}"
+                if last_approval_status == "expired":
+                    report = f"老板，工单 #{task} 本轮已停止。最后一项操作的审批已过期，系统没有放行，交付结果尚未核实。"
+                else:
+                    report = turn_status(turn['status'], turn.get('error') or turn.get('result')) + f"\n任务 #{task}"
             final = enqueue(self.db,task,'steward',{'text':report})
             packets.append(final)
             self.bind_final(row,final)
@@ -458,6 +473,7 @@ class Worker:
                 continue
             with self.db:
                 self.db.execute("update outbox set state='sent',remote=? where id=?",(remote,row['id']))
+                approvals.delivered(self.db,row['id'],self.cfg.get('steward',{}))
                 suggestions.delivered(self.db,row['id'])
 
                 self.db.execute("update delivery_timing set sent=unixepoch('subsec') where outgoing=?",(row['id'],))

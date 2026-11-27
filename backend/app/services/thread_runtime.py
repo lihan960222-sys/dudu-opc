@@ -60,6 +60,7 @@ from app.team.jobs import Jobs
 from app.team.notices import Notices
 from app.computers import service as computer_service
 from app.services import approval_allowlist, approval_modes, decision_log, engine_errors, safety_floor
+from app.services import employee_approval_rules
 from app.services.provider_adapter import (
     ALLOW,
     CANCELLED,
@@ -314,6 +315,8 @@ class ThreadApprovalGate:
         self._uninterrupted_requests: set[str] = set()
         # Approvals a policy (not a person) denied, by reason code, so the engine is told why.
         self._policy_denials: dict[str, str] = {}
+        self.employee_rule_keys: dict[str, tuple[str, str]] = {}
+        self._employee_rule_ids: dict[str, int] = {}
 
     @property
     def waiting(self) -> bool:
@@ -366,6 +369,8 @@ class ThreadApprovalGate:
                 input, summary = recovered, f"续办原工单 #{recovered['task_id']}"
         from app.computers.native import durable_input
         stored_input = durable_input(tool, input)
+        project = getattr(run.ctx, "project_runtime", None)
+        key = await asyncio.to_thread(employee_approval_rules.identity, project, tool, input) if project else None
         if tool.startswith("mcp__computer__native_"):
             summary = tool.removeprefix("mcp__computer__native_").replace("_", " ") + " on this Mac"
         async with runtime.session() as db:
@@ -381,6 +386,8 @@ class ThreadApprovalGate:
                     kind=kind,
                     owner_token=run.owner_token,
                 )
+                if key:
+                    self.employee_rule_keys[approval.id] = key
             except store.TurnNotRunning:
                 run.recorder.lose()
                 return None
@@ -443,11 +450,17 @@ class ThreadApprovalGate:
             return ApprovalHandle(approval_id=approval.id, request_id=request_id, tool=tool)
         # A change to a connected app (mcp__composio__) is only ever allowed on its own card, never by a saved rule.
         rule = None
-        if (not getattr(run.ctx, "project_runtime", None) and tool not in SCREEN_INPUT
+        if project:
+            if key:
+                async with runtime.session() as db:
+                    rule = await employee_approval_rules.find(db, runtime.owner_id, key)
+                if rule:
+                    self._employee_rule_ids[approval.id] = rule.id
+        elif (tool not in SCREEN_INPUT
                 and not tool.startswith(("mcp__team__", "mcp__composio__", "mcp__community__"))):
             rule = await self._saved_rule(tool, input)
         held = None
-        if rule is not None:
+        if rule is not None and not project:
             # A command on the safety floor, or one that could not be read, is
             # never allowed by a rule: a person decides on the card.
             reading = safety_floor.floor_reading(input.get("command", "")) if isinstance(input.get("command"), str) else None
@@ -525,6 +538,8 @@ class ThreadApprovalGate:
                 self._info.pop(handle.approval_id, None)
                 runtime.hub.notify(run.thread_id)
                 return Decision(DENY)
+        employee_key = self.employee_rule_keys.pop(handle.approval_id, None)
+        matched_rule_id = self._employee_rule_ids.pop(handle.approval_id, None)
         self._info.pop(handle.approval_id, None)
         if status == "allowed":
             # Re-check, atomically, that this run still owns its turn right
@@ -534,9 +549,25 @@ class ThreadApprovalGate:
                     from app.db.transactions import begin_write
                     from app.team.steward_review import current_native_job
                     await begin_write(db)
-                    if not await current_native_job(db, run, lock=True):
+                    approved = await store.get_approval(db, handle.approval_id)
+                    readonly = approved and employee_approval_rules.readonly_request(
+                        run.ctx.project_runtime, approved.tool, approved.input)
+                    if not approved or not await current_native_job(db, run, lock=True, write=bool(matched_rule_id and not readonly)):
                         await store.deny_undelivered_allow(db, handle.approval_id, run.owner_token, source="assignment_changed")
                         return Decision(DENY)
+                    from app.services.employee_runtime import checked_active_project
+                    try:
+                        await checked_active_project(db, run)
+                    except (ValueError, OSError):
+                        await store.deny_undelivered_allow(db, handle.approval_id, run.owner_token, source="grant_changed")
+                        return Decision(DENY)
+                    if matched_rule_id is not None:
+                        current = await asyncio.to_thread(employee_approval_rules.identity, run.ctx.project_runtime,
+                                                          approved.tool, approved.input)
+                        rule = await employee_approval_rules.find(db, runtime.owner_id, current)
+                        if current != employee_key or not rule or rule.id != matched_rule_id:
+                            await store.deny_undelivered_allow(db, handle.approval_id, run.owner_token, source="grant_changed")
+                            return Decision(DENY)
                 delivered = await store.mark_allow_delivered(db, handle.approval_id, run.owner_token)
             if not delivered:
                 run.recorder.lose()
@@ -1228,7 +1259,8 @@ class ThreadRuntime:
                     current = await feature_tasks.project_runtime_for(db, self.owner_id, worker, thread, ctx.approval_mode)
                     if (not current or current.root != project_runtime.root or
                             (project_runtime.writable and not current.writable) or
-                            not set(project_runtime.readable_roots).issubset(current.readable_roots)):
+                            not set(project_runtime.readable_roots).issubset(current.readable_roots) or
+                            not project_runtime.has_terminal_access(current.external_reads, current.outbound_network)):
                         return False
                     return await feature_tasks.bind_native_session(db, self.owner_id, thread.id, turn.id, turn.owner_token, state)
             ctx.bind_native_session = bind_native_session
@@ -2127,6 +2159,7 @@ class ThreadRuntime:
         self, approval_id: str, decision: str, *, remember: bool = False, expected_turn_id: int | None = None,
         person_id: int | None = None, person_label: str | None = None,
         expected_assignment_epoch: int | None = None, expected_employee_id: int | None = None,
+        saved_project_rule: dict | None = None,
     ) -> bool:
         """The person's answer (`allow` or `deny`). True if it was recorded; False
         means it changed nothing (already answered, cancelled, or its turn is no
@@ -2142,7 +2175,9 @@ class ThreadRuntime:
             return False
         if expected_turn_id is not None:
             run = self._runs.get(expected_turn_id)
-            if not run or run.stop_requested or run.ctx.aborted or not run.ctx.feature_workspace or run.ctx.approval_mode == "plan":
+            if not run or run.stop_requested or run.ctx.aborted or not run.ctx.feature_workspace:
+                return False
+            if run.ctx.approval_mode == "plan" and not getattr(run.ctx, "project_runtime", None):
                 return False
             lease = {"expected_turn_id": expected_turn_id, "owner_token":run.owner_token,
                      "fresh_after": datetime.now(UTC) - timedelta(seconds=settings.THREAD_LEASE_SECONDS)}
@@ -2164,11 +2199,19 @@ class ThreadRuntime:
                 from app.team.steward_review import current_native_job
                 if (expected_turn_id is not None and not scoped_reply or run.stop_requested or not run.gate
                         or run.gate._deadlines.get(approval_id, 0) <= asyncio.get_running_loop().time()
-                        or not await current_native_job(db, run, write=decision == ALLOW, lock=True)):
+                        or not await current_native_job(db, run, lock=True, write=decision == ALLOW and
+                            not employee_approval_rules.readonly_request(project, approval.tool, approval.input))):
                     return False
-                if scoped_reply and not describe({"tool":approval.tool, "input":approval.input}, native=True):
+                if scoped_reply and decision == ALLOW and not describe({"tool":approval.tool, "input":approval.input}, native=True):
                     return False
-                remember = False
+                if remember and decision == ALLOW:
+                    key = await asyncio.to_thread(employee_approval_rules.identity, project, approval.tool, approval.input)
+                    if key and key == run.gate.employee_rule_keys.get(approval_id):
+                        await employee_approval_rules.stage(db, self.owner_id, key)
+                        if saved_project_rule is not None:
+                            saved_project_rule["id"] = (await employee_approval_rules.find(db, self.owner_id, key)).id
+                    else:
+                        remember = False
                 lease = {"expected_turn_id":run.turn_id, "expected_tool":approval.tool, "owner_token":run.owner_token,
                          "fresh_after":datetime.now(UTC) - timedelta(seconds=settings.THREAD_LEASE_SECONDS),
                          "by":{"by":"person", "assignment_epoch":project.assignment_epoch, "employee_id":project.employee_id}}
@@ -2192,7 +2235,7 @@ class ThreadRuntime:
                     remembered=remember and decision == ALLOW,
                     mode=self._mode_of(approval.turn_id),
                 )
-            if remember and decision == ALLOW and approval is not None:
+            if remember and decision == ALLOW and approval is not None and not project:
                 await self._remember(approval)
         if approval is not None:
             self.hub.notify(approval.thread_id)

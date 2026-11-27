@@ -114,6 +114,7 @@ async def test_read_only_native_turn_discovers_and_inspects_permitted_colleague(
             text=True, capture_output=True, check=True, timeout=15)
         listed = {t["name"] for t in json.loads(list_tools.stdout)["result"]["tools"]}
         assert listed == set(feature_team_tools(ctx))
+        assert {"list_project_files","read_project_text"} <= listed
         assert "replace_project_text" not in listed
         assert all(policy.automatic("mcp__team__" + tool, "plan", team_ctx, args)[0] == "allowed" for tool in tools)
         from tests.services.test_codex_adapter import _turn
@@ -122,16 +123,40 @@ async def test_read_only_native_turn_discovers_and_inspects_permitted_colleague(
         engine._emit = AsyncMock(return_value=True)
         engine.rpc = Mock()
         engine.gate = SimpleNamespace(open=AsyncMock(return_value=None))
-        for tool in tools:
-            await engine._item_started({"id": tool, "type": "mcpToolCall", "server": "team", "tool": tool, "arguments": args})
+        cases = {**dict.fromkeys(tools,args),"list_project_files":{"limit":2},"read_project_text":{"path":"fixture.md"}}
+        for tool, call_args in cases.items():
+            await engine._item_started({"id": tool, "type": "mcpToolCall", "server": "team", "tool": tool, "arguments": call_args})
             await engine._server_request({"id": 7, "method": "mcpServer/elicitation/request", "params": {
                 "serverName": "team", "message": f'run tool "{tool}"',
-                "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": args}}})
+                "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": call_args}}})
             assert engine.gate.open.await_args.kwargs["tool"] == "mcp__team__" + tool
-        assert not engine.breach and not engine.tools
+        assert not engine.breach and engine.tools and not engine.project.writable
         caps = await bridge.execute("employee_capabilities", {})
         assert caps["read_only_peers"] == [{"id": target.id, "name": target.name, "role_path": target.role_path}]
         assert tools <= set(caps["granted_tools"])
+        own_root = Path(reader.role_path)
+        (own_root / "fixture.md").write_text("owned evidence", encoding="utf-8")
+        from app.services.thread_runtime import ActiveRun, ThreadApprovalGate
+        from app.team.bridge import consume_allowed_approval
+        active = ActiveRun(thread.id, turn.id, turn.owner_token, ctx, approval_timeout=1)
+        runtime = SimpleNamespace(session=sessions,owner_id=owner,_runs={turn.id:active},_waiters={},
+                                  _mode_of=lambda _: "plan",hub=SimpleNamespace(notify=lambda _:None))
+        gate = ThreadApprovalGate(runtime,active)
+        tool = "mcp__team__list_project_files"
+        permit = await gate.open(request_id="directory-probe",tool=tool,kind="other",input={},summary="查看自己的目录")
+        assert (await gate.decide(permit)).kind == "allow"
+        async with sessions() as db:
+            assert await consume_allowed_approval(db,turn.id,turn.owner_token,tool,{},return_id=True) == permit.approval_id
+            assert not await consume_allowed_approval(db,turn.id,turn.owner_token,tool,{})
+        own_entries = await bridge.execute("list_project_files", {}, approval_id=permit.approval_id)
+        assert "fixture.md" in {entry["name"] for entry in own_entries["entries"]}
+        assert "任务" not in {entry["name"] for entry in own_entries["entries"]}
+        own_receipt = emitted.await_args.args[1]["file_receipts"][0]
+        assert own_receipt["scope"] == "role" and own_receipt["root"] == str(own_root)
+        assert (await bridge.execute("read_project_text", {"path":"fixture.md"}))["text"] == "owned evidence"
+        for invalid_args in ({"path":"../other"},{"path":"任务"},{"limit":501},{"agent_id": target.id}):
+            with pytest.raises(service.TeamError):
+                await bridge.execute("list_project_files", invalid_args)
         entries = await bridge.execute("list_peer_files", {**args, "path": ""})
         assert [entry["name"] for entry in entries["entries"]] == ["result.md"]
         for folder in ("a-docs", "b-tests", "c-source", "d-assets"):
@@ -168,6 +193,9 @@ async def test_read_only_native_turn_discovers_and_inspects_permitted_colleague(
             await bridge.execute("read_peer_text", args)
         assert (await bridge.execute("employee_capabilities", {}))["read_only_peers"] == []
         assert (target_root / "result.md").read_text(encoding="utf-8") == "project evidence"
+        run.owner_token = "expired"
+        with pytest.raises(service.TeamError):
+            await bridge.execute("list_project_files", {})
     finally:
         await bridge.close()
 

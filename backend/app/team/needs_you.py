@@ -215,9 +215,14 @@ async def collect_local(db, owner_id: str, *, now: datetime, zone: ZoneInfo,
                AgentJob.status == "needs_input", AgentJob.question.is_not(None))
         .order_by(AgentJob.id.desc()).limit(100))).all()
     for job, thread_id in questions:
-        # Blocking consultations are answered through the requester; async jobs
-        # accept the person's answer in their own conversation.
+        # Scoped employee clarifications return to the originating steward chat,
+        # including questions from a specialist several levels down.
         target = job.requester_thread_id if job.reply == "wait" else thread_id
+        if job.task_id and job.reply == "resume":
+            root = await db.get(AgentJob, job.root_id) if job.root_id else job
+            if not root or root.owner_id != owner_id:
+                continue
+            target = root.requester_thread_id
         thread = await db.get(Thread, target)
         if thread is None or thread.owner_id != owner_id:
             continue

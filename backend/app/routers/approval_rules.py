@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.routers.threads import get_runtime
 from app.schemas.approvals import ApprovalRuleCreate, ApprovalRuleResponse
 from app.services import approval_allowlist as allowlist
-from app.services import decision_log
+from app.services import decision_log, employee_approval_history
 from app.services.local_access_policy import require_local_access
 from app.services.thread_runtime import ThreadRuntime
 
@@ -35,9 +35,12 @@ async def list_rules(
     folder: those tied to it and those with no folder."""
     async with rt.session() as db:
         rules = await allowlist.list_rules(db, rt.owner_id)
+        employee_rules = await employee_approval_history.current(db, rt.owner_id)
     if workspace is not None:
         rules = [r for r in rules if allowlist.applies_in(r, workspace)]
-    return [_public(r) for r in rules]
+    return [_public(r) for r in rules] + [
+        ApprovalRuleResponse(**r) for r in employee_rules if workspace is None or r["workspace"] == workspace
+    ]
 
 
 @router.post("", response_model=ApprovalRuleResponse, status_code=201)
@@ -61,7 +64,7 @@ async def delete_rule(
     """Take back an "always allow". The decision log records it as `undone`;
     the next matching command asks again."""
     async with rt.session() as db:
-        rule = await allowlist.delete_rule(db, rt.owner_id, rule_id)
+        rule = await allowlist.delete_rule(db, rt.owner_id, rule_id, include_employee=True)
     if rule is None:
         raise HTTPException(status_code=404, detail="Rule not found")
     decision_log.record(

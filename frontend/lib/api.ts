@@ -235,6 +235,8 @@ export type DecisionEntry = {
 export type DecisionsPage = { items: DecisionEntry[]; next_before: string | null };
 
 export type ApprovalRule = {
+  employee_name?: string | null;
+  cwd?: string | null;
   id: number;
   match: "exact" | "prefix";
   command: string;
@@ -1718,6 +1720,9 @@ export const api = {
   // `remember` with an allow also saves the exact shell command as an "always
   // allow" rule for the conversation's folder; the answer says which rule, or
   // why none was saved (it was then allowed this once only).
+  pendingApprovalChoices: (threadId: number) =>
+    request<{id: string; employee_rememberable?: boolean | null}[]>(`/threads/${threadId}/approvals?status=pending`),
+
   answerThreadApproval: (
     threadId: number,
     approvalId: string,

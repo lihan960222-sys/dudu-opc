@@ -7,7 +7,7 @@ export function canManageProjectTerminal(session: SessionInfo | null): boolean {
 
 export const directoryModes = {
   plan: {label: "只读", help: "可以查看自己的工作目录和拟定计划。"},
-  ask: {label: "编辑前确认", help: "可以查看自己的工作目录，修改文件前需审批。"},
+  ask: {label: "编辑前确认", help: "查看自己的项目目录、读取文本可直接进行。修改文件需要审批，部分终端命令也会请求确认。"},
   accept_edits: {label: "允许编辑", help: "可以在自己的工作目录内读取、新建和修改文件。"},
 } as const;
 

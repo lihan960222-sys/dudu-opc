@@ -73,6 +73,43 @@ def test_readonly_scope_and_project_writer_lock(tmp_path, monkeypatch):
         pass
 
 
+def test_binding_and_tool_scope_cannot_outlive_project_grants(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    folder = tmp_path / "references"
+    native = replace(employee_project(tmp_path, monkeypatch), external_reads=(folder,), outbound_network=True)
+    assert native.has_terminal_access([str(folder)], True)
+    assert not native.has_terminal_access([], True)
+    assert not native.has_terminal_access([str(folder)], False)
+    assert replace(native, outbound_network=False).has_terminal_access([folder], True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Store runtime tools")
+def test_rg_comes_from_codex_package_even_with_project_controlled_path(tmp_path, monkeypatch):
+    root = tmp_path / "employee project"
+    root.mkdir()
+    (root / "rg.exe").touch()
+    (root / "codex.exe").touch()
+    install = tmp_path / "program-files"
+    bundled = install / "WindowsApps" / "OpenAI.Codex_1.0_x64__2p2nqsd0c76g0" / "app" / "resources"
+    bundled.mkdir(parents=True)
+    rg = bundled / "rg.exe"
+    rg.touch()
+    (bundled / "codex.exe").touch()
+    monkeypatch.setenv("ProgramFiles", str(install))
+    monkeypatch.setenv("PATH", str(root))
+    monkeypatch.setenv("SUPARAGENT_PACKAGED_CODEX_PATH", str(bundled / "codex.exe"))
+    monkeypatch.setattr(settings, "LOCAL_CODEX_CLI_PATH", str(root / "codex.exe"))
+    runtime = employee_project(tmp_path, monkeypatch)
+    env = runtime.process_environment()
+    assert ("rg", rg, rg) in runtime.installed_tools
+    assert env["PATH"].split(os.pathsep)[0] == str(bundled)
+    assert env["NoDefaultCurrentDirectoryInExePath"] == "1"
+    assert 'shell_environment_policy.set.NoDefaultCurrentDirectoryInExePath="1"' in runtime.cli_options()
+    rg.unlink()
+    assert not any(name == "rg" for name, *_ in employee_project(tmp_path, monkeypatch).installed_tools)
+
+
 def test_short_private_storage_keeps_existing_profiles_and_rejects_unsafe_paths(tmp_path, monkeypatch):
     from app.services import employee_runtime
 

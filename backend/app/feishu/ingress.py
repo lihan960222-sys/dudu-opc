@@ -255,6 +255,32 @@ def receive(db, identity, event):
     return bool(change.rowcount)
 
 
+def receive_approval_click(db, identity, event):
+    """Normalize an SDK-authenticated click on our actual sent DM into a quoted owner reply."""
+    header, body = event.get("header") or {}, event.get("event") or {}
+    operator, action, context = (body.get(key) or {} for key in ("operator", "action", "context"))
+    value = action.get("value")
+    event_id, chat, parent = header.get("event_id"), context.get("open_chat_id"), context.get("open_message_id")
+    if (identity.get("enquiry_role") or header.get("event_type") != "card.action.trigger"
+            or header.get("app_id") != identity["app_id"] or header.get("tenant_key") != identity["tenant_key"]
+            or operator.get("open_id") != identity["open_id"] or operator.get("tenant_key") != identity["tenant_key"]
+            or action.get("tag") != "button" or not isinstance(value, dict)
+            or not all(isinstance(v,str) and v for v in (event_id, chat, parent, value.get("approval")))):
+        return False
+    binding = db.execute("""select a.offer_remember from approval_dm a join outbox o on o.id=a.outgoing
+        where a.approval=? and a.state='pending' and o.role='steward' and o.state='sent' and o.remote=?
+        and json_extract(o.body,'$.approval_card')=a.approval""",(value["approval"],parent)).fetchone()
+    decision = value.get("decision")
+    if not binding or decision not in ("仅本次","拒绝","允许并记住") or (decision=="允许并记住" and not binding[0]):
+        return False
+    # A forwarded card has a different remote message id. Do not accept approval IDs alone.
+    return receive(db, identity, {"header":header, "event":{
+        "sender":{"sender_type":"user","sender_id":{"open_id":operator["open_id"]}},
+        "message":{"message_id":"card-click:"+event_id, "chat_id":chat, "chat_type":"p2p",
+                   "parent_id":parent, "message_type":"text", "content":json.dumps({"text":decision}),
+                   "approval_callback":True}}})
+
+
 def listen(channel,identity,wake):
     import asyncio
     import multiprocessing
@@ -292,6 +318,20 @@ def listen(channel,identity,wake):
         finally:
             db.close()
 
-    handler = lark.EventDispatcherHandler.builder('','').register_p2_im_message_receive_v1(incoming).build()
+    def clicked(event):
+        from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
+        db = journal(channel)
+        try:
+            queued = receive_approval_click(db,identity,json.loads(lark.JSON.marshal(event)))
+            if queued:
+                wake.set()
+            return P2CardActionTriggerResponse({"toast":{"type":"info",
+                "content":"已收到，处理结果将发到当前对话。" if queued else "这份申请已失效或不能在这里处理。"}})
+        finally:
+            db.close()
+    builder = lark.EventDispatcherHandler.builder('','').register_p2_im_message_receive_v1(incoming)
+    if not identity.get("enquiry_role"):
+        builder.register_p2_card_action_trigger(clicked)
+    handler = builder.build()
     client = lark.ws.Client(identity['app_id'],os.environ[identity['secret_env']],event_handler=handler)
     client.start()

@@ -202,15 +202,17 @@ async def find_rule(
     return None
 
 
-async def delete_rule(db: AsyncSession, owner_id: str, rule_id: int) -> PermissionRule | None:
+async def delete_rule(db: AsyncSession, owner_id: str, rule_id: int, *, include_employee=False) -> PermissionRule | None:
     """Delete one rule. Returns what was deleted, or None if there was none."""
+    from app.services import employee_approval_rules
+    buckets = (BUCKET, employee_approval_rules.BUCKET) if include_employee else (BUCKET,)
     await begin_write(db)
     rule = (
         await db.execute(
             select(PermissionRule).where(
                 PermissionRule.id == rule_id,
                 PermissionRule.user_id == owner_id,
-                PermissionRule.bucket == BUCKET,
+                PermissionRule.bucket.in_(buckets),
             )
         )
     ).scalar_one_or_none()

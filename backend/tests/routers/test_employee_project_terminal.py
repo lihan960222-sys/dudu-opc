@@ -44,6 +44,15 @@ async def test_owner_switch_applies_to_one_existing_employee_and_same_work_item(
         assert (await client.put(endpoint,json={"enabled":"true"})).status_code == 422
         assert (await client.put(endpoint,json={"enabled":True})).json()["enabled"] is True
         assert (await client.get(endpoint)).json()["enabled"] is True
+        external = tmp_path / "references"
+        external.mkdir()
+        access = {"enabled": True, "read_folders": [str(external)], "outbound_network": True}
+        updated = await client.put(endpoint, json=access)
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["outbound_network"] is True
+        assert (await client.put(endpoint, json={**access, "read_folders": [str(paths[1])]})).status_code == 422
+        assert (await client.put(endpoint, json={**access, "outbound_network": ["*"]})).status_code == 422
+        assert (await client.get(endpoint)).json() == updated.json()
         assert not employee_runtime.native_enabled(owner+"other",first.id)
         async with sessions() as db:
             first = await db.get(Agent, first.id)
@@ -59,12 +68,19 @@ async def test_owner_switch_applies_to_one_existing_employee_and_same_work_item(
             assert (await feature_tasks.session_for(db, owner, task, **options))[0].id == thread.id
             native = await feature_tasks.project_runtime_for(db, owner, first, thread, "accept_edits")
             assert not native.writable and native.readable_roots == ()
+            assert native.external_reads == (external,)
+            assert native.outbound_network
+            import tomllib
+            assert tomllib.loads("fs=" + native._filesystem())["fs"][str(external)] == "read"
+            assert str(external) not in tomllib.loads("fs=" + native._filesystem(check=True))["fs"]
+            assert f"permissions.{native.permission_name}.network.enabled=true" in native.cli_options()
             job = AgentJob(owner_id=owner, assignee_agent_id=first.id, requester_agent_id=peer.id,
                 requester_thread_id=thread.id, requester_turn_id=1, depth=1, brief="test", brief_hash="x",
                 mode="work", task_id=task, status="dispatched")
             db.add(job)
             await db.commit()
         assert (await client.put(endpoint,json={"enabled":False})).status_code == 409
+        assert (await client.put(endpoint,json={**access,"outbound_network":False})).status_code == 409
         assert (await client.get(endpoint)).json()["enabled"] is True
         async with sessions() as db:
             (await db.get(AgentJob,job.id)).status="completed"

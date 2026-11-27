@@ -354,6 +354,9 @@ export const en = {
   "approval.allowThisTurn": "Allow this turn",
   "approval.allow": "Allow",
   "approval.alwaysAllow": "Always allow this command",
+  "approval.employeeScope": "Remember for this employee and this project only. The exact command and target must match. You can revoke the grant in Settings → Approvals.",
+  "approval.onceOnly": "Allow once",
+  "approval.rememberEmployee": "Allow and remember",
   "approval.alwaysAllowHint": "Allow it now, and run exactly this command in this folder without asking from now on",
   "approval.deny": "Deny",
   "approval.allowedOnce": "Allowed this once only: {error}.",
@@ -529,6 +532,9 @@ export const en = {
 
 // Locale catalogs provide translated shared interface copy; any missing entry uses English.
 export type MessageKey = Exclude<keyof typeof en,
+  | "approval.employeeScope"
+  | "approval.onceOnly"
+  | "approval.rememberEmployee"
   | "channels.telegramTitle"
   | "channels.telegramDescription"
   | "channels.boatTasksTitle"

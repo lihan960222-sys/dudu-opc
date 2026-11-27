@@ -46,10 +46,10 @@ def automatic(tool, mode, team, arguments):
         if team.feature_consult and team.strict_hierarchy and not team.is_lead and team.origin == "person":
             return "allowed", "read_only_peer_workspace"
         return "denied", "outside_peer_workspace"
-    if name in ('run_project_command','read_project_text','replace_project_text'):
+    if name in ('run_project_command','list_project_files','read_project_text','replace_project_text'):
         if not team.feature_consult or not team.strict_hierarchy or team.is_lead or team.origin!='person':
             return 'denied','outside_project_command'
-        if mode == 'plan' and name == 'read_project_text':
+        if name in ('list_project_files','read_project_text'):
             return 'allowed','read_only_employee_project'
         if mode != 'ask' and not (mode == 'accept_edits' and name == 'run_project_command'):
             return 'denied','outside_project_command'

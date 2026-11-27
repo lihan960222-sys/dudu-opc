@@ -355,6 +355,14 @@ async def test_bound_private_session_restarts_in_process(tmp_path, monkeypatch):
     assert plan.status == "succeeded", plan.error
     turn = next(p for m, p in reversed(requests) if m == "turn/start")
     assert turn["environments"] == [] and turn["permissions"] == replace(project, writable=False).permission_name
+    snapshot[key] = replace(snapshot[key], source="default")
+    enabled_plan = await start(state, 12, readonly=True)
+    assert enabled_plan.status == "succeeded", enabled_plan.error
+    readonly_config = next(p for m, p in reversed(requests) if m == "thread/resume")
+    assert readonly_config["config"]["features"]["shell_tool"]
+    readonly_turn = next(p for m, p in reversed(requests) if m == "turn/start")
+    assert readonly_turn.get("environments") != []
+    assert readonly_turn["permissions"] == replace(project, writable=False).permission_name
     probe.assert_not_awaited()
 
 
@@ -442,6 +450,47 @@ def _turn(mode, **launches):
     return codex_adapter._CodexTurn(ctx=ctx, sink=None, gate=None, exe=None, codex_thread=None)
 
 
+@pytest.mark.parametrize(("method", "params", "tool"), [
+    ("item/commandExecution/requestApproval", {"command": "verify.cmd", "cwd": "C:/project",
+                                              "availableDecisions": ["accept", "cancel"]}, "Bash"),
+    ("item/fileChange/requestApproval", {"grantRoot": "C:/output"}, "apply_patch"),
+    ("item/permissions/requestApproval", {"permissions": {"network": {"enabled": True}}},
+     "codex.request_permissions"),
+])
+@pytest.mark.parametrize("answer", ["allow", "deny", "resolved"])
+async def test_employee_native_approval_resumes_only_live_request(tmp_path, monkeypatch, method, params, tool, answer):
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+
+    monkeypatch.setattr(settings, "LOCAL_TOOLS_ENABLED", True)
+    project = SimpleNamespace(writable=True, root=tmp_path)
+    turn = _turn("accept_edits", project_runtime=project, feature_workspace=str(tmp_path))
+    turn.rpc = Mock()
+    decision = asyncio.get_running_loop().create_future()
+
+    async def wait_for_decision(_handle):
+        return await decision
+
+    turn.gate = SimpleNamespace(open=AsyncMock(return_value=SimpleNamespace(tool="")),
+                                decide=wait_for_decision, cancel=AsyncMock())
+    await turn._server_request({"id": 47, "method": method, "params": params})
+    assert turn.gate.open.await_args.kwargs["tool"] == tool
+    turn.rpc.respond.assert_not_called()
+    if answer == "resolved":
+        await turn._notification({"method": "serverRequest/resolved", "params": {"requestId": 47}})
+        turn.gate.cancel.assert_awaited_once_with("codex-47")
+    decision.set_result(SimpleNamespace(kind=codex_adapter.ALLOW if answer == "allow" else "deny"))
+    await asyncio.gather(*turn.answering)
+    if answer == "resolved":
+        turn.rpc.respond.assert_not_called()
+    elif tool == "codex.request_permissions":
+        turn.rpc.respond.assert_called_once_with(47, {"scope": "turn",
+            "permissions": params["permissions"] if answer == "allow" else {}})
+    else:
+        denied = "cancel" if tool == "Bash" else "decline"
+        turn.rpc.respond.assert_called_once_with(47, {"decision": "accept" if answer == "allow" else denied})
+
+
 def test_approve_for_me_keeps_attached_apps_on_the_app_gate():
     # Codex's own reviewer would approve these calls itself and the app gate would refuse them (not_approved).
     plain = _turn("approve_for_me")
@@ -449,6 +498,21 @@ def test_approve_for_me_keeps_attached_apps_on_the_app_gate():
     for launch in ("composio_launch", "team_launch", "browser", "community_launch"):
         turn = _turn("approve_for_me", **{launch: SimpleNamespace()})
         assert turn.mode == "ask" and turn.policy.reviewer == "user", launch
+
+
+@pytest.mark.parametrize("secret", [False, True])
+async def test_experimental_user_question_uses_existing_job_clarification(secret):
+    from unittest.mock import Mock
+
+    run = _turn("ask", project_runtime=SimpleNamespace(writable=True))
+    run.rpc = Mock()
+    await run._server_request({"id":51, "method":"item/tool/requestUserInput", "params":{
+        "questions":[{"id":"scope", "question":"Which scope?", "isSecret":secret}]}})
+    run.rpc.respond.assert_called_once()
+    args, kwargs = run.rpc.respond.call_args
+    assert args == (51,) and kwargs["error"]["code"] == -32601
+    assert ("credentials" if secret else "NEEDS INPUT:") in kwargs["error"]["message"]
+    assert not run.requests
 
 
 async def test_codex_waits_for_the_exact_routine_connected_app_server(crt, sessions, codex, monkeypatch):

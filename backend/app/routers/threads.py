@@ -475,9 +475,19 @@ async def list_approvals(
 ):
     """Tool calls asked about, with the exact input each would run with. Use
     `?status=pending` for the ones waiting for an answer."""
-    await _thread_or_404(rt, thread_id)
+    thread = await _thread_or_404(rt, thread_id)
     async with rt.session() as db:
-        return await store.list_approvals(db, thread_id, status=status)
+        rows = await store.list_approvals(db, thread_id, status=status)
+    if not (thread.provider_state or {}).get("employee_project"):
+        return rows
+    results = []
+    for row in rows:
+        run = rt._runs.get(row.turn_id)
+        gate = run.gate if run else None
+        result = ApprovalResponse.model_validate(row)
+        result.employee_rememberable = bool(row.status == "pending" and gate and row.id in gate.employee_rule_keys)
+        results.append(result)
+    return results
 
 
 @router.post(
@@ -510,10 +520,21 @@ async def answer_approval(
     # A standing "always allow" rule applies to the whole workspace, so it needs its own permission.
     # Without it the answer still counts, just once.
     project_scoped = bool((target_thread.provider_state or {}).get("employee_project"))
-    may_remember = has_permission(principal, "rules") and not project_scoped
+    may_remember = has_permission(principal, "rules")
+    project_result = {}
+    if project_scoped and payload.remember:
+        # A paired gateway has no authority to create rules on its own. Only the
+        # bound owner's authenticated, quoted DM can delegate this exact operation.
+        if principal is not None and not (principal.is_admin and principal.role in (None, "owner")):
+            import asyncio
+            from app.feishu.approvals import confirmed_owner_grant
+            may_remember = (principal.kind == "device" and await asyncio.to_thread(confirmed_owner_grant,
+                rt.owner_id, approval_id, thread_id, payload.expected_turn_id,
+                payload.expected_employee_id, payload.expected_assignment_epoch))
     named = principal is not None and principal.person_id is not None
     if not await rt.answer_approval(
         approval_id, payload.decision, remember=payload.remember and may_remember,
+        **({"saved_project_rule": project_result} if project_scoped and payload.remember else {}),
         person_id=principal.person_id if named else None, person_label=principal.label if named else None,
         **({'expected_turn_id': payload.expected_turn_id} if payload.expected_turn_id is not None else {}),
         **({'expected_assignment_epoch': payload.expected_assignment_epoch, 'expected_employee_id': payload.expected_employee_id}
@@ -525,11 +546,15 @@ async def answer_approval(
     if payload.remember and payload.decision == "allow" and not may_remember:
         return ApprovalAnswerResponse(
             decision=payload.decision,
-            remember_error=("该员工项目的许可仅限这次操作。" if project_scoped else
+            remember_error=("需要老板在工作台或已绑定的飞书私聊确认长期授权。" if project_scoped else
                             "Allowed this once. Saving a standing rule needs the owner's permission."),
         )
     if not (payload.remember and payload.decision == "allow"):
         return ApprovalAnswerResponse(decision=payload.decision)
+    if project_scoped:
+        rule_id = project_result.get("id")
+        return ApprovalAnswerResponse(decision=payload.decision, rule_id=rule_id,
+            remember_error=None if rule_id else "无法固定目标或权限范围，仅允许本次。启动应用可使用已安装程序的真实路径。")
     async with rt.session() as db:
         thread = await store.get_thread(db, thread_id)
         rule, why = await approval_allowlist.remembered_rule(

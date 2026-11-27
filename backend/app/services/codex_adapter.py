@@ -688,7 +688,10 @@ class _CodexTurn:
         self.tools = bool(app_settings.get("LOCAL_TOOLS_ENABLED")) or self.computer is not None
         self.mode = self.ctx.approval_mode or "ask"
         if self.project:
-            self.tools = self.mode != "plan" and not self.scheduled_knowledge and self.project.writable and _project_tools_allowed()
+            # The active native filesystem profile enforces read-only projects.
+            # A read-only inspection still needs an execution environment.
+            profile_matches_mode = self.mode != "plan" or not self.project.writable
+            self.tools = profile_matches_mode and not self.scheduled_knowledge and _project_tools_allowed()
         has_gated_mcp = (self.ctx.team_launch is not None or self.ctx.composio_launch is not None
                          or self.ctx.browser is not None or self.ctx.community_launch is not None)
         if self.mode == "approve_for_me" and has_gated_mcp:
@@ -884,25 +887,19 @@ class _CodexTurn:
             try:
                 current = await self._call("config/read", {"includeLayers": False, "cwd": str(self.workspace)})
                 common["config"] = feature_files.turn_config(current.get("config"), self.workspace,
-                    self.tools and self.mode != "plan", consult_only=getattr(self.ctx, "consult_only", False),
+                    self.tools if self.project else self.tools and self.mode != "plan", consult_only=getattr(self.ctx, "consult_only", False),
                     peer_access=getattr(self.ctx,"peer_workspaces",None), project_runtime=self.project,
                     scheduled_knowledge=self.scheduled_knowledge)
             except (AttributeError, TypeError, ValueError, RpcError, RpcClosed, asyncio.TimeoutError):
                 return self._failed("Could not confirm scoped task tools.", "codex_error")
             if not self.project or not self.tools:
                 common["environments"] = []
-            if self.project and self.mode == "ask" and "run_project_command" in feature_team_tools(self.ctx):
-                common["config"]["features"].update(shell_tool=False, unified_exec=False)
-                note = ("Run terminal commands through team.run_project_command using an argv array and project-relative cwd. "
-                        "Each operation waits for its own review and returns the actual exit code, stdout and stderr. "
-                        "Read UTF-8 project files with team.read_project_text and edit them with team.replace_project_text. "
-                        "Use the returned SHA-256 and one unique old/new literal. Do not use shell commands for these file operations.")
+            if self.project and "list_project_files" in feature_team_tools(self.ctx):
+                note = ("For ordinary project inspections use team.list_project_files first and team.read_project_text "
+                        "for existing text. They use the assigned project directory and return read receipts.")
                 instructions = f"{instructions}\n\n{note}" if instructions else note
-            elif self.project and "read_project_text" in feature_team_tools(self.ctx):
-                note = "Use team.read_project_text to inspect one existing project text file. This task has read-only access."
-                instructions = f"{instructions}\n\n{note}" if instructions else note
-            elif self.project and "run_project_command" in feature_team_tools(self.ctx):
-                note = ("Use the native terminal and editor for ordinary work within the named project permissions. "
+            if self.project and "run_project_command" in feature_team_tools(self.ctx):
+                note = ("For other work, use the native terminal and editor within the named project permissions. "
                         "If a project check needs review, use team.run_project_command with its complete argv and relative cwd. "
                         "An unchanged check recorded by your assigning steward can run read-only. Other operations need an individual review.")
                 instructions = f"{instructions}\n\n{note}" if instructions else note
@@ -1434,7 +1431,8 @@ class _CodexTurn:
         if self.project:
             remote = (self.ctx.community_launch is not None and item.get("server") == community_mcp_bridge.SERVER
                       and item.get("tool") in self.ctx.community_tools)
-            if ((kind in {"commandExecution", "fileChange"} and self.tools and self.project.writable)
+            if ((kind == "commandExecution" and self.tools)
+                    or (kind == "fileChange" and self.tools and self.project.writable)
                     or (kind == "mcpToolCall" and (project_tool or remote))):
                 self.project_items[item_id] = item
             else:
@@ -1461,7 +1459,7 @@ class _CodexTurn:
             tool_input = {"command": full, "cwd": item.get("cwd")}
         elif kind == "fileChange":
             changes = _changes(item.get("changes"))
-            self.file_items[item_id] = changes
+            self.file_items[item_id] = item.get("changes") if self.project else changes
             name = "apply_patch"
             paths = [c["path"] for c in changes]
             summary = ("Edit " + ", ".join(paths))[:200] if paths else "Edit files"
@@ -1572,6 +1570,18 @@ class _CodexTurn:
         elif method == "mcpServer/elicitation/request":
             self.rpc.respond(rid, {"action": "decline"})
             return
+        elif method == "item/permissions/requestApproval" and project:
+            kind = "permissions"
+        elif method == "item/tool/requestUserInput" and project:
+            # Default-mode Codex keeps this experimental UI off. A client/version
+            # that emits it anyway must not receive invented user answers.
+            secret = any(isinstance(q, dict) and q.get("isSecret") for q in params.get("questions") or [])
+            guidance = ("Do not ask for credentials in chat. Report that private sign-in is required."
+                        if secret else "For a delegated job, finish this turn with NEEDS INPUT: followed by "
+                        "the business question. The steward can answer on the original job. "
+                        "This clarification cannot grant tool permissions.")
+            self.rpc.respond(rid, error={"code": -32601, "message": "Interactive input UI unavailable. " + guidance})
+            return
         elif method == "item/permissions/requestApproval":
             self.rpc.respond(rid, {"permissions": {}, "scope": "turn"})
             return
@@ -1579,12 +1589,7 @@ class _CodexTurn:
             self.rpc.respond(rid, error={"code": -32601, "message": "Not supported by this app."})
             return
 
-        if project and kind != "mcp":
-            # A native approval may request an unsandboxed retry. A supervisor's
-            # file/connector decision cannot lift the Windows employee boundary.
-            self.rpc.respond(rid, {"decision": "denied" if method in LEGACY_REQUESTS else "decline"})
-            return
-        if (self.computer is not None or self.feature) and kind != "mcp":
+        if not project and (self.computer is not None or self.feature) and kind != "mcp":
             # A command or file approval during a computer turn: Codex's own tools are on.
             self.rpc.respond(rid, {"decision": "denied" if method in LEGACY_REQUESTS else "decline"})
             self.breach = f"本轮执行范围不允许 {method}，已拒绝该请求并停止本轮执行。"
@@ -1593,10 +1598,15 @@ class _CodexTurn:
         legacy = method in LEGACY_REQUESTS
 
         def payload(allow: bool) -> dict:
+            if kind == "permissions":
+                return {"permissions": params["permissions"] if allow else {}, "scope": "turn"}
             if kind == "mcp":
                 return {"action": "accept", "content": {}} if allow else {"action": "decline"}
             if legacy:
                 return {"decision": "approved" if allow else "denied"}
+            choices = params.get("availableDecisions")
+            if not allow and isinstance(choices, list) and "decline" not in choices and "cancel" in choices:
+                return {"decision": "cancel"}
             return {"decision": "accept" if allow else "decline"}
 
         team_call = kind == "mcp" and params.get("serverName") == "team" and self.ctx.team_launch is not None
@@ -1615,7 +1625,7 @@ class _CodexTurn:
         if self.feature and getattr(self.ctx, "consult_only", False):
             self.rpc.respond(rid, payload(False))
             return
-        if project and not (team_call or community_call):
+        if project and kind == "mcp" and not (team_call or community_call):
             self.rpc.respond(rid, payload(False))
             return
         if self.feature and not project and not team_call:
@@ -1648,21 +1658,53 @@ class _CodexTurn:
                     pass
                 self.rpc.respond(rid, payload(allowed))
                 return
-        if not (team_call or composio_call or community_call or browser_call) and (not self.tools or self.mode == "plan"):
+        if not (team_call or composio_call or community_call or browser_call) and (
+                not self.tools or self.mode == "plan" and not (project and kind == "command")):
             self.rpc.respond(rid, payload(False))
             return
 
-        if kind == "command":
+        if kind == "permissions":
+            permissions = params.get("permissions")
+            if not isinstance(permissions, dict) or not permissions:
+                self.rpc.respond(rid, payload(False))
+                return
+            tool, approval_kind = "codex.request_permissions", "other"
+            tool_input = {"permissions": permissions, "cwd": str(params.get("cwd") or project.root)}
+            if isinstance(params.get("reason"), str):
+                tool_input["reason"] = params["reason"]
+            summary = "申请本轮额外权限"
+        elif kind == "command":
             full = _command_text(params)
             tool, approval_kind = "Bash", "command"
             tool_input = {"command": full}
             if isinstance(params.get("cwd"), str):
                 tool_input["cwd"] = params["cwd"]
+            if project:
+                choices = params.get("availableDecisions")
+                if (not full.strip() or not tool_input.get("cwd")
+                        or isinstance(choices, list) and "accept" not in choices):
+                    self.rpc.respond(rid, payload(False))
+                    return
+                if params.get("kind") not in (None, "command"):
+                    tool_input["kind"] = params["kind"]
+                if params.get("environmentId") not in (None, "local"):
+                    tool_input["environmentId"] = params["environmentId"]
+                for key in ("additionalPermissions", "networkApprovalContext", "reason"):
+                    if params.get(key) is not None:
+                        tool_input[key] = params[key]
+                if isinstance(params.get("command"), list):
+                    tool_input["argv"] = params["command"]
+                if self.mode == "plan" or not project.writable:
+                    from app.services.employee_approval_rules import readonly_request
+                    if not readonly_request(project, tool, tool_input):
+                        self.rpc.respond(rid, payload(False))
+                        return
             summary = _display_command(params, full)[:200]
         elif kind == "file":
-            changes = self.file_items.get(params.get("itemId")) or _changes(params.get("fileChanges"))
+            raw = self.file_items.get(params.get("itemId")) or params.get("fileChanges")
+            changes = _changes(raw)
             if (
-                self.mode == "accept_edits"
+                not project and self.mode == "accept_edits"
                 and changes
                 and not params.get("grantRoot")
                 and all(inside_workspace(c["path"], self.workspace) for c in changes)
@@ -1670,7 +1712,12 @@ class _CodexTurn:
                 self.rpc.respond(rid, payload(True))
                 return
             tool, approval_kind = "apply_patch", "file_write"
-            tool_input = {"changes": changes}
+            if project and not changes and not params.get("grantRoot"):
+                self.rpc.respond(rid, payload(False))
+                return
+            # Project approvals can authorize a write outside the default boundary.
+            # Present the full edit (including rename targets) or refuse if too large.
+            tool_input = {"changes": raw if project and raw else changes}
             if params.get("grantRoot"):
                 tool_input["grant_root"] = params["grantRoot"]
             if isinstance(params.get("reason"), str):
@@ -1695,11 +1742,11 @@ class _CodexTurn:
                     return
                 tool, approval_kind = "mcp__team__" + name, "other"
                 summary = summarize_tool(tool, tool_input)
-                if name in ('read_project_text','replace_project_text'):
+                if name in ('list_project_files','read_project_text','replace_project_text'):
                     if not project or name not in feature_team_tools(self.ctx):
                         self.rpc.respond(rid, payload(False))
                         return
-                    operation = '修改' if name == 'replace_project_text' else '读取'
+                    operation = {'list_project_files':'列出', 'read_project_text':'读取', 'replace_project_text':'修改'}[name]
                     summary = f"{operation}岗位文件 {str(tool_input.get('path',''))[:150]}"
                     approval_kind = 'file_write' if name == 'replace_project_text' else 'other'
                 if name == PROJECT_COMMAND['name']:
@@ -1788,11 +1835,11 @@ class _CodexTurn:
             decision = await self.gate.decide(handle)
         finally:
             self.clock.resume()
-        self.requests.pop(rid, None)
-        if decision.kind == LOST:
+        pending = self.requests.pop(rid, None)
+        permit_input = self.permit_inputs.pop(rid, {})
+        if pending is None or decision.kind == LOST:
             return
         allow = decision.kind == ALLOW
-        permit_input = self.permit_inputs.pop(rid, {})
         permit_target = self.computer if self.computer is not None else self.ctx.browser
         if allow and permit_target is not None and handle.tool.startswith(COMPUTER_TOOL_PREFIX):
             # The computer's MCP server runs a call only after it removes this one-use permit.

@@ -50,6 +50,8 @@ class ApprovalRuleResponse(BaseModel):
     match: Literal["exact", "prefix"]
     command: str
     workspace: str | None = None
+    employee_name: str | None = None
+    cwd: str | None = None
     created_at: datetime
 
 

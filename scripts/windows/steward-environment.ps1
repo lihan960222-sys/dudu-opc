@@ -77,11 +77,14 @@ function Initialize-StewardEnvironment {
             } catch { Write-Warning "Could not read the Windows proxy. Codex will use its normal network settings." }
         }
     }
-    if (-not $env:LOCAL_CODEX_CLI_PATH -and -not (Get-Command codex -CommandType Application -ErrorAction SilentlyContinue)) {
-        $package = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($package.InstallLocation) {
-            $bundledCli = Join-Path $package.InstallLocation "app/resources/codex.exe"
-            if ([IO.File]::Exists($bundledCli)) { $env:LOCAL_CODEX_CLI_PATH = $bundledCli }
+    $package = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($package.InstallLocation) {
+        $bundledCli = Join-Path $package.InstallLocation "app/resources/codex.exe"
+        if ([IO.File]::Exists($bundledCli)) {
+            $env:SUPARAGENT_PACKAGED_CODEX_PATH = $bundledCli
+            if (-not $env:LOCAL_CODEX_CLI_PATH -and -not (Get-Command codex -CommandType Application -ErrorAction SilentlyContinue)) {
+                $env:LOCAL_CODEX_CLI_PATH = $bundledCli
+            }
         }
     }
     $env:STEWARD_WHISPER_MODEL_DIR = Join-Path $DataDir "models/faster-whisper-tiny"

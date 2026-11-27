@@ -196,6 +196,9 @@ class ApprovalResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    # None for ordinary chats. On an employee task a live, exact match is
+    # calculated by the owning run before exposing a reusable grant.
+    employee_rememberable: bool | None = None
     turn_id: int
     # The provider's own tool name, the exact input the call will run with, and
     # a one-line label.

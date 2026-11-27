@@ -12,6 +12,7 @@ from app.team import work_verification
 from app.team.mcp_server import MAILBOX_TIMEOUT_SECONDS
 
 PEER_READ_TOOLS = ("list_peer_files", "read_peer_text")
+PROJECT_READ_TOOLS = ("list_project_files", "read_project_text")
 
 
 def allowed_tools(ctx, *, live=False):
@@ -27,14 +28,14 @@ def allowed_tools(ctx, *, live=False):
         return ()
     peer_reads = PEER_READ_TOOLS if getattr(project, "readable_roots", ()) else ()
     if ctx.approval_mode == "plan" and not project.writable:
-        return ("read_project_text", *peer_reads)
+        return (*PROJECT_READ_TOOLS, *peer_reads)
     if project.writable and ctx.approval_mode == "ask":
-        return ("run_project_command","read_project_text","replace_project_text", *peer_reads)
+        return ("run_project_command", *PROJECT_READ_TOOLS, "replace_project_text", *peer_reads)
     if project.writable and ctx.approval_mode == "accept_edits":
         # Native in-project reads and edits already work. The reviewed command
         # is available when an operation needs a specific review.
-        return ("run_project_command", *peer_reads)
-    return peer_reads
+        return ("run_project_command", *PROJECT_READ_TOOLS, *peer_reads)
+    return (*PROJECT_READ_TOOLS, *peer_reads)
 
 
 def available(ctx, *, live=False):

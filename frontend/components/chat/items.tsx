@@ -2,7 +2,9 @@
 
 import { Check, ChevronRight, Copy, GitBranch, Loader2, Reply, Square, ThumbsDown, ThumbsUp, X } from "lucide-react";
 import type { ReactionKind } from "@/lib/reactions";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { api } from "@/lib/api";
+import { canOpenWorkbench } from "@/lib/session";
 import { canAlwaysAllow, isScreenInput } from "@/lib/approvals";
 import { can } from "@/lib/permissions";
 import { isComputerTool, toolLabel } from "@/lib/computers";
@@ -370,6 +372,7 @@ export type Remembered = { ruleId: number | null; error: string | null };
 
 export function ApprovalCard({
   item,
+  threadId,
   answering,
   error,
   onAnswer,
@@ -378,6 +381,7 @@ export function ApprovalCard({
   onUndo,
 }: {
   item: Item<"approval">;
+  threadId?: number | null;
   answering: boolean;
   error: string | null;
   onAnswer: (decision: "allow" | "deny", remember?: boolean) => void;
@@ -395,7 +399,20 @@ export function ApprovalCard({
   const pending = item.status === "pending";
   // A decided card is one line; the input it was asked about is behind the arrow.
   const [open, setOpen] = useState(false);
-  const rememberable = canAlwaysAllow(item.tool, item.input);
+  const candidate = canAlwaysAllow(item.tool, item.input);
+  const [offer, setOffer] = useState<{ id: string; employee: boolean | null } | null>(null);
+  useEffect(() => {
+    if (!pending || !candidate || !threadId || !mayRemember) return;
+    let active = true;
+    api.pendingApprovalChoices(threadId).then(rows => {
+      const row = rows.find(entry => entry.id === item.approvalId);
+      if (active && row) setOffer({ id: row.id, employee: row.employee_rememberable ?? null });
+    }).catch(() => { /* One-time decisions remain available. */ });
+    return () => { active = false; };
+  }, [pending, candidate, threadId, mayRemember, item.approvalId]);
+  const scoped = offer?.id === item.approvalId ? offer : null;
+  const employeeGrant = scoped?.employee === true && canOpenWorkbench(session);
+  const rememberable = candidate && (employeeGrant || scoped?.employee === null);
   const screenInput = isScreenInput(item.tool);
   const byRule = item.resolvedBy === "saved_rule";
   const savedRuleId = remembered?.ruleId ?? (byRule ? item.ruleId : null);
@@ -497,18 +514,21 @@ export function ApprovalCard({
         <p className="text-xs text-muted">Waiting for someone who may answer commands. Ask an admin if that should be you.</p>
       )}
       {pending && mayAnswer && (
+        <>
+        {employeeGrant && <p className="text-xs text-muted">{t("approval.employeeScope")}</p>}
         <div className="flex flex-wrap gap-2">
-          <Button variant="primary" onClick={() => onAnswer("allow")} disabled={answering} title="Allow with thumbs up">
+          <Button variant={employeeGrant ? undefined : "primary"} onClick={() => onAnswer("allow")} disabled={answering}>
             <ThumbsUp size={13} className="mr-1.5 inline" aria-hidden="true" />
-            {screenInput ? t("approval.allowThisTurn") : t("approval.allow")}
+            {employeeGrant ? t("approval.onceOnly") : screenInput ? t("approval.allowThisTurn") : t("approval.allow")}
           </Button>
           {rememberable && mayRemember && (
             <Button
+              variant={employeeGrant ? "primary" : undefined}
               onClick={() => onAnswer("allow", true)}
               disabled={answering}
-              title={t("approval.alwaysAllowHint")}
+              title={t(employeeGrant ? "approval.employeeScope" : "approval.alwaysAllowHint")}
             >
-              {t("approval.alwaysAllow")}
+              {t(employeeGrant ? "approval.rememberEmployee" : "approval.alwaysAllow")}
             </Button>
           )}
           <Button onClick={() => onAnswer("deny")} disabled={answering} title="Deny with thumbs down">
@@ -516,6 +536,7 @@ export function ApprovalCard({
             {t("approval.deny")}
           </Button>
         </div>
+        </>
       )}
       {!pending && remembered?.error && <p className="text-xs text-muted">{t("approval.allowedOnce", { error: remembered.error })}</p>}
       {!pending && undone && <p className="text-xs text-muted">{t("approval.noLongerAlwaysAllowed")}</p>}

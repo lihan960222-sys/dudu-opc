@@ -315,6 +315,35 @@ async def test_lead_clarifies_question_in_place(team, sessions):
         assert len(await turns_of(sessions, job.assignee_thread_id)) == 2
     assert receipts[1]['status'] == 'queued'
 
+
+async def test_expired_business_question_cannot_restart_employee(team, sessions, monkeypatch):
+    rt, engine, lead, employee, _ = team
+    chat = await rt.create_thread(agent_id=lead.id)
+    receipts = []
+
+    async def handler(ctx, sink, gate):
+        run = rt._runs[ctx.turn_id]
+        if not receipts:
+            result = await rt.team_jobs.delegate(run, {'agent_ids':[employee.id], 'brief':'ASK about scope'})
+            receipts.append(result['receipts'][0]['job_id'])
+        elif 'which environment?' in ctx.prompt:
+            question = json.loads(ctx.prompt.split('\n')[-1])['questions'][0]
+            monkeypatch.setattr(settings, "TEAM_QUESTION_WAIT_SECONDS", 0)
+            await rt.team_jobs.expire()
+            with pytest.raises(service.TeamError, match="no longer open"):
+                await rt.team_jobs.answer_question(run, {'job_id':receipts[0],
+                    'question_turn_id':question['question_turn_id'],'answer':'staging'})
+            receipts.append('refused')
+        return TurnOutcome('succeeded', result='Noted')
+
+    engine.handlers[chat.id] = handler
+    await rt.send_turn(chat.id, 'review staging')
+    await wait_until(lambda: 'refused' in receipts)
+    async with sessions() as db:
+        job = await db.get(AgentJob, receipts[0])
+        assert job.outcome == 'expired' and job.answer is None
+        assert len(await turns_of(sessions, job.assignee_thread_id)) == 1
+
 async def test_stop_while_waiting_cancels_and_never_resumes(team, sessions):
     rt, engine, lead, one, two = team
     thread = await rt.create_thread(agent_id=lead.id)

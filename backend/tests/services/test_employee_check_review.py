@@ -114,6 +114,7 @@ async def test_command_rpc_holds_the_reviewed_script_and_records_the_narrow_prof
 
 @pytest.mark.asyncio
 async def test_real_dispatch_and_gate_bind_one_review_to_one_unchanged_check(sessions,owner,tmp_path,monkeypatch):
+    monkeypatch.setenv("FEISHU_CONFIG", str(tmp_path / "no-feishu.json"))
     import json
     from sqlalchemy import select
     from app.auth import people

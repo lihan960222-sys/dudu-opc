@@ -10,6 +10,13 @@ from app.team.jobs import Jobs
 from app.team.policy import TurnTeam, automatic
 
 
+@pytest.fixture
+def local_codex_host(tmp_path, monkeypatch):
+    # These scenarios have no Feishu account. A developer's real gateway
+    # binding and home snapshots must not affect their synthetic work orders.
+    monkeypatch.setenv("FEISHU_CONFIG", str(tmp_path / "no-feishu.json"))
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transferred", [False, True])
@@ -86,7 +93,7 @@ async def test_employee_project_consultation(sessions, owner, tmp_path, transfer
 
 @pytest.mark.skipif(__import__("sys").platform != "win32", reason="Scoped feature execution currently requires Windows")
 @pytest.mark.asyncio
-async def test_scoped_codex_asks_and_receives_peer_answer(crt, sessions, owner, codex, tmp_path, monkeypatch):
+async def test_scoped_codex_asks_and_receives_peer_answer(crt, sessions, owner, codex, tmp_path, monkeypatch, local_codex_host):
     from app.core.config import settings
     from app.services.role_workspace import initialize
     from app.db.models import AgentJobEvent, Approval, Thread, WorkItem
@@ -144,7 +151,7 @@ from tests.services.test_codex_adapter import crt, codex  # noqa: E402,F401
 
 @pytest.mark.skipif(__import__("sys").platform != "win32", reason="Windows scoped Codex")
 @pytest.mark.asyncio
-async def test_lead_native_delegate_runs_scoped_work_and_resumes(crt,sessions,owner,codex,tmp_path,monkeypatch):
+async def test_lead_native_delegate_runs_scoped_work_and_resumes(crt,sessions,owner,codex,tmp_path,monkeypatch,local_codex_host):
     from app.core.config import settings
     from app.services.role_workspace import initialize
     from app.db.models import Thread
@@ -369,7 +376,7 @@ async def test_steward_employee_modes_and_legacy_overlaps(sessions,owner,tmp_pat
 
 @pytest.mark.skipif(__import__("sys").platform != "win32",reason="Windows scoped Codex")
 @pytest.mark.asyncio
-async def test_missing_scoped_file_rechecks_once_and_reports_blocker(crt,sessions,owner,codex,tmp_path,monkeypatch):
+async def test_missing_scoped_file_rechecks_once_and_reports_blocker(crt,sessions,owner,codex,tmp_path,monkeypatch,local_codex_host):
     from app.core.config import settings
     from app.services.role_workspace import initialize
     from app.db.models import AgentJobEvent

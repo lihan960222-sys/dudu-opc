@@ -741,11 +741,15 @@ class Jobs:
                     raise service.TeamError('invalid_input', 'job_id must be a number.')
                 query = query.where(AgentJob.id == identifier)
             rows = list((await db.execute(query.order_by(AgentJob.id.desc()).limit(20))).scalars())
+            from app.services.employee_approval_history import pending_for_jobs
+            pending = await pending_for_jobs(db, self.rt.owner_id, rows)
         if identifier is not None and not rows:
             raise service.TeamError('job_not_found', 'No job with that id.')
         if any(r.requester_turn_id == run.turn_id for r in rows) and identifier is not None:
             raise service.TeamError('same_turn', 'End your turn: you are resumed with this result when it is ready.')
-        return {'jobs': [{'job_id': r.id, 'agent_id': r.assignee_agent_id, 'status': r.status, 'outcome': r.outcome, 'question_turn_id':r.assignee_turn_id if r.question else None, 'question': fence.text(r.question or '', 2000) or None,
+        return {'jobs': [{'job_id': r.id, 'task_id': r.task_id, 'agent_id': r.assignee_agent_id, 'status': r.status,
+                          'pending_approvals': pending.get(r.id, []),
+                          'outcome': r.outcome, 'question_turn_id':r.assignee_turn_id if r.question else None, 'question': fence.text(r.question or '', 2000) or None,
                           'result': fence.text(r.result or '') if r.status in TERMINAL and r.requester_turn_id != run.turn_id else None} for r in rows if r.requester_turn_id != run.turn_id]}
 
     async def _deliver_to_holder(self, db, job, kind):

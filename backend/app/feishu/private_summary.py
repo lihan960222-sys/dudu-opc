@@ -28,11 +28,9 @@ def executable():
     raw=(os.getenv('LOCAL_CODEX_CLI_PATH') or settings.LOCAL_CODEX_CLI_PATH or '').strip() or shutil.which('codex.exe')
     if os.name!='nt' or not raw:
         raise ValueError('未找到可验证的 Windows Codex 客户端。')
-    path=Path(raw).resolve(strict=True)
-    root=Path(os.environ['ProgramFiles'])/'WindowsApps'
-    if (not path.is_relative_to(root.resolve()) or len(path.relative_to(root.resolve()).parts)!=4 or not
-            re.fullmatch(r'OpenAI\.Codex_[\w.\-]+__2p2nqsd0c76g0',path.relative_to(root.resolve()).parts[0]) or
-            tuple(p.lower() for p in path.parts[-3:])!=('app','resources','codex.exe')):
+    from app.core.codex_installation import store_codex_executable
+    path=store_codex_executable(raw)
+    if path is None:
         raise ValueError('当前 Codex 程序未通过官方 Windows 安装位置校验。')
     return path
 

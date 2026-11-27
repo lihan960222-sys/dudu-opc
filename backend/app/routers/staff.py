@@ -50,6 +50,8 @@ class StaffingGrant(BaseModel):
 
 class ProjectTerminalSetting(BaseModel):
     enabled: StrictBool
+    read_folders: list[str] | None = Field(None, max_length=32)
+    outbound_network: StrictBool | None = None
 
     model_config = {"extra": "forbid"}
 
@@ -71,10 +73,11 @@ async def project_terminal_status(agent_id: int, rt: ThreadRuntime = Depends(get
     async with rt.session() as db:
         await _terminal_employee(db, rt.owner_id, agent_id)
     try:
-        enabled = employee_runtime.native_enabled(rt.owner_id, agent_id)
+        choice = employee_runtime.terminal_settings(rt.owner_id, agent_id)
     except (ValueError, OSError) as exc:
         raise HTTPException(409, str(exc)) from None
-    return JSONResponse({"enabled": enabled}, headers={"Cache-Control": "no-store"})
+    return JSONResponse({"enabled": choice.enabled, "read_folders": choice.read_folders,
+                         "outbound_network": choice.outbound_network}, headers={"Cache-Control": "no-store"})
 
 
 @router.put("/{agent_id}/project-terminal", dependencies=[Depends(signed_in_owner_browser)])
@@ -86,8 +89,11 @@ async def set_project_terminal(agent_id: int, choice: ProjectTerminalSetting, rt
         # Dispatch uses the same team lock. An accepted job keeps its execution mode until it ends.
         agent = await _terminal_employee(db, rt.owner_id, agent_id, lock=True)
         try:
-            current = employee_runtime.native_enabled(rt.owner_id, agent_id)
-            if current != choice.enabled:
+            current = employee_runtime.terminal_settings(rt.owner_id, agent_id)
+            updated = employee_runtime.TerminalSettings(choice.enabled,
+                current.read_folders if choice.read_folders is None else tuple(dict.fromkeys(p.strip() for p in choice.read_folders)),
+                current.outbound_network if choice.outbound_network is None else choice.outbound_network)
+            if current != updated:
                 job = await db.scalar(select(AgentJob.id).where(AgentJob.owner_id == rt.owner_id,
                     AgentJob.assignee_agent_id == agent_id, AgentJob.kind == "job", AgentJob.mode == "work",
                     AgentJob.task_id.is_not(None), AgentJob.status.in_((*LIVE, "dispatched"))).limit(1))
@@ -102,11 +108,15 @@ async def set_project_terminal(agent_id: int, choice: ProjectTerminalSetting, rt
                 root = role_workspace.checked_root(Path(agent.role_path))
                 role_workspace.load(root, agent.model)
                 await feature_tasks.check_employee_root(db, rt.owner_id, agent, root, enabling=True)
-            employee_runtime.save_native_enabled(rt.owner_id, agent_id, choice.enabled)
+            if updated.read_folders and (updated.enabled or updated.read_folders != current.read_folders):
+                from app.services import team_workspaces
+                directory = await team_workspaces.load(db, None)
+                updated.validate(directory.protected_roots)
+            employee_runtime.save_terminal_settings(rt.owner_id, agent_id, updated)
         except (ValueError, OSError) as exc:
             raise HTTPException(422, str(exc)) from None
         await db.commit()
-    return {"enabled": choice.enabled}
+    return {"enabled": updated.enabled, "read_folders": updated.read_folders, "outbound_network": updated.outbound_network}
 
 
 @router.patch("/{agent_id}/staffing", dependencies=[Depends(owner_browser)])

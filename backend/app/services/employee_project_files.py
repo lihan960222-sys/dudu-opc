@@ -16,10 +16,7 @@ def _target(project, name):
     parts = PureWindowsPath(name).parts
     if not parts or workspace_files.is_secret(parts):
         raise ValueError("该文件不可用于岗位文本操作。")
-    files = feature_files.FeatureFiles(project.task_dir, writable=False)
-    if files.role != project.root:
-        raise ValueError("当前工单与岗位目录不匹配。")
-    target = files.path("role", name)
+    target = _inspection_path(project.root, name, own=True)
     if not target.is_file():
         raise ValueError("岗位文本操作只接受已有的普通文件。")
     return target
@@ -98,10 +95,17 @@ def read(project, args):
             "sha256":hashlib.sha256(data).hexdigest()}
 
 
-def inspect_peer(root, name, *, listing, limit=workspace_files.LIST_MAX_ENTRIES, folders_only=False):
+def _inspection_path(root, name, *, own):
+    parts = PureWindowsPath(name).parts
+    if own and parts and parts[0] == "任务":
+        raise ValueError("员工的历史任务目录不可用于项目盘点。")
+    return feature_files.checked_relative(root, name)
+
+
+def inspect_workspace(root, name, *, listing, limit=workspace_files.LIST_MAX_ENTRIES, folders_only=False, own=False):
     if not isinstance(name, str) or len(name) > 400 or workspace_files.is_secret(PureWindowsPath(name).parts):
-        raise ValueError("请使用同事岗位目录内的相对路径。")
-    target = feature_files.checked_relative(root, name)
+        raise ValueError("请使用岗位目录内的相对路径。")
+    target = _inspection_path(root, name, own=own)
     relative = target.relative_to(root).as_posix()
     if not listing:
         with pinned_parent(root, target):
@@ -117,7 +121,7 @@ def inspect_peer(root, name, *, listing, limit=workspace_files.LIST_MAX_ENTRIES,
             if workspace_files.is_secret(child.relative_to(root).parts):
                 continue
             try:
-                feature_files.checked_relative(target, child.name)
+                _inspection_path(root, child.relative_to(root), own=own)
                 folder = child.is_dir()
                 if not folder and (folders_only or not child.is_file()):
                     continue
@@ -136,6 +140,9 @@ def edit(project, args, *, storage):
             or any(not isinstance(args[k], str) or "\x00" in args[k] or len(args[k]) > 4096 for k in ("old", "new"))
             or not args["old"] or args["old"] == args["new"]):
         raise ValueError("需要一处可以核对的文本替换。")
+    files = feature_files.FeatureFiles(project.task_dir, writable=False)
+    if files.role != project.root:
+        raise ValueError("当前工单与岗位目录不匹配。")
     path = _target(project, args["path"])
     with pinned_parent(project.root, path) as parent_fd:
         data, info = _contents(project.root, path)

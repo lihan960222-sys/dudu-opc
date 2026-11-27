@@ -119,10 +119,13 @@ PROJECT_COMMAND = {'name':'run_project_command',
     'inputSchema':schema({'argv':{'type':'array','minItems':1,'maxItems':128,'items':string(8192)},'cwd':string(400)},('argv',))}
 
 PROJECT_FILES = [
-    {'name':'read_project_text', 'description':'Read a single existing UTF-8 project file after review. Returns its text and SHA-256.',
+    {'name':'read_project_text', 'description':'Read an existing UTF-8 file up to 64 KiB in your own assigned project. Returns its text and SHA-256.',
      'inputSchema':schema({'path': string(400)}, ('path',))},
     {'name':'replace_project_text', 'description':'Replace one unique literal in a previously read UTF-8 project file. Supply the SHA-256 from the read. Preserves other bytes.',
      'inputSchema':schema({'path':string(400),'sha256':string(64),'old':string(4096),'new':string(4096)}, ('path','sha256','old','new'))},
+    {'name':'list_project_files', 'description':'List one folder in your own assigned project. Use an empty path for its root, folders_only for folders, and limit for a bounded sample. Returns names, types and truncated.',
+     'inputSchema':schema({'path':string(400), 'limit':{'type':'integer','minimum':1,'maximum':500},
+                           'folders_only':{'type':'boolean'}})},
 ]
 
 PEER_FILES = [
@@ -176,7 +179,7 @@ class Server:
             if project_command:
                 self.tools.append(PROJECT_COMMAND)
             if project_read:
-                self.tools.append(PROJECT_FILES[0])
+                self.tools.extend(t for t in PROJECT_FILES if t['name'] != 'replace_project_text')
             if project_edit:
                 self.tools.append(PROJECT_FILES[1])
             if peer_files:
