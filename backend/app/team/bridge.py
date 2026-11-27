@@ -403,6 +403,8 @@ class TeamBridge:
             return await steward_review.decide(rt,run,args)
         if name == 'answer_job_question':
             return await rt.team_jobs.answer_question(run, args)
+        if name == 'manage_job':
+            return await rt.team_jobs.manage_job(run, args)
         if name == 'job_status':
             return await rt.team_jobs.job_status(run, args)
         if name == 'retry_thread':

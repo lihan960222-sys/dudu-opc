@@ -117,3 +117,16 @@ async def test_steward_receipt_carries_the_original_request_only_to_its_own_thre
         assert json.loads(result.rsplit("\n", 1)[1])["owner_request"] == original
         holder.assignee_thread_id = other.id
         assert original not in await jobs._resume_text(db, holder, [])
+
+def test_job_management_only_for_stewards_direct_owner_turn(tmp_path):
+    from dataclasses import replace
+    from app.team.mcp_server import Server
+    from app.team.policy import TurnTeam, automatic
+    lead = TurnTeam(1, 2, True, False, strict_hierarchy=True)
+    tool = "mcp__team__manage_job"
+    assert "manage_job" in {t["name"] for t in Server(tmp_path, steward=True).tools}
+    assert "manage_job" not in {t["name"] for t in Server(tmp_path).tools}
+    assert automatic(tool, "ask", lead, {})[0] == "allowed"
+    for team in (replace(lead, origin="harness"), replace(lead, is_lead=False)):
+        assert automatic(tool, "ask", team, {})[0] == "denied"
+    assert automatic(tool, "plan", lead, {})[0] == "denied"

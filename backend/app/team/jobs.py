@@ -740,6 +740,80 @@ class Jobs:
         self.kick()
         return {'job_id':identifier, 'status':'queued'}
 
+    async def manage_job(self, run, args):
+        """Manage the current owner's earlier employee assignments from the lead's live chat."""
+        from app.services import feature_tasks, work_planner
+        from app.team.steward_review import _owner_channel_request
+        from app.db.models import Person, WorkColumn, WorkItem
+        action, identifier = args.get("action"), args.get("job_id")
+        bulk = args.get("all") is True
+        if (action not in ("stop", "archive", "complete") or
+                (bulk and (action != "stop" or identifier is not None)) or
+                (not bulk and type(identifier) is not int)):
+            raise service.TeamError("invalid_input", "请选择要管理的任务。")
+        owner = self.rt.owner_id
+        async with self.rt.session() as db:
+            team = await service.team_for(db, owner)
+            turn = await db.get(Turn, run.turn_id)
+            if (not team or run.agent_id != team.lead_agent_id or not run.ctx.team
+                    or run.ctx.team.team_id != team.id or run.ctx.approval_mode == "plan"
+                    or not turn or turn.thread_id != run.thread_id or turn.status != "running"
+                    or turn.owner_token != run.owner_token):
+                raise service.TeamError("steward_only", "请从管家当前的对话管理任务。")
+            thread = await db.get(Thread, run.thread_id)
+            person = await db.get(Person, turn.person_id) if turn.person_id else None
+            if (turn.origin not in (None, "person") or not thread or thread.kind != "chat"
+                    or thread.owner_id != owner or thread.agent_id != run.agent_id or thread.job_id or thread.room_id
+                    or not ((person and person.role == "owner" and person.status == "active")
+                            or (not turn.person_id and await _owner_channel_request(db, owner, thread, turn)))):
+                raise service.TeamError("owner_required", "需要老板从管家私聊或工作台发起。")
+            managed = select(AgentJob).join(Agent, Agent.id == AgentJob.assignee_agent_id).where(
+                AgentJob.owner_id == owner, Agent.owner_id == owner, Agent.team_id == team.id,
+                AgentJob.kind == "job", AgentJob.requester_turn_id != turn.id)
+            rows = list(await db.scalars(managed.where(
+                AgentJob.status.in_(LIVE) if bulk else AgentJob.id == identifier)))
+            if not bulk and not rows:
+                raise service.TeamError("job_not_found", "找不到可管理的派工。")
+            if action != "stop":
+                row = rows[0]
+                if not row.task_id or row.mode != "work" or not await feature_tasks.assignment_current(db, row):
+                    raise service.TeamError("outside_scope", "该派工没有当前任务卡。")
+            ids = [row.id for row in rows]
+            # Stop old requester loops as well on an explicit team-wide stop, so queued
+            # reports cannot wake a steward and start another round of work.
+            roots = list(await db.scalars(select(AgentJob.id).where(
+                AgentJob.owner_id == owner, AgentJob.kind == "root", AgentJob.requester_agent_id == run.agent_id,
+                AgentJob.status.in_(LIVE), AgentJob.requester_turn_id != turn.id,
+                or_(AgentJob.current_turn_id.is_(None), AgentJob.current_turn_id != turn.id)))) if bulk else []
+        if action != "complete":
+            for job_id in dict.fromkeys([*roots, *ids]):
+                await self.cancel(job_id)
+        async with self.rt.session() as db:
+            await begin_write(db)
+            summary = [{"job_id": row.id, "task_id": row.task_id, "status": row.status}
+                       for row in await db.scalars(select(AgentJob).where(
+                           AgentJob.id.in_(ids), AgentJob.owner_id == owner))]
+            if action == "stop":
+                return {"action": action, "jobs": summary}
+            row = await db.get(AgentJob, identifier)
+            if not await feature_tasks.assignment_current(db, row, lock=True):
+                raise service.TeamError("outside_scope", "任务已重新分配。")
+            latest = await db.scalar(select(AgentJob.id).where(AgentJob.owner_id == owner,
+                AgentJob.task_id == row.task_id, AgentJob.kind == "job", AgentJob.mode == "work").order_by(AgentJob.id.desc()).limit(1))
+            if latest != row.id or row.status not in TERMINAL or (action == "complete" and row.status != "completed"):
+                raise service.TeamError("unfinished", "仅可归档当前已停止的任务，或将已成功交付的任务标为完成。")
+            item = await db.get(WorkItem, row.task_id)
+            if action == "archive":
+                changes = {} if item.archived else {"archived": True}
+            else:
+                done = await db.scalar(select(WorkColumn.id).where(WorkColumn.board_id == item.board_id, WorkColumn.key == "done"))
+                if not done:
+                    raise service.TeamError("missing_column", "看板缺少完成列。")
+                changes = {} if item.completed_at else {"column_id": done}
+            if changes:
+                item = await work_planner.update_item(db, owner, item.id, item.revision, changes)
+            return {"action": action, "jobs": summary, "archived": item.archived, "completed": bool(item.completed_at)}
+
     async def job_status(self, run, args):
         """Read-only view of earlier hand-offs. Jobs from this turn are refused:
         polling them is what ending the turn replaces."""
@@ -759,7 +833,7 @@ class Jobs:
             raise service.TeamError('same_turn', 'End your turn: you are resumed with this result when it is ready.')
         return {'jobs': [{'job_id': r.id, 'task_id': r.task_id, 'agent_id': r.assignee_agent_id, 'status': r.status,
                           'pending_approvals': pending.get(r.id, []),
-                          'outcome': r.outcome, 'question_turn_id':r.assignee_turn_id if r.question else None, 'question': fence.text(r.question or '', 2000) or None,
+                          'outcome': ('paused_no_live_approval' if r.outcome == 'awaiting_native_review' and not pending.get(r.id) and not r.current_turn_id else r.outcome), 'question_turn_id':r.assignee_turn_id if r.question else None, 'question': fence.text(r.question or '', 2000) or None,
                           'result': fence.text(r.result or '') if r.status in TERMINAL and r.requester_turn_id != run.turn_id else None} for r in rows if r.requester_turn_id != run.turn_id]}
 
     async def _deliver_to_holder(self, db, job, kind):

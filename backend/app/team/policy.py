@@ -104,6 +104,10 @@ def automatic(tool, mode, team, arguments):
         return 'denied', 'outside_consult_scope'
     if team.strict_hierarchy and not team.is_lead and name in ('ask_agent', 'delegate', 'say_in_room'):
         return 'denied', 'steward_only'
+    if name == 'manage_job':
+        if team.strict_hierarchy and team.is_lead and team.origin == 'person' and team.delegation_enabled and mode != 'plan':
+            return 'allowed', 'owner_task_management'
+        return 'denied', 'outside_task_management'
     if name == 'review_employee_write':
         if team.strict_hierarchy and team.is_lead and team.delegation_enabled and team.origin == 'person' and mode != 'plan':
             return 'allowed', 'steward_review'

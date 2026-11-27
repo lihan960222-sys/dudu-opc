@@ -753,7 +753,9 @@ async def list_threads(db, owner, caller_id):
             continue
         opener, assignee = await db.get(Agent, job.requester_agent_id), await db.get(Agent, job.assignee_agent_id)
         state = await thread_state(db, thread)
-        if state == 'waiting_on_person' and not pending.get(job.id):
+        if job.outcome == 'awaiting_native_review' and not pending.get(job.id) and not job.current_turn_id:
+            state = 'paused_no_live_approval'
+        elif state == 'waiting_on_person' and not pending.get(job.id):
             state = 'idle' if job.status in ('completed', 'failed', 'cancelled') else 'running'
         rows.append({'thread_id': thread.id, 'title': fence.line(thread.title or f'Job {job.id}'), 'agent': fence.line(assignee.name) if assignee else None,
                      'opened_by': fence.line(opener.name) if opener else None, 'job_id': job.id, 'task_id': job.task_id,

@@ -180,6 +180,10 @@ class Server:
         self.tools = [t for t in TOOLS if escalations or t['name'] not in OPTIONAL]
         if steward:
             self.tools.append(SHARED_RELEASE)
+            self.tools.append({"name": "manage_job",
+                "description": "At the owner's request stop, archive or complete a job. Use job_id from job_status, or all=true only for stop. Never mark unfinished work delivered. Report the returned state.",
+                "inputSchema": schema({"job_id": {"type": "integer"}, "all": {"type": "boolean"},
+                                       "action": {"enum": ["stop", "archive", "complete"], "type": "string"}}, ("action",))})
             from copy import deepcopy
             self.tools = [deepcopy(t) if t["name"] == "delegate" else t for t in self.tools if t["name"] != "ask_agent"]
             delegate = next(t for t in self.tools if t["name"] == "delegate")
