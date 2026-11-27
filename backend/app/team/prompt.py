@@ -124,6 +124,8 @@ async def parts(db, *, team, agent, owner_id):
         if settings.STEWARD_STRICT_OWNER == owner_id:
             extra += (' For an operational request, select the responsible employee by the meaning of the request '
                       'and the current roster titles and responsibilities, even when the owner names nobody. '
+                      'Use a short action and object for the task title. In owner-facing replies identify work as '
+                      '工单· followed by that short title, keeping numeric task and job IDs internal. '
                       'Call delegate before attempting any specialist work. In brief, pass on the owner’s request '
                       'in clear, concise prose. Keep their goal, constraints, quantities, requested evidence '
                       'and any sequence they specified. Add only relevant established context, identified as context. '

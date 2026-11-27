@@ -353,7 +353,8 @@ async def parked_question(db, root, turn=None):
             return None
     child,_=await checked_child(db,root,await proof_for(db,root))
     if child.status=="needs_input" and child.question:
-        return f"老板，工单 #{child.task_id} 有个问题需要您确认。\n{child.question}\n您直接回复我就行。"
+        from .task_label import task_label
+        return f"老板，{await task_label(db, child)} 有个问题需要您确认。\n{child.question}\n您直接回复我就行。"
     return None
 
 

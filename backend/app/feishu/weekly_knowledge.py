@@ -376,8 +376,8 @@ async def tick(worker):
             receipt=await evidence(db,job,PUBLISH,expected_url=url)
             verified = (grant.enabled and slot.scope_digest == digest([grant.generation, grant.scope]) and
                         job.status == "completed" and job.assignee_agent_id==slot.employee_id and receipt.result)
-            body = {"text":(f"老板，我核对了工单 #{job.task_id} 的更新回执，本周的知识库在这里。\n{url}" if verified else
-                            f"老板，工单 #{job.task_id} 本周的知识库更新，我还没核实。{(job.outcome_detail or '')[:130]}")}
+            body = {"text":(f"老板，我核对了工单·每周更新知识库 的更新回执，本周的知识库在这里。\n{url}" if verified else
+                            f"老板，工单·每周更新知识库 的结果，我还没核实。{(job.outcome_detail or '')[:130]}")}
             original = await db.get(AgentJob, grant.source_job_id)
             target = await original_message(db, worker, original)
             if target:

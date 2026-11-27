@@ -407,7 +407,7 @@ class Worker:
             else:
                 from app.services.steward_reply import turn_status
                 if last_approval_status == "expired":
-                    report = f"老板，工单 #{task} 本轮已停止。最后一项操作的审批已过期，系统没有放行，交付结果尚未核实。"
+                    report = "老板，这项任务本轮已停止。最后一项操作的审批已过期，系统没有放行，交付结果尚未核实。"
                 else:
                     report = turn_status(turn['status'], turn.get('error') or turn.get('result')) + f"\n任务 #{task}"
             final = enqueue(self.db,task,'steward',{'text':report})

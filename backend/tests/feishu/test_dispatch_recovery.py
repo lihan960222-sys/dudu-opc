@@ -453,7 +453,8 @@ async def test_current_employee_write_can_be_reviewed_or_sent_to_original_dm(set
                 assert first["state"]=="deny_only" and "synthetic-hidden-value" not in body["text"]
             else:
                 assert "results.txt" in body["text"] and "确认" in body["text"]
-                assert body["approval_display"]["title"] == f"{worker.name} · 工单 #{task}"
+                assert body["approval_display"]["title"].startswith(f"{worker.name} · 工单·")
+                assert f"#{task}" not in body["approval_display"]["title"]
             assert first["assignment_epoch"]==1 and first["agent_id"]==employee
             with journal:
                 journal.execute("update outbox set state='sent',remote='approval-message' where id=?",(first["outgoing"],))

@@ -121,7 +121,7 @@ def notify(worker, execution, task):
             # The native dispatch collector verifies the employee and current assignment.
             # A legacy inbox execution cannot authorize or bind a native project request.
             continue
-        queue_notice(db, execution, task, approval, f"任务 #{task}")
+        queue_notice(db, execution, task, approval, "当前任务")
 
 
 _LOG_QUERY = re.compile(
@@ -353,7 +353,8 @@ async def collect_team_requests(worker):
                         (worker.cfg["steward"].get("app_id"), original.requester_thread_id, original.requester_turn_id)).fetchone()
                     if origin and origin[0]:
                         execution["source_message"] = origin[0]
-            reference = f"工单 #{job.task_id}" if job.task_id else f"派工 #{job.id}"
+            from .task_label import task_label
+            reference = await task_label(db, job)
             queue_notice(worker.db, execution, job.task_id, item, f"{agent.name} · {reference}")
 
 
