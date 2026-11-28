@@ -4,7 +4,21 @@
 
 [启动与配置](docs/STEWARD_WINDOWS_ZH.md) · [飞书接入与个人授权](docs/FEISHU.md) · [写飞书文档](docs/FEISHU_DOCUMENTS_ZH.md) · [功能与验收清单](docs/OPC_REQUIREMENTS_ZH.md)
 
-本项目基于 Suparagent 开发。以下保留上游的功能和安装说明。[上游项目](https://github.com/Anil-matcha/suparagent) · [Apache 2.0 许可证](LICENSE)
+## 从哪里开始
+
+1. 在家中的 Windows 电脑上启动 Dudu。打开工作台，为管家和员工设置模型、工作目录和岗位说明。
+2. 在飞书私聊管家，用平时说话的方式交代任务。员工在自己的项目里执行，管家跟进进度，需要您决定时再发起审批。
+3. 回到飞书收结果，或在工作台查看员工会话和执行记录。关闭网页后，只要家中电脑联网、后台服务仍在运行，飞书就能继续使用。
+
+## Windows 员工环境
+
+员工使用主机的 Windows 用户目录和工具搜索路径，各自保存 Codex 登录和会话。可编辑岗位可以读写已开放的软件配置和缓存。飞书私聊和云文档另按员工授权。
+
+部分 Windows 软件会读取 `LOCALAPPDATA`。受限进程直接启动软件时，这个路径可能被 Windows 改写。已验证从员工 PowerShell 恢复该变量后，子进程能继承真实路径。专业软件能否正常启动还需分别验证。[员工环境与缓存配置](docs/STEWARD_WINDOWS_ZH.md#员工使用家中电脑的软件环境)
+
+## 上游 Suparagent
+
+以下是上游的功能、下载和安装说明。部署 Dudu OPC 请使用本页顶部的中文启动指南。[上游项目](https://github.com/Anil-matcha/suparagent) · [Apache 2.0 许可证](LICENSE)
 
 **A workspace for AI coworkers.**
 
