@@ -67,3 +67,18 @@ Tailscale Serve 只给已获准访问的私网设备提供入口。[Tailscale Se
 在仓库根目录运行 `backend\.venv\Scripts\python.exe scripts\windows\install-local-whisper.py`，安装约 78.2 MB 的多语言 Whisper Tiny 模型。安装程序从固定版本下载四个文件并逐一校验 SHA-256，保存在当前 Windows 账户的 `%LOCALAPPDATA%\SuparagentSteward\models\faster-whisper-tiny`。再次运行会校验已有文件。模型使用 MIT 许可。[模型来源](https://huggingface.co/Systran/faster-whisper-tiny/tree/d90ca5fe260221311c53c58e660288d3deb8d356)
 
 通过 Windows 启动器运行管家后，管理页和飞书语音都使用本机模型。首次转写会将模型载入内存。PyAV 在本机解码音频，转写使用 CPU，无需安装 CUDA、ffmpeg 或 ffprobe 命令行工具。转写文字会交给当前聊天使用，可能出现人名、数字或方言识别错误。视频的抽帧处理独立于语音转写。
+## 员工使用家中电脑的软件环境
+
+员工在 Windows 本地项目里运行命令时，使用后台所属 Windows 用户的用户目录和 Roaming AppData。命令按后台进程 PATH 中绝对目录的原有顺序查找，岗位登记的工具目录补在末尾。桌面 Codex 单次会话临时加入的工具路径可能只在那个进程中可见。
+
+Windows 会在创建受限进程时再次改写 `LOCALAPPDATA`。员工启动需要桌面配置的软件时，会收到一条 PowerShell 执行说明，在启动前运行 `$env:LOCALAPPDATA=$env:DUDU_WINDOWS_LOCALAPPDATA`。随后启动的子进程也能继承这个值。直接启动可执行文件、略过这一步，仍可能看到隔离目录。通过 Windows 系统接口自行定位配置的软件还需单独核对。
+
+员工的 Codex 登录、会话数据库和任务临时文件仍各自存放。打开已有工单会接续原会话。可编辑岗位可以读写已信任的软件设置和缓存，只读岗位只能读取。Omniverse 的用户数据目录和 NVIDIA 图形缓存已列入。Windows AppData 整体、Dudu 后台资料和其他员工的登录库不会随之开放。
+
+如果其他软件也需要写入自己的数据目录，可在后台数据库旁新建 `trusted-app-folders.json`（默认在 `%LOCALAPPDATA%\SuparagentSteward`）。内容为 JSON 数组，每项填一个位于 Local 或 Roaming AppData 内的应用专属目录绝对路径。例如 Windows 用户为 `lihan` 时，可写为：
+
+```json
+["C:/Users/lihan/AppData/Local/ExampleApp/Cache", "C:/Users/lihan/AppData/Roaming/ExampleApp/Settings"]
+```
+
+这些目录供本机员工共用，配置在后续执行中读取。请只填应用确实需要的目录。

@@ -283,7 +283,7 @@ def test_workstation_profiles_keep_host_and_project_writes_separate(tmp_path, mo
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows workstation shell settings")
-def test_employee_desktop_shell_uses_own_appdata_and_machine_installations(tmp_path, monkeypatch):
+def test_employee_desktop_shell_inherits_windows_profile_and_keeps_codex_private(tmp_path, monkeypatch):
     import tomllib
     from dataclasses import replace
 
@@ -294,8 +294,11 @@ def test_employee_desktop_shell_uses_own_appdata_and_machine_installations(tmp_p
     tools.mkdir(parents=True)
     monkeypatch.setenv("PROGRAMFILES", str(tools.parent))
     monkeypatch.setenv("USERPROFILE", str(user))
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(user / "AppData" / "Local"))
     monkeypatch.setenv("APPDATA", str(user / "AppData" / "Roaming"))
-    monkeypatch.setenv("PATH", os.pathsep.join([str(tools), ".", str(project.root)]))
+    personal = user / "my-tools"
+    monkeypatch.setenv("PATH", os.pathsep.join([str(personal), str(tools), "."]))
     monkeypatch.setenv("CODEX_HOME", str(user / ".codex"))
     monkeypatch.setenv("OPENAI_API_KEY", "never-pass-to-shell")
 
@@ -304,16 +307,21 @@ def test_employee_desktop_shell_uses_own_appdata_and_machine_installations(tmp_p
         return tomllib.loads("\n".join(options))["shell_environment_policy"]["set"]
 
     shell = shell_settings(desktop)
-    assert shell["HOME"] == shell["USERPROFILE"] == str(desktop.desktop_home)
-    assert Path(shell["APPDATA"]).is_relative_to(desktop.desktop_home)
-    assert Path(shell["LOCALAPPDATA"]).is_dir()
+    assert shell["HOME"] == shell["USERPROFILE"] == str(user)
+    assert shell["APPDATA"] == os.environ["APPDATA"] and shell["LOCALAPPDATA"] == os.environ["LOCALAPPDATA"]
+    assert shell["DUDU_WINDOWS_LOCALAPPDATA"] == os.environ["LOCALAPPDATA"]
+    custom = Path(shell["APPDATA"]) / "DesignApp"
+    import json
+    (settings.SQLITE_FILE.parent / "trusted-app-folders.json").write_text(json.dumps([str(custom)]))
     fs = tomllib.loads("fs=" + desktop._filesystem())["fs"]
-    assert fs[str(desktop.desktop_home)] == "write"
+    assert fs[str(custom)] == fs[str(Path(shell["LOCALAPPDATA"]) / "ov")] == "write"
+    assert fs[shell["APPDATA"]] == "deny"
     assert fs[str(desktop.profile.parents[3])] == "deny"
-    assert desktop.desktop_home == replace(desktop, task_id=42).desktop_home
-    assert desktop.desktop_home != replace(desktop, employee_id=8, profile_path=None).desktop_home
+    assert desktop.profile == replace(desktop, task_id=42).profile
+    assert desktop.profile != replace(desktop, employee_id=8, profile_path=None).profile
     readonly = replace(desktop, writable=False)
-    assert tomllib.loads("fs=" + readonly._filesystem())["fs"][str(desktop.desktop_home)] == "read"
+    assert tomllib.loads("fs=" + readonly._filesystem())["fs"][str(custom)] == "read"
+    assert shell["PATH"].split(os.pathsep)[:2] == [str(personal), str(tools)]
     assert shell["CODEX_HOME"] == shell["CODEX_SQLITE_HOME"] == str(desktop.profile)
     assert shell["TEMP"] == str(desktop.scratch)
     assert str(tools) in shell["PATH"].split(os.pathsep)

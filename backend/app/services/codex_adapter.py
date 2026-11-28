@@ -932,6 +932,12 @@ class _CodexTurn:
                         "For a colleague's directory, look up its registered path in team.employee_capabilities. "
                         "When requesting approval explain in the owner's language what you want to do, "
                         "what it affects and why the task needs it.")
+                if getattr(self.project, "local_workstation", False) and os.name == "nt" and self.tools:
+                    note += (" Run Windows project commands and applications in the desktop environment. In PowerShell "
+                             "start commands that use desktop application settings with "
+                             "$env:LOCALAPPDATA=$env:DUDU_WINDOWS_LOCALAPPDATA; before launching the application. "
+                             "This restores the desktop LocalAppData after Windows "
+                             "creates the isolated process. It changes no permissions.")
                 if common["config"]["features"]["request_permissions_tool"]:
                     note += (" Start with the project's existing permissions. For a single command requiring specific "
                              "extra access, use with_additional_permissions and give only its required paths or network "

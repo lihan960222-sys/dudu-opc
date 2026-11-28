@@ -404,37 +404,42 @@ class ProjectRuntime:
             _private_directory(self.scratch)
         return env
 
-    @property
-    def desktop_home(self) -> Path:
-        # Application preferences must never share a writable parent with the Codex login.
-        return self.profile / "desktop-user"
-
     def _workstation_shell_environment(self) -> dict[str, str]:
-        """Give installed desktop software an employee-owned Windows user profile."""
-        home = _private_directory(self.desktop_home)
-        roaming = _private_directory(home / "AppData" / "Roaming")
-        local = _private_directory(home / "AppData" / "Local")
-        env = {"HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(roaming),
-               "LOCALAPPDATA": str(local), "CODEX_HOME": str(self.profile), "CODEX_SQLITE_HOME": str(self.profile)}
-        directories = [exe.parent for _, exe, _ in self.installed_tools]
-        system_root = os.environ.get("SYSTEMROOT")
-        if system_root:
-            directories.extend((Path(system_root) / "System32", Path(system_root)))
-        # Machine installations only. Never add a project, relative PATH entry or personal bin directory.
-        machine_roots = tuple(Path(value).resolve() for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "SYSTEMROOT")
-                              if (value := os.environ.get(key)) and Path(value).is_absolute())
-        project_roots = (self.root, *self.employee_folders, *self.readable_roots)
-        for raw in os.environ.get("PATH", "").split(os.pathsep):
-            path = Path(os.path.normpath(raw.strip('"')))
-            if (any(path.is_relative_to(root) for root in machine_roots)
-                    and not any(path.is_relative_to(root) for root in project_roots)):
-                try:
-                    if path.is_dir() and path == path.resolve():
-                        directories.append(path)
-                except (ValueError, OSError):
-                    continue
-        env["PATH"] = os.pathsep.join(map(str, dict.fromkeys(directories)))
+        """Expose the interactive user's Windows application environment to project commands."""
+        keys = ("USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA",
+                "PROGRAMDATA", "ALLUSERSPROFILE", "PUBLIC", "PATHEXT")
+        env = {key: os.environ[key] for key in keys if os.environ.get(key)}
+        env["HOME"] = os.environ.get("HOME") or env.get("USERPROFILE") or str(Path.home())
+        env["CODEX_HOME"] = env["CODEX_SQLITE_HOME"] = str(self.profile)
+        if "LOCALAPPDATA" in env:
+            env["DUDU_WINDOWS_LOCALAPPDATA"] = env["LOCALAPPDATA"]
+        paths = [entry for entry in os.get_exec_path() if Path(entry.strip('"')).is_absolute()]
+        paths.extend(str(exe.parent) for _, exe, _ in self.installed_tools)
+        env["PATH"] = os.pathsep.join(dict.fromkeys(paths))
         return env
+
+    def desktop_app_folders(self):
+        """Trusted app data is shared by workstation employees; the backend owns this setting."""
+        folders = [Path.home() / ".nvidia-omniverse"]
+        for key in ("LOCALAPPDATA", "APPDATA"):
+            if os.environ.get(key):
+                root = Path(os.environ[key])
+                folders.extend((root / "ov", root / "NVIDIA" / "Omniverse"))
+                if key == "LOCALAPPDATA":
+                    folders.extend(root / "NVIDIA" / name for name in ("DXCache", "GLCache", "ComputeCache"))
+        config = settings.SQLITE_FILE.resolve().parent / "trusted-app-folders.json"
+        if config.is_file():
+            extra = json.loads(config.read_text(encoding="utf-8-sig"))
+            if not isinstance(extra, list) or not all(isinstance(item, str) for item in extra):
+                raise BoundaryUnavailable("trusted-app-folders.json must list absolute application data directories.")
+            for item in extra:
+                path = Path(item)
+                if not any(path != root and path.is_relative_to(root) for root in self.application_data_roots()[1:]):
+                    raise BoundaryUnavailable("Trusted application folders must be inside Local or Roaming AppData.")
+                folders.append(path)
+        protected = (settings.SQLITE_FILE.resolve().parent, _service_root(), self.profile.parents[3])
+        return tuple(path for path in folders if path.is_absolute() and path.resolve() == path
+                     and not any(path.is_relative_to(p) or p.is_relative_to(path) for p in protected))
 
     def _binding_paths(self, backend_thread_id: int) -> tuple[Path, Path]:
         if type(backend_thread_id) is not int or backend_thread_id < 1:
@@ -529,14 +534,24 @@ class ProjectRuntime:
         if self.local_workstation:
             if not check:
                 fs[":root"] = "read"
-                private = self.private_read_roots() + self.application_data_roots()
-                fs.update({str(p): "deny" for p in private})
+                private = self.private_read_roots()
+                app_data = self.application_data_roots()
+                fs.update({str(p): "deny" for p in (*private, *app_data)})
                 fs.update({str(p): "deny" for p in self.employee_folders
                            if p != self.root and p not in self.readable_roots})
                 fs.update({str(p): "deny" for p in self.peer_control_paths()})
                 fs[str(self.scratch)] = "write"
                 if os.name == "nt":
-                    fs[str(self.desktop_home)] = "write" if self.writable else "read"
+                    for folder in self.desktop_app_folders():
+                        fs[str(folder)] = "write" if self.writable else "read"
+                    # A PATH entry inside the otherwise private AppData tree must be readable
+                    # for Windows to resolve a user-installed executable.
+                    for entry in os.get_exec_path():
+                        directory = Path(entry.strip('"'))
+                        if (any(directory != root and directory.is_relative_to(root) for root in app_data[1:])
+                                and directory.is_absolute() and directory.resolve() == directory
+                                and not any(directory.is_relative_to(p) or p.is_relative_to(directory) for p in private)):
+                            fs.setdefault(str(directory), "read")
                 fs[str(self.root / "任务")] = "read"
                 if self.writable:
                     fs[str(self.task_dir)] = "write"
